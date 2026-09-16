@@ -24,6 +24,18 @@
 | 11 | `autoclaw` 的 `--profile` 必须排在子命令 `agent` 之前；默认 `~/.openclaw/openclaw.json` 是无效 stub | 前缀 `['--profile','autoclaw','agent']`；配置无效时按前缀给出可读诊断（两种文案都有测试） |
 | 12 | gateway/connect 模式 v1 未实现 | 抛明确"未实现"，不静默降级成 local（否则会污染用户的 GUI 会话） |
 
+## codex（`codex exec --json`，实测 codex-cli 0.154.0）
+
+| # | 坑 | 防御 |
+|---|---|---|
+| 16 | **位置参数给了 prompt，codex 仍然读 stdin；stdin 管道不关就永久阻塞**。实测：25s 零行输出；同一命令 `< /dev/null` 几秒完成 | spawn 后**立刻 `stdin.end()`**，不写任何 prompt 帧。这是 claude 规则（保持 stdin 打开以自动批准 `control_request`）的**反面**，两个 driver 的策略不能互相照抄 |
+| 17 | **`turn.failed{error:{message}}` 才是终态失败事件**，计划里没有它；`error{message}` 只是重试播报（实测连发 5 条后放弃） | 终态由 `turn.completed` / `turn.failed` / 退出码共同决定；`error` 帧只记录、不终结 |
+| 18 | 工具调用不是顶层事件，而是 `item.started` / `item.updated` / `item.completed` 包一个 `item` | 解析器按 `item.type` 分发（`agent_message` / `reasoning` / `command_execution` / `file_change` / `mcp_tool_call` / …），**未映射的 item 类型只记 log，绝不致命** |
+| 19 | **`-c model_providers.OpenAI.base_url=...` 被拒**：`model_providers contains reserved built-in provider IDs: openai` | 必须自定义 provider id 并选中：`-c 'model_providers.stub.name="Stub"' -c 'model_providers.stub.base_url="http://127.0.0.1:PORT"' -c 'model_providers.stub.wire_api="responses"' -c 'model_provider="stub"'`；且 `-c` 的值按 **TOML** 解析，字符串要带引号 |
+| 20 | **`codex exec resume` 不接受 `-C/--cd` 与 `-s/--sandbox`** | 传任一个 clap 直接拒绝整条命令；resume 的 argv 必须省掉这两项（cwd 由 spawn 决定） |
+| 21 | `reasoning_output_tokens` 是 `output_tokens` 的**子集** | 计入 `outputTokens` 会重复计数，丢掉又等于否认它推理过 → ABI v2 新增 `AgentUsage.reasoningTokens` 只作**披露**，任何求和都不得累加它 |
+| 22 | 0.154 把 MCP 工具藏在 **client 执行的 `tool_search`** 之后 | headless `codex exec` 没有 client，MCP 工具不会出现在 `tools[]`，**无法脚本化调用** → `mcp_tool_call` 那条 fixture 明确标为 DERIVED（文件名 + `CODEX-PROVENANCE.md`），不冒充抓包 |
+
 ## 跨 driver 通用规则
 
 | # | 规则 | 说明 |
