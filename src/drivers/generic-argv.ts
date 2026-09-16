@@ -50,7 +50,6 @@ import {
   errorText,
   event,
   filterCustomArgs,
-  filterLaunchPrefix,
   readLines,
   resolveRuntime,
   type BlockedArgs,
@@ -102,9 +101,22 @@ export interface GenericArgOptions {
 /**
  * Per-run argv. Deliberately tiny: the caller's `argsPrefix` supplies whatever
  * the specific CLI needs, the driver supplies only the flags it manages.
+ *
+ * The prefix is passed through VERBATIM, unlike the launch prefixes of the
+ * other three drivers. multica's `filterLaunchPrefix` exists because its daemon
+ * builds the protocol flags itself (`buildQwenArgs` sets
+ * `--output-format stream-json`), so a duplicate in `fixed_args` would be a
+ * conflict. Here the identity descriptor is the only place that knows a
+ * long-tail CLI's protocol flags — `--output-format stream-json` for a
+ * qwen-like CLI is exactly what makes its stdin prompt mode work — so dropping
+ * them would leave the driver unable to invoke anything at all.
+ *
+ * Ordering already supplies the protection filtering would: the prefix comes
+ * first and the driver's own flags come after it, so every supported CLI's
+ * last-wins parsing gives the driver the final say on `--model` and resume.
  */
 export function buildGenericArgs(opts: GenericArgOptions, logger?: BridgeLogger): string[] {
-  const args = filterLaunchPrefix(opts.argsPrefix, GENERIC_BLOCKED_ARGS, logger)
+  const args: string[] = opts.argsPrefix === undefined ? [] : [...opts.argsPrefix]
   if (opts.model !== undefined && opts.model !== '') {
     args.push('--model', opts.model)
   }

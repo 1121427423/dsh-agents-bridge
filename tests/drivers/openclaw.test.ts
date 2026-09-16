@@ -457,6 +457,28 @@ describe('run() over a fake child', () => {
     child.finish(1)
     const result = await handle.done
     expect(result.status).toBe('failed')
+    // multica keeps processOutput's own verdict here: a non-zero exit does not
+    // replace "nothing parsed", because the exit code is a *consequence* of the
+    // same failure and the canonical string is what alerts grep for.
+    expect(result.error).toBe(OPENCLAW_NO_PARSEABLE_OUTPUT)
+  })
+
+  it('reports a non-zero exit when the stream did parse cleanly', async () => {
+    const child = new FakeChild()
+    const deps = makeDeps()
+    const backend = createBackendWithRuntime('openclaw', deps, {
+      spawn: () => child,
+      now: () => 0,
+    })
+    const handle = await backend.run(
+      { agent: 'openclaw', prompt: 'hi' },
+      deps,
+      new AbortController().signal,
+    )
+    child.emit(OPENCLAW_EVENTS)
+    child.finish(1)
+    const result = await handle.done
+    expect(result.status).toBe('failed')
     expect(result.error).toMatch(/openclaw exited with error: exit status 1/)
   })
 

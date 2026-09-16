@@ -108,12 +108,14 @@ describe('buildGenericArgs', () => {
     expect(GENERIC_BLOCKED_ARGS['-p']).toBe('withValue')
   })
 
-  it('drops a protocol flag smuggled into the identity prefix', () => {
+  it('passes the identity prefix through verbatim, since it carries the CLI protocol', () => {
     const args = buildGenericArgs({
-      argsPrefix: ['--output-format', 'text', '--sandbox'],
+      argsPrefix: ['--output-format', 'stream-json', '--sandbox'],
       model: 'm',
     })
-    expect(args).toEqual(['--sandbox', '--model', 'm'])
+    expect(args).toEqual(['--output-format', 'stream-json', '--sandbox', '--model', 'm'])
+    // The driver's own flags come last, so last-wins parsing keeps them decisive.
+    expect(args.indexOf('--model')).toBeGreaterThan(args.indexOf('--sandbox'))
   })
 
   it('honours a configured resume flag and disables resume when it is empty', () => {
