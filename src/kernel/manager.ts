@@ -36,6 +36,7 @@ import { createRegistry, type AgentRegistry, type ResolvedIdentity } from './reg
 import { createAgentSession, type AgentSession, type SessionCompletion } from './session.ts'
 import { createSessionStore, type StoredSession } from './store.ts'
 import { createWatchdog, type Watchdog } from './watchdog.ts'
+import type { ScanOptions } from '../tracks/desktop/scan.ts'
 
 /**
  * How often the manager copies newly produced events out of the driver's
@@ -103,12 +104,27 @@ function clampIndex(value: number, max: number): number {
   return Math.min(Math.floor(value), max)
 }
 
-export function createAgentManager(options: ManagerOptions): AgentManager {
+/**
+ * `ManagerOptions` plus the desktop-scan knob.
+ *
+ * `scan` is declared HERE rather than in `types.ts` on purpose: `types.ts` is
+ * the frozen ABI *leaf* (it imports nothing), and naming `ScanOptions` there
+ * would make the ABI depend on a track implementation. The field is additive
+ * and optional, so every existing caller — and the ABI itself — is unchanged;
+ * an embedder (or a test) that wants probing off the host's installed apps
+ * passes `scan: false` or an explicit `scan: { roots: [...] }`.
+ */
+export type ManagerCreateOptions = ManagerOptions & {
+  readonly scan?: false | ScanOptions
+}
+
+export function createAgentManager(options: ManagerCreateOptions): AgentManager {
   const logger = options.logger
   const registry: AgentRegistry = createRegistry({
     logger: childLogger(logger, 'registry'),
     overrides: options.overrides,
     extraDescriptors: options.extraDescriptors,
+    ...(options.scan === undefined ? {} : { scan: options.scan }),
   })
   const store = createSessionStore({
     dir: options.storeDir,

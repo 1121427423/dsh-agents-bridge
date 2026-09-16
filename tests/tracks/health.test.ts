@@ -204,7 +204,9 @@ describe('openclaw-shaped configs', () => {
 
 describe('credentialStatusFor: identity plans', () => {
   it('never looks for a token on the desktop track', () => {
-    for (const id of ['workbuddy', 'autoclaw', 'mimo']) {
+    // `workbuddy-ai` is included on purpose: the international build is a
+    // separate identity with its own home, and the rule is the same for it.
+    for (const id of ['workbuddy', 'workbuddy-ai', 'autoclaw', 'mimo']) {
       const fragment = credentialStatusFor(id, {
         home: HOME,
         // Not even reachable: a desktop login is not a file.
@@ -214,6 +216,36 @@ describe('credentialStatusFor: identity plans', () => {
       expect(fragment.configPath).toBeUndefined()
       expect(fragment.detail).toContain('login')
     }
+  })
+
+  it('never reads ~/.workbuddy-ai/security/**, for any identity', () => {
+    // The P3 acceptance item, asserted directly rather than by inspection.
+    // `~/.workbuddy-ai/security/` really exists on the target machine (holding
+    // UUID-named credential directories), and it is NOT a file the bridge has
+    // any business opening: the desktop build's auth is the app's own login.
+    //
+    // Any read at all is a failure, so the reader is a tripwire that records
+    // every path it is asked for and throws for the whole tree.
+    const touched: string[] = []
+    const tripwire = (absolutePath: string): string => {
+      touched.push(absolutePath)
+      if (absolutePath.includes('/security/') || absolutePath.endsWith('/security')) {
+        throw new Error(`the bridge must not read ${absolutePath}`)
+      }
+      throw new Error('the desktop track reads no file at all')
+    }
+    for (const id of ['workbuddy-ai', 'workbuddy', 'autoclaw', 'mimo']) {
+      const fragment = credentialStatusFor(id, { home: HOME, readFile: tripwire })
+      expect(fragment.credential).toBe('not-applicable')
+      // The whole point: no path was even attempted.
+      expect(touched).toEqual([])
+    }
+    // And the plan's detail names the international login explicitly, so the
+    // probe line explains WHY there is nothing to look for.
+    const fragment = credentialStatusFor('workbuddy-ai', { home: HOME })
+    expect(fragment.credential).toBe('not-applicable')
+    expect(fragment.detail).toContain('www.workbuddy.ai')
+    expect(fragment.detail).toContain('no token file exists and none is read')
   })
 
   it('answers unknown (not missing) when no reader is registered', () => {
@@ -280,6 +312,7 @@ describe('credentialStatusFor: identity plans', () => {
       'codebuddy-code',
       'openclaw',
       'workbuddy',
+      'workbuddy-ai',
       'autoclaw',
       'mimo',
       'generic',
@@ -299,6 +332,10 @@ describe('credentialStatusFor: identity plans', () => {
     expect(health.launch).toBe('ok')
     expect(health.credential).toBe('not-applicable')
     expect(typeof health.detail).toBe('string')
+
+    const international = healthFor('workbuddy-ai', 'ok')
+    expect(international.launch).toBe('ok')
+    expect(international.credential).toBe('not-applicable')
   })
 
   it('leaks no fixture secret for ANY identity', () => {
@@ -307,7 +344,17 @@ describe('credentialStatusFor: identity plans', () => {
       [CODEX_PATH]: JSON.stringify({ OPENAI_API_KEY: FAKE_KEY, tokens: { access_token: FAKE_JWT } }),
       [OPENCLAW_PATH]: JSON.stringify({ apiKey: FAKE_KEY, models: { providers: { zai: { apiKey: FAKE_JWT } } } }),
     }
-    for (const id of ['claude', 'codex', 'codebuddy-code', 'openclaw', 'workbuddy', 'autoclaw', 'mimo', 'generic']) {
+    for (const id of [
+      'claude',
+      'codex',
+      'codebuddy-code',
+      'openclaw',
+      'workbuddy',
+      'workbuddy-ai',
+      'autoclaw',
+      'mimo',
+      'generic',
+    ]) {
       const serialized = JSON.stringify(credentialStatusFor(id, { home: HOME, contents }))
       expect(serialized).not.toContain(FAKE_KEY)
       expect(serialized).not.toContain(FAKE_JWT)

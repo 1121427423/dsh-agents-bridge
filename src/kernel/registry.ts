@@ -33,6 +33,21 @@ import { childLogger } from './logger.ts'
 import { BUILTIN_DESCRIPTORS, policyFor, type TrackPolicyOptions } from '../tracks/index.ts'
 import { credentialStatusFor, type CredentialReaderOptions } from '../tracks/health.ts'
 import { modelFieldsFor, modelsFor, type ModelReaderOptions } from '../tracks/models.ts'
+import {
+  mergeScannedIdentities,
+  scanDesktopBundles,
+  shadowedSummary,
+  type DesktopScanResult,
+  type ScanOptions,
+} from '../tracks/desktop/scan.ts'
+import {
+  defaultPortExpectations,
+  portNote,
+  probePorts,
+  type Connector,
+  type PortExpectation,
+  type PortFinding,
+} from '../tracks/desktop/port-probe.ts'
 
 /**
  * Re-exported for embedders that already import this module: the descriptor
@@ -99,6 +114,21 @@ export interface RegistryOptions {
    * output is host-independent. Readers never see a credential VALUE leave.
    */
   readonly hostOptions?: CredentialReaderOptions & ModelReaderOptions
+  /**
+   * App-bundle scan (P3). `false` disables it entirely; an object tunes it
+   * (roots, budget, injectable directory reader). Enabled by default so a
+   * machine whose bundles live outside the built-in table is still covered.
+   */
+  readonly scan?: false | ScanOptions
+  /**
+   * Loopback port fingerprinting (P3). Defaults to `defaultPortExpectations()`,
+   * which is empty — no port is asserted without a verified host fact.
+   */
+  readonly portExpectations?: readonly PortExpectation[]
+  /** Set to `false` to skip the port sweep entirely. */
+  readonly portProbe?: boolean
+  /** Injectable connector, so tests fingerprint without opening a socket. */
+  readonly portConnector?: Connector
 }
 
 export interface AgentRegistry {
@@ -109,6 +139,12 @@ export interface AgentRegistry {
   /** Probe every identity; `refresh: true` bypasses the TTL cache. */
   probe(opts?: { readonly refresh?: boolean }): Promise<readonly ProbeResult[]>
   invalidate(): void
+  /**
+   * One-line summary of what the app-bundle scan found (identities added,
+   * bundles shadowed by a built-in, or a budget that ran out). `undefined`
+   * until the first `probe()`, and when the scan had nothing to report.
+   */
+  scanDiagnostics(): string | undefined
 }
 
 /* ------------------------------------------------------------------ paths */
@@ -271,6 +307,22 @@ function mergeDescriptors(
   return [...table.values()]
 }
 
+/**
+ * Fold scan results into the descriptor table the registry will use.
+ *
+ * Built-in wins by construction: `mergeScannedIdentities` never lets a scanned
+ * identity replace a built-in id, so a descriptor carrying host-verified facts
+ * (the exact launcher path, `--profile autoclaw`, MiMo's `unsupported`
+ * boundary) can never be weakened by a heuristic scan of the same bundle.
+ */
+function mergeScan(
+  base: readonly AgentDescriptor[],
+  scan: DesktopScanResult,
+): { readonly descriptors: readonly AgentDescriptor[]; readonly shadowed: string | undefined } {
+  const merged = mergeScannedIdentities(base, scan.identities)
+  return { descriptors: merged.descriptors, shadowed: shadowedSummary(merged.shadowed) }
+}
+
 function upperPrefix(descriptor: AgentDescriptor): string | undefined {
   const prefix = descriptor.envPrefix
   if (!prefix) return undefined
@@ -302,11 +354,53 @@ export function createRegistry(options: RegistryOptions = {}): AgentRegistry {
   const descriptors = mergeDescriptors(options.overrides, options.extraDescriptors)
   const byId = new Map<AgentId, AgentDescriptor>(descriptors.map((d) => [d.id, d]))
 
+  /**
+   * Scan state. The bundle scan is a real filesystem walk, so it is NOT run at
+   * construction: `createRegistry` is called during plugin apply, and a model
+   * that never calls `agents_probe` must not pay for it. Instead the scan runs
+   * once, lazily, on the first `probe()` after the cache is cold, and its result
+   * is memoised for the lifetime of the registry — a scan is about which bundles
+   * are INSTALLED, which does not change on a 60-second TTL.
+   */
+  const scanEnabled = options.scan !== false
+  const scanOptions: ScanOptions = options.scan === false ? {} : (options.scan ?? {})
+  const portExpectations = options.portExpectations ?? defaultPortExpectations()
+  const portProbeEnabled = options.portProbe !== false && portExpectations.length > 0
+  let scanState: { readonly descriptors: readonly AgentDescriptor[]; readonly shadowed: string | undefined } | undefined
+  let scanNote: string | undefined
+  let portFindings: readonly PortFinding[] = []
+
+  /** Memoised probe results, served for `ttlMs` after the last fresh pass. */
   let cache: readonly ProbeResult[] | undefined
   let cachedAt = 0
 
+  /** Resolve the table this probe run should use, running the scan at most once. */
+  function effectiveDescriptors(refresh: boolean): readonly AgentDescriptor[] {
+    if (!scanEnabled) return descriptors
+    if (refresh) scanState = undefined
+    if (scanState !== undefined) return scanState.descriptors
+    const scan = scanDesktopBundles(scanOptions)
+    const merged = mergeScan(descriptors, scan)
+    scanState = merged
+    const notes: string[] = []
+    if (merged.shadowed !== undefined) notes.push(merged.shadowed)
+    if (scan.budgetExhausted) {
+      notes.push(`[scan] wall-clock budget exhausted after ${scan.elapsedMs}ms; some bundles were not examined`)
+    }
+    if (merged.descriptors.length > descriptors.length) {
+      const added = merged.descriptors.slice(descriptors.length).map((descriptor) => descriptor.id)
+      notes.push(`[scan] added ${added.length} identity(ies) the built-in table does not name: ${added.join(', ')}`)
+    }
+    scanNote = notes.length > 0 ? notes.join(' ') : undefined
+    return scanState.descriptors
+  }
+
+  function tableFor(id: AgentId): AgentDescriptor | undefined {
+    return scanState?.descriptors.find((descriptor) => descriptor.id === id) ?? byId.get(id)
+  }
+
   function resolve(id: AgentId): ResolvedIdentity {
-    const descriptor = byId.get(id)
+    const descriptor = tableFor(id)
     if (!descriptor) {
       return {
         descriptor: { id, track: 'cli', family: 'generic', displayName: id, command: { executable: id } },
@@ -379,12 +473,19 @@ export function createRegistry(options: RegistryOptions = {}): AgentRegistry {
 
   async function probeOne(descriptor: AgentDescriptor): Promise<ProbeResult> {
     const resolved = resolve(descriptor.id)
+    // Ports are swept once per probe run, before any identity is assembled, so
+    // a fingerprint can be attached without each `probeOne` opening a socket.
+    const portEvidence = portFindings.filter((finding) => finding.agentId === descriptor.id)
+    const scannedPortNote = portNote(portEvidence)
+    const baseNotes = descriptor.notes
+    const combinedNotes =
+      scannedPortNote === undefined ? baseNotes : baseNotes === undefined ? scannedPortNote : `${baseNotes} ${scannedPortNote}`
     const identity = {
       id: descriptor.id,
       displayName: descriptor.displayName,
       track: descriptor.track,
       family: descriptor.family,
-      ...(descriptor.notes !== undefined ? { notes: descriptor.notes } : {}),
+      ...(combinedNotes !== undefined ? { notes: combinedNotes } : {}),
     }
     const capabilities = descriptor.capabilities
     // Model discovery is independent of launchability: an engine whose binary is
@@ -425,24 +526,48 @@ export function createRegistry(options: RegistryOptions = {}): AgentRegistry {
   }
 
   return {
-    descriptors,
-    get: (id) => byId.get(id),
+    get descriptors() {
+      // The scan is part of "what this host has", so it is reflected here too —
+      // but only once something has asked for it (see `effectiveDescriptors`).
+      return scanState?.descriptors ?? descriptors
+    },
+    get: (id) => tableFor(id),
     resolve,
     async probe(opts) {
       const refresh = opts?.refresh === true
       const at = now()
       if (!refresh && cache !== undefined && at - cachedAt < ttlMs) return cache
-      const results = await Promise.all(descriptors.map((descriptor) => probeOne(descriptor)))
+      // The bundle scan runs before the (possibly longer) identity list is
+      // assembled, so the table is complete for this pass.
+      const table = effectiveDescriptors(refresh)
+      if (portProbeEnabled) {
+        try {
+          const sweep = await probePorts({
+            expectations: portExpectations,
+            ...(options.portConnector !== undefined ? { connect: options.portConnector } : {}),
+          })
+          portFindings = sweep.findings
+        } catch {
+          // A fingerprint is corroboration only; failing to obtain it must not
+          // be able to fail the probe.
+          portFindings = []
+        }
+      }
+      const results = await Promise.all(table.map((descriptor) => probeOne(descriptor)))
       cache = results
       cachedAt = now()
       logger?.debug('probed agent identities', {
         agents: results.map((r) => `${r.id}:${r.available ? 'available' : 'unavailable'}`),
+        ...(scanNote !== undefined ? { scan: scanNote } : {}),
       })
       return results
     },
     invalidate() {
       cache = undefined
       cachedAt = 0
+    },
+    scanDiagnostics() {
+      return scanNote
     },
   }
 }

@@ -14,6 +14,7 @@
  */
 
 import { mkdtempSync } from 'node:fs'
+import fs from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -24,6 +25,7 @@ import { createBackend } from '../../src/drivers/index.ts'
 import { installDriverRuntime } from '../../src/integrate.ts'
 import { createLogger } from '../../src/kernel/logger.ts'
 import { createAgentManager } from '../../src/kernel/manager.ts'
+import { BUILTIN_DESCRIPTORS } from '../../src/kernel/registry.ts'
 import type { AgentDescriptor, AgentManager, SessionSnapshot } from '../../src/kernel/types.ts'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -41,6 +43,13 @@ const live: AgentManager[] = []
  * `mergeDescriptors` merges `command` per-field, so overriding executable +
  * argsPrefix is enough — the driver still appends its own dialect flags, which
  * the fake CLI ignores.
+ *
+ * `scan: false` keeps this suite off the host: since P3 the desktop track
+ * auto-scans `/Applications` on the first cold `probe()`, and this suite DOES
+ * probe (`manager.probe()` below). Without it the test would read whatever the
+ * developer happens to have installed, and its result count would differ per
+ * machine. The scan's own behaviour is covered in tests/tracks/scan.test.ts
+ * against tmp-dir fixtures.
  */
 function makeManager(script: string): AgentManager {
   installDriverRuntime()
@@ -53,6 +62,7 @@ function makeManager(script: string): AgentManager {
     defaultCwd: tmpdir(),
     overrides: { claude: override, workbuddy: override, openclaw: override, autoclaw: override },
     createBackend,
+    scan: false,
   })
   live.push(manager)
   return manager
@@ -160,5 +170,34 @@ describe('agents pipeline (kernel + drivers + adapter)', () => {
     const claude = results.find((entry) => entry.id === 'claude')
     expect(claude).toBeDefined()
     expect(claude?.family).toBe('claude')
+  })
+
+  it('probes without reading the host: scan: false walks nothing', async () => {
+    // The hermeticity PROOF for this suite, and it is DELIBERATELY written
+    // against the filesystem syscall rather than against the result count.
+    //
+    // A count-based assertion is not enough: this host's `/Applications` holds
+    // bundles that shadow onto ids the built-in table ALREADY has (WorkBuddy,
+    // AutoClaw), so a leaked scan can leave the id list looking identical and
+    // the leak would go unnoticed. Patching `fs.readdirSync` and asserting the
+    // scan touches NOTHING is deterministic on every machine.
+    const hostReads: string[] = []
+    const realReaddir = fs.readdirSync
+    const spy = (target: fs.PathLike, ...rest: unknown[]): string[] => {
+      const asString = String(target)
+      if (asString === '/Applications' || asString === '/Applications/') hostReads.push(asString)
+      return (realReaddir as (...args: unknown[]) => string[])(target, ...rest)
+    }
+    ;(fs as unknown as { readdirSync: typeof spy }).readdirSync = spy
+    let results: Awaited<ReturnType<AgentManager['probe']>>
+    try {
+      const manager = makeManager(FAKE_CLI)
+      results = await manager.probe()
+    } finally {
+      ;(fs as unknown as { readdirSync: typeof realReaddir }).readdirSync = realReaddir
+    }
+    expect(hostReads).toEqual([])
+    // And the redundant belt-and-braces check that nothing was appended.
+    expect(results.map((entry) => entry.id).sort()).toEqual([...BUILTIN_DESCRIPTORS.map((d) => d.id)].sort())
   })
 })
