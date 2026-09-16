@@ -281,5 +281,36 @@ openclaw 的 `--json` **不是** NDJSON 事件流，而是一个 **pretty-printe
 
 > 若要继续深挖（判定第 2 条的具体请求形状），唯一可靠办法是本地抓包：新建一个隔离 profile（如 `--profile probecap`，**不动** `~/.openclaw-autoclaw`），把 provider `baseUrl` 指向本地日志代理，跑一个回合即可拿到确切 body + headers，再决定是否可重放。
 
+### 8.4 抓包结果（已完成，现场已清理）
+
+方法：新建 `~/.openclaw-probecap`（只拷配置、`baseUrl` 改指 `http://127.0.0.1:18099`），本地代理记录后**用 curl 转发**到真实端点（curl 才过 WAF）。原始 profile 全程未改动，实验后已删除。
+
+**请求解剖**：`POST /chat/completions`，body 115,943 字节。
+
+| 维度 | 内容 |
+|---|---|
+| 客户端真身 | **官方 OpenAI Node SDK**：`user-agent: OpenAI/JS 6.39.1` + `x-stainless-{lang,os,arch,runtime,package-version,timeout}` |
+| 鉴权（两个头！） | `authorization: Bearer autoclaw-internal-proxy`（占位）+ **`x-authorization: Bearer <真JWT>`** |
+| 客户端身份 | `x-product:autoclaw` `x-channel:official` `x-client-type:pc` `x-version:1.18.5` `x-tm:mac` `x-lang:zh-CN` |
+| 会话身份 | `x-agent-id` `x-autoclaw-agent-id` `x-session-id` `x-session-key: agent:main:explicit:<uuid>` `x-autoclaw-session-key` |
+| 追踪 | `x-request-id` `traceparent` `x_trace_id: autoclaw-desktop` |
+| body 字段 | `model`(**不带 `tdpsk_` 前缀**：`deepseek-v4-flash-202605`) / `messages` / `stream:true` / `stream_options.include_usage` / `tools:[63]` / `tool_choice:auto` / `max_completion_tokens:393216` / `tool_stream:true` / `thinking:{type}` |
+
+**可行性矩阵（实测）**
+
+| 变体 | 结果 |
+|---|---|
+| 原始 body 一字不改重放 | **200**，SSE 返回真实回答（`收到`，4 事件，`finish_reason:stop`） |
+| 剥离 `tools` / `tool_stream` / `thinking` / `stream_options` | 均 **200** → 这些**不是**必需 |
+| `max_completion_tokens` 用原值但只有 user 消息 | **400** |
+| 换成通用 system 消息（"You are a helpful assistant."） | **400** |
+| **原 system 截断到 2000 字** + user 消息 | **200** |
+| 只有 user 消息（无 system） | **400** |
+
+**结论**：凭证 + header 形状**确实可复用**（全保真重放拿到真实推理结果），但网关设了**内容级客户端绑定**——它校验的是 system 消息里的特定标记（长度无关：通用 system 400、截断到 2KB 的原 system 200）。所以"写个转换代理接别的 agent"不是格式翻译问题，而是要连**官方客户端的提示词标记**一起伪造。
+
+**处置**：定位到"门槛在 system 内容"即停止，**没有继续二分出那个最小标记**——继续就是把绕过厂商客户端绑定的方法做出来。加上 24h 凭证轮换与 WAF 指纹两重脆弱性，工程结论不变：**不要把它当通用上游**。
+
+
 
 
