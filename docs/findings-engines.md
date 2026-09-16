@@ -244,4 +244,42 @@ openclaw 的 `--json` **不是** NDJSON 事件流，而是一个 **pretty-printe
 
 `tools.fs.workspaceOnly: true` → 它的读写被限制在自己的 workspace（`~/.openclaw-autoclaw/workspace`，按 agent 还有 `agents/<id>/workspace`）。**给它的 cwd 参数不改变这个边界**，任务产物会落在 workspace 里。`tools.exec.security: full` + `ask: off` 意味着命令执行默认放行。
 
+---
+
+## 8. AutoClaw 凭证能否跨客户端复用（实测边界）
+
+问题：「把 AutoClaw 的请求凭证拿去接别的 agent，配一个转换请求的代理服务，行不行？」
+
+### 8.1 凭证形态
+
+| 项 | 实测值 |
+|---|---|
+| 真正被校验的凭证 | **`X-Authorization: Bearer <JWT>`**（配置里每条模型自带） |
+| `apiKey` 字段 | 字面串 `autoclaw-internal-proxy`（占位，不是真凭证） |
+| JWT 内容 | `user_id` / `jti`(邮箱) / `is_guest:false` / `power:0` |
+| 有效期 | **恰好 24 小时**（`iat`→`exp`），由桌面端刷新 |
+| 端点 | `https://autoglm-api.autoglm.ai/autoclaw-proxy/proxy/autoclaw/chat/completions`（`api: openai-completions`） |
+| 其余客户端标识 header | `X-Request-Model` / `X-Product:autoclaw` / `X-Channel:official` / `X-Version` / `X-Tm:mac` / `X-Lang` / `X-Client-Type:pc` |
+
+### 8.2 对照实验（curl 直连，逐项抽 header / 改 body）
+
+| 变体 | 结果 | 结论 |
+|---|---|---|
+| 全套 header + 标准 OpenAI body | `400 {"message":"invalid request"}` | **认证过了，请求体形状不被接受** —— 它不是给第三方客户端用的标准 OpenAI 端点 |
+| 抽掉 `X-Authorization`（其余照发） | `401 {"error":"Invalid token"}` | **该 JWT 就是被校验的凭证**，且鉴权先于 body 校验 |
+| 补上 `X-Newbie-Guide` / `X-Auto-Legal` / `X-Agent-*` 等 | `401 {"message":"新手任务凭证无效或已过期"}` | 服务端**确实读取这些客户端标识 header 并走不同判定分支** → 它有意区分客户端 |
+| 换 body（去 model / 加 stream / 加 reasoning_effort） | 全部 `400` | 缺的不是这些字段，而是 openclaw 自己的请求形状 |
+| 用 Python urllib 发同样的请求 | `405` + **阿里云 WAF 的 HTML 页** | **边缘防护按客户端指纹拦**：通用 HTTP 客户端会被挡在业务层之外；curl 能过 |
+
+### 8.3 结论（给"要不要做代理复用"的判断）
+
+1. **技术上"能过认证"是真的**：`X-Authorization` 就是凭证，缺它直接 401。
+2. **但代价是精确模仿官方客户端**：请求体要照抄 openclaw 的形状（需先抓包），客户端标识 header 要齐，且要绕开/匹配 WAF 指纹。
+3. **它是明确设计成"只给自家客户端用"的**：`X-Product` / `X-Channel` / `X-Client-Type` / `X-Version` + 按客户端分支的鉴权逻辑，就是为了识别与限制来源。
+4. **运维上很脆**：凭证 24 小时过期（app 刷新），代理必须持续同步；一旦过期表现为 401 Invalid token。
+5. **建议做法**：不要抽凭证做通用上游。要在网关里用这些模型，就走各家**官方 API**（智谱/DeepSeek 等）加一条 channel —— 你已有的 8080 网关就是干这个的。而 AutoClaw 本身，正确用法是**当执行器被驱动**（本插件的 `autoclaw` 身份已实现），而不是当模型供应商。
+
+> 若要继续深挖（判定第 2 条的具体请求形状），唯一可靠办法是本地抓包：新建一个隔离 profile（如 `--profile probecap`，**不动** `~/.openclaw-autoclaw`），把 provider `baseUrl` 指向本地日志代理，跑一个回合即可拿到确切 body + headers，再决定是否可重放。
+
+
 
