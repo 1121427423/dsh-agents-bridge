@@ -242,9 +242,22 @@ v3 那一批）。配套新增 `RunRejectionCode` 联合与 `AgentRunRejectedErr
 - [x] **C · 工具面完成**：入口 + 6 个 defineTool（E 之前；现为 9 个）+ 冒烟命令 + README；`tsc` 零错误；`pnpm run build` → `lib/index.js`
 - [x] **B · drivers**：4 个方言 driver + argv 工具 + fixtures；两个遗留断言（`generic-argv` 的 argv、`openclaw` 无输出时的错误文案）已由后续工作流收敛 —— 当前 `vitest run` 全绿（见「交付指标」）
 - [x] 集成：入口已接线 `installDriverRuntime()`；**端到端集成测试 5/5 通过**（真子进程 + 真 stream-json 解析 + 取消 + usage + resume 指针）
-- [x] 合同校验：`verify_plugin.py` **11/11 PASS**
+- [~] 合同校验：**旧记的 `verify_plugin.py` 11/11 PASS 无法复现** —— 该脚本不在本仓库也不在本机
+  （`find ~/.dsh ~/BigModel/LLM/tools -name 'verify_plugin*'` 零命中），那一行是上一轮的转述，
+  本轮不再当作证据引用。取而代之，协调者写了**可复现**的合同自检
+  （`.wb-harness/check-contract.mjs`，监理工具、不入交付物），在**合并后的树**上 **18/18 通过**，
+  覆盖且逐条标注所依赖的决策：`exports['.']` 必须是字符串（D17）、`exports['./client']` 存在、
+  `dsh.bundle.patch` 指向真实文件、`dsh.client.{inject,platform}`、两个 build 产物**同时**出现在
+  `files[]` 与磁盘上、`types` 入口、两个 bundle 都保持 `@deepseek-ai/*` external（不变量 4）、
+  注册都在 `ctx.effect()` 内（不变量 3）、`agents_run` 不 await 会话结束（不变量 1）。
+  **仍未核验**（需宿主侧校验器，本机没有）：DSH 版本兼容区间、插件 id 注册表规则、cordis schema 一致性
+  —— 这三项不得当作已通过。
 - [ ] 安装冒烟：装进 `desktop` profile → 重启 DSH → `/agents-bridge-hello` 与 `agents_probe` 可见（**待用户确认，因为需重启正在运行的会话**）
 - [ ] **P1 验收：WorkBuddy 跑通一次真实任务（证据：agents_output 事件流）** — 前置已证：codebuddy headless 实测可跑（findings §5.1）。**注**：国内版 `workbuddy` 的上游当时 ETIMEDOUT（见 `docs/handoff-blockers.md` 记录 1）；国际版 `workbuddy-ai` 已用同一命令栈跑通（`status=completed`，`text: OK1`，11.6s，证据见 handoff-blockers §1.2）。两者是不同身份/不同上游，不能互相顶替，故国内版这一条仍留未勾。
+  - **协调者在合并后的树上复跑（2026-09-17）**：`scripts/acceptance.ts workbuddy-ai "Reply with exactly: FINAL_OK" --model=deepseek-v4.1-flash`
+    → `probe workbuddy-ai: track=desktop available=true` / `run session=sess_…  status=running`（**立即返回**）
+    / `[text] FINAL_OK` / `result status=completed exit=0 durationMs=6273`。即 **probe → 立即返回 → 事件流 → 终态文本** 四段全通。
+  - **人工待办**：国内版 `workbuddy` 的 `copilot.tencent.com` 可达性（不是插件问题，按 §0 只记录不修）。
 - [x] **P1 验收：AutoClaw 跑通一次真实任务（证据：同上）** — **2026-09-17 通过**（工作流 F 修掉 argv 重复子命令后）。
   - 命令（`PATH=/opt/homebrew/bin:$PATH`）：
     ```bash
@@ -306,6 +319,7 @@ v3 那一批）。配套新增 `RunRejectionCode` 联合与 `AgentRunRejectedErr
 | 构建产物 · `lib/index.js` | 310.1 KB（esbuild，`@deepseek-ai/*` 全部 external） |
 | 构建产物 · `lib/client.js` | 59.1 KB（web platform，`react` external） |
 | 工具面 | **9 个**（`agents_probe` / `run` / `run_many` / `status` / `wait` / `output` / `usage` / `cancel` / `send`） |
-| 合同校验 | 11/11 PASS（**上一轮**结论；`verify_plugin.py` 不在本仓，本轮未重跑。E/F 只加 `defineTool` 与注释、未动 `package.json` / `exports` / `cordis.patch.yml`，合同面未变） |
+| 合同校验 | **18/18 PASS**（可复现：`.wb-harness/check-contract.mjs`，覆盖清单见「阶段状态」那一行）。旧记的 `verify_plugin.py` 11/11 已不再引用——脚本不在本机，无法复现 |
 | 端到端集成 | `tests/integration/pipeline.test.ts`（真子进程 + 真 stream-json 解析 + 取消 + usage + resume 指针）全绿；`tests/integration/argv-shape.test.ts`（每个内置身份的最终 argv 形状，5 个用例）全绿 |
-| 真机验收 | `autoclaw` 端到端 **completed**（`scripts/acceptance.ts`，7.2s/6.8s 两次，`text: AUTOCLAW_OK`） |
+| 真机验收 · AutoClaw | `status=completed`、`text: AUTOCLAW_OK`、8404 ms（**合并后的树上复跑**，`scripts/acceptance.ts autoclaw`） |
+| 真机验收 · WorkBuddy | 国际版 `workbuddy-ai`：`status=completed`、`text: FINAL_OK`、6273 ms（**合并后的树上复跑**）。国内版 `workbuddy` 上游 ETIMEDOUT，见 `docs/handoff-blockers.md` 记录 1 |
