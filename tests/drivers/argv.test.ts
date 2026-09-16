@@ -226,14 +226,14 @@ describe('createBackend', () => {
   }
 
   it('builds a backend for every advertised family', () => {
-    for (const family of ['claude', 'codebuddy', 'openclaw', 'generic'] as const) {
+    for (const family of ['claude', 'codebuddy', 'codex', 'openclaw', 'generic'] as const) {
       expect(createBackend(family, deps).family).toBe(family)
     }
   })
 
   it('rejects an unknown family with a readable error', () => {
     expect(() => createBackend('no-such-dialect' as never, deps)).toThrowError(
-      /unknown protocol family "no-such-dialect".*Known families: claude, codebuddy, openclaw, generic/s,
+      /unknown protocol family "no-such-dialect".*Known families: claude, codebuddy, codex, openclaw, generic/s,
     )
   })
 })

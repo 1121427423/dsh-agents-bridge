@@ -466,6 +466,9 @@ export function createToolDefinitions(manager: AgentManager) {
               backendSessionId: { type: 'string' },
               inputTokens: { type: 'integer' },
               outputTokens: { type: 'integer' },
+              // Disclosure, not a bucket to add up: codex counts reasoning
+              // INSIDE output_tokens (see AgentUsage.reasoningTokens).
+              reasoningTokens: { type: 'integer' },
             },
           },
           hint: { type: 'string' },
@@ -562,7 +565,15 @@ export function createToolDefinitions(manager: AgentManager) {
             ...(result.exitCode === null ? {} : { exitCode: result.exitCode }),
             durationMs: result.durationMs,
             ...(result.backendSessionId === undefined ? {} : { backendSessionId: result.backendSessionId }),
-            ...(result.usage === undefined ? {} : { inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens }),
+            ...(result.usage === undefined
+              ? {}
+              : {
+                  inputTokens: result.usage.inputTokens,
+                  outputTokens: result.usage.outputTokens,
+                  ...(result.usage.reasoningTokens === undefined
+                    ? {}
+                    : { reasoningTokens: result.usage.reasoningTokens }),
+                }),
           },
         }),
         hint,

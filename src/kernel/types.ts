@@ -219,12 +219,21 @@ export interface AgentMessage {
   readonly at: number
 }
 
-/** Token accounting, mutually exclusive buckets (multica `TokenUsage`). */
+/**
+ * Token accounting, mutually exclusive buckets (multica `TokenUsage`).
+ *
+ * `reasoningTokens` (ABI v2, additive) is DISCLOSURE, not a bucket to add up:
+ * codex reports `reasoning_output_tokens` as a SUBSET of `output_tokens`, so a
+ * caller summing every field would double-count. It is kept separate precisely
+ * because folding it into `outputTokens` would hide how much of the spend was
+ * reasoning, and dropping it would hide that the model reasoned at all.
+ */
 export interface AgentUsage {
   readonly inputTokens: number
   readonly outputTokens: number
   readonly cacheReadTokens?: number
   readonly cacheWriteTokens?: number
+  readonly reasoningTokens?: number
 }
 
 export type AgentRunStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'timeout'

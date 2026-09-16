@@ -1,0 +1,10 @@
+{"type":"thread.started","thread_id":"01a0a0a0-5555-7000-8000-000000000005"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_2","type":"mcp_tool_call","server":"stub","tool":"stub_echo","arguments":{"text":"hello from stub"},"result":null,"error":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"mcp_tool_call","server":"stub","tool":"stub_echo","arguments":{"text":"hello from stub"},"result":{"content":[{"type":"text","text":"stub-mcp-output:hello from stub"}],"structured_content":null},"error":null,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_3","type":"mcp_tool_call","server":"stub","tool":"stub_missing","arguments":{},"result":null,"error":{"message":"unknown tool: stub_missing"},"status":"failed"}}
+{"type":"item.completed","item":{"id":"item_4","type":"web_search","query":"codex exec jsonl dialect"}}
+{"type":"item.completed","item":{"id":"item_5","type":"todo_list","items":[{"text":"read the dialect","completed":true},{"text":"normalize it","completed":false}]}}
+{"type":"item.updated","item":{"id":"item_0","type":"future_dialect_item","payload":{"unknown":true}}}
+{"type":"item.completed","item":{"id":"item_6","type":"agent_message","text":"OK"}}
+{"type":"turn.completed","usage":{"input_tokens":2048,"cached_input_tokens":1792,"cache_write_input_tokens":64,"output_tokens":64,"reasoning_output_tokens":32}}

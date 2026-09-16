@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"01a0a0a0-1111-7000-8000-000000000001"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"loading hooks from both /Users/example/.codex/hooks.json and /Users/example/.codex/config.toml; prefer a single representation for this layer"}}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_1","type":"error","message":"Skill descriptions were shortened to fit the skills context budget. Codex can still see every skill, but some descriptions are shorter. Disable unused skills or plugins to leave more room for the rest."}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"OK"}}
+{"type":"turn.completed","usage":{"input_tokens":812,"cached_input_tokens":640,"cache_write_input_tokens":0,"output_tokens":24,"reasoning_output_tokens":8}}

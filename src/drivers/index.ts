@@ -50,6 +50,7 @@ import {
 } from './argv.ts'
 import { createClaudeBackend } from './claude.ts'
 import { createCodebuddyBackend } from './codebuddy.ts'
+import { createCodexBackend } from './codex.ts'
 import { createGenericBackend } from './generic-argv.ts'
 import { createOpenclawBackend } from './openclaw.ts'
 
@@ -62,6 +63,7 @@ import { createOpenclawBackend } from './openclaw.ts'
 export const DRIVER_FAMILIES: readonly ProtocolFamily[] = [
   'claude',
   'codebuddy',
+  'codex',
   'openclaw',
   'generic',
 ]
@@ -83,6 +85,8 @@ export function createBackend(family: ProtocolFamily, deps: DriverDeps): AgentBa
       return createClaudeBackend(deps)
     case 'codebuddy':
       return createCodebuddyBackend(deps)
+    case 'codex':
+      return createCodexBackend(deps)
     case 'openclaw':
       return createOpenclawBackend(deps)
     case 'generic':
@@ -113,6 +117,8 @@ export function createBackendWithRuntime(
       return createClaudeBackend(deps, runtime)
     case 'codebuddy':
       return createCodebuddyBackend(deps, runtime)
+    case 'codex':
+      return createCodexBackend(deps, runtime)
     case 'openclaw':
       return createOpenclawBackend(deps, runtime)
     case 'generic':
