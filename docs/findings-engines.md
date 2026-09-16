@@ -68,3 +68,47 @@ node "/Applications/AutoClaw.app/Contents/Resources/gateway/openclaw/openclaw.mj
 ```
 
 > 注意：macOS 无 `timeout` 命令，自动化探测须用 bash 自实现的 guard（见本项目探测实现）并给 3–5s 上限，避免探活挂死。
+
+---
+
+## 5. Headless 真实回合冒烟（P1 前置验证）
+
+### 5.1 codebuddy：✅ 跑通，无需登录
+
+```bash
+node "<app>/cli/bin/codebuddy" -p --output-format stream-json "Reply with exactly: PONG"
+```
+
+- 结果：`{"type":"result","subtype":"success","is_error":false,"result":"PONG","session_id":"6581ce83-…","duration_ms":35391,"num_turns":3,"total_cost_usd":0,...}` —— **35s / 3 turns**，是真 agent loop。
+- 凭证：`apiKeySource: "copilot.tencent.com"`，复用桌面端凭证，**无 login 提示**。
+- 模型：`model: "auto"`（init 事件），实际 `hy4-preview`。
+- **事件类型全集（实测）**：`system/init`、`system/status`、`file-history-snapshot`、`assistant`(thinking)、`assistant`(text)、`result`。
+  - `file-history-snapshot` 与 `system/status` 在 claude 文档里没有 → **解析器必须白名单 + 静默忽略未知 type**。
+  - **`session_id` 在第一个 `system/init` 事件里就出现** → resume 指针应尽早捕获（对应 multica `SessionID ... early resume-pointer pinning`）。
+  - usage 字段名：`cache_creation_input_tokens` / `cache_read_input_tokens`（非 claude 文档里的 `cache_creation`）。
+
+### 5.2 openclaw：裸调用失败 → 正确姿势是 `--profile autoclaw`
+
+```
+OpenClaw config is invalid
+File: ~/.openclaw/openclaw.json
+Problem:  - <root>: Invalid input
+Fix: openclaw doctor --fix
+```
+
+- 根因：`~/.openclaw/openclaw.json` 只含 `{"mcpServers":{...}}`，是无效 stub；AutoClaw 桌面版用**自己的 profile 目录**。
+- 已验证（`Config valid: ~/.openclaw-autoclaw/openclaw.json`）：
+  ```bash
+  node "<app>/gateway/openclaw/openclaw.mjs" --profile autoclaw config validate
+  ```
+- **`autoclaw` 身份 argv 前缀 = `['--profile','autoclaw','agent']`**（全局 `--profile` 必须排在子命令前）。
+- 该目录含 `.gateway-token`、`agents/`、`exec-approvals.json` → 未来 `connect` 模式的凭证与审批数据来源。
+
+### 5.3 对驱动实现的硬性结论
+
+| 结论 | 影响 |
+|---|---|
+| 未知事件类型必须静默忽略 | claude.ts 与 codebuddy.ts 共用解析器时不能对未知 type 抛错 |
+| session_id 从 init 事件捕获 | resume 支持不依赖 result 事件 |
+| codebuddy 用 `interpreter` 拉 node 才能跑 | `CommandSpec.interpreter` 是必需字段，不是可选优化 |
+| openclaw 身份必须带 profile | registry 的 `argsPrefix` 要支持「全局 flag + 子命令」组合 |
