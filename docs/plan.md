@@ -157,9 +157,9 @@ kernel 只保留共享机制（`<PREFIX>_PATH` 覆盖、解析、`<exe> --versio
 
 | 指标 | 值 |
 |---|---|
-| TS 文件 | MEASURE_TS |
-| 测试 | MEASURE_TESTS |
+| TS 文件 | 81 个（src 41 / tests 37 / scripts 3） |
+| 测试 | **596 个全部通过（34 个文件）**（合并 B/A/C 后；P3 +62、client half +62、P2 +81） |
 | `tsc --noEmit` | 0 错误 |
-| 构建产物 | MEASURE_BUILD |
+| 构建产物 | `lib/index.js` 227.8 KB + `lib/client.js` 59.1 KB |
 | 合同校验 | 11/11 PASS |
 | 端到端集成 | 5/5 PASS |
