@@ -69,6 +69,11 @@ const DEFAULT_IDLE_TIMEOUT_MS: Readonly<Record<ProtocolFamily, number>> = {
   codex: 300_000,
   openclaw: 600_000,
   generic: 300_000,
+  // Must equal the ACP driver's own `DEFAULT_ACP_IDLE_TIMEOUT_MS` -- the whole
+  // point of this table is that the manager and the driver cannot kill a run at
+  // two different thresholds. ACP engines are long-lived services that can sit
+  // quiet between `session/update` notifications, so this is not a "fast" family.
+  acp: 300_000,
 }
 
 function defaultIdleMs(family: ProtocolFamily): number {
