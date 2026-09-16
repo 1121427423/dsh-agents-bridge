@@ -128,3 +128,36 @@ text: OK1
 - **人工待办**：本仓库的 `node_modules` **不可重新解析**（`@deepseek-ai/dsh-type-meta` 在 registry 上 404，D10），
   所以任何时候都不要在此仓库跑 `npm install` / `pnpm install`；
   若必须动依赖，请先整棵备份。
+
+---
+
+## 记录 4 — AutoClaw「跑不起来」**不是**上游/凭据故障，是桥自己的 argv 缺陷（已修复）
+
+- **时间**：现象于 2026-09-17 由审查者实测发现；同日晚由工作流 F 修复并复验
+- **现象（修复前）**：
+  ```
+  probe  autoclaw: track=desktop available=true     ← 探测说它可用
+  run    session=sess_… status=running
+  result status=failed exit=1 durationMs=1171
+  error: openclaw returned no parseable output: Too many arguments for this command.
+  Try: openclaw agent agent --help                  ← 注意 "agent" 出现了两次
+  ```
+- **判定**：**不是**凭据、**不是**网络、**不是**上游模型。根因是三段代码合起来的结果——
+  `buildOpenclawArgs()`（`src/drivers/openclaw.ts:187`）无条件把 `agent` 放在 argv 最前，
+  而 `buildArgv()`（`src/kernel/spawn.ts:81`）只是把描述符的 `argsPrefix` 拼在它前面，
+  于是两个身份里的 `argsPrefix: ['agent']` 让最终 argv 变成 `… agent agent …`，CLI 直接拒绝。
+  另外 `autoclaw` **连 `--profile autoclaw` 都没带**，裸跑会去读 `~/.openclaw/openclaw.json`（stub）报 config invalid（D12 记录过的坑）。
+- **修复**：`autoclaw` → `argsPrefix: ['--profile','autoclaw']`；`openclaw` → 删除 `argsPrefix`；
+  新增 `tests/integration/argv-shape.test.ts` 对每个内置身份的**最终 argv** 加护栏（见 `docs/plan.md` D28）。
+- **复验（真实端到端，非模拟）**：
+  ```
+  probe  autoclaw: track=desktop available=true  version=2026.6.8
+  run    session=sess_0ecacf5a-8612-4fa2-bfa4-acc0e5f9f08d status=running
+  events (1): [text] AUTOCLAW_OK
+  result status=completed exit=0 durationMs=6827
+  text: AUTOCLAW_OK
+  usage: {"inputTokens":14268,"outputTokens":23,"cacheReadTokens":15104,"cacheWriteTokens":0}
+  backendSessionId: 95b07772-8779-4e5e-80ef-e0e70445185d
+  ```
+- **人工待办**：无。**若今后再看到同类报错，请先看最终 argv，不要去查 key。**
+  本文件的第一条（国内版 `workbuddy` 上游 ETIMEDOUT）**仍然未解决**，那条才是真的上游问题。

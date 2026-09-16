@@ -80,11 +80,18 @@ export const DESKTOP_TRACK_DESCRIPTORS: readonly AgentDescriptor[] = [
     track: 'desktop',
     family: 'openclaw',
     displayName: 'AutoClaw (bundled OpenClaw engine)',
-    command: { executable: AUTOCLAW_ENGINE, interpreter: BUNDLED_NODE, argsPrefix: ['agent'] },
+    // `--profile autoclaw` MUST precede the `agent` subcommand, and the profile
+    // comes from THIS descriptor: the openclaw driver only ever READS a profile
+    // out of `argsPrefix` (to phrase a diagnosis); it never sets one. It also
+    // must NOT put `agent` here — `buildOpenclawArgs()` already emits the
+    // subcommand as the first driver arg, so an `agent` in the prefix makes the
+    // final argv `… agent agent …` and the CLI rejects it with
+    // "Too many arguments for this command."
+    command: { executable: AUTOCLAW_ENGINE, interpreter: BUNDLED_NODE, argsPrefix: ['--profile', 'autoclaw'] },
     envPrefix: 'AUTOCLAW',
     capabilities: { resume: true, model: true },
     notes:
-      'MUST run with `--profile autoclaw` (driver-set): the default profile loads ~/.openclaw/openclaw.json and fails config validation. Its proxy credential is bound to the client system prompt, so this identity is usable as an EXECUTOR only, never as a generic upstream.',
+      'Runs with `--profile autoclaw` (descriptor-supplied, NOT driver-supplied): the default profile loads ~/.openclaw/openclaw.json and fails config validation. `agent` is emitted by the driver, never by this prefix. Its proxy credential is bound to the client system prompt, so this identity is usable as an EXECUTOR only, never as a generic upstream.',
   },
   {
     id: 'mimo',

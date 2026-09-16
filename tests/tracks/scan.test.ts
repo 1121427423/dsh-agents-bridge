@@ -441,7 +441,10 @@ describe('built-in descriptors always win over a scan', () => {
     // matters, because the built-in autoclaw descriptor carries the
     // `--profile autoclaw` argv a scan could never re-derive.
     const autoclaw = merged.descriptors.find((descriptor) => descriptor.id === 'autoclaw')
-    expect(autoclaw?.command.argsPrefix).toEqual(['agent'])
+    // `--profile autoclaw` — and NOT `agent`: the openclaw driver emits the
+    // `agent` subcommand itself, so a prefix carrying it would duplicate it in
+    // the final argv. See tests/integration/argv-shape.test.ts.
+    expect(autoclaw?.command.argsPrefix).toEqual(['--profile', 'autoclaw'])
     expect(autoclaw?.command.executable).toBe(
       '/Applications/AutoClaw.app/Contents/Resources/gateway/openclaw/openclaw.mjs',
     )

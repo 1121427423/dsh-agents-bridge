@@ -17,7 +17,7 @@
 | D9 | `connect` 模式只留字段不实现 | openclaw gateway / sidecar 有需求但非首个验证目标 | ✅ 已定 |
 | D10 | 依赖树直接复用兄弟项目 `dsh-background-promotion/node_modules` | pnpm 解析 `@deepseek-ai/dsh-type-meta` 失败（该包从未发布到 registry，兄弟项目用 npm 装的同版本树可用） | ✅ 已解决 |
 | D11 | `openclaw` 驱动额外支持 `--thinking`（映射 `effort`） | 实测 OpenClaw 2026.6.8 的 `agent` 子命令有该 flag，multica 版本没有 | ✅ 已核实 |
-| D12 | `autoclaw` 身份 argv 前缀为 `['--profile','autoclaw','agent']` | 裸跑报 config invalid（`~/.openclaw/openclaw.json` 是 stub）；`--profile autoclaw` 实测 `Config valid` | ✅ 已验证 |
+| D12 | `autoclaw` 身份 argv 前缀为 `['--profile','autoclaw']`（**不含 `agent`**） | 裸跑报 config invalid（`~/.openclaw/openclaw.json` 是 stub）；`--profile autoclaw` 实测 `Config valid`。**2026-09-17 更正**：原记为 `['--profile','autoclaw','agent']`，那个值本身就会让最终 argv 变成 `… agent agent …`（driver 的 `buildOpenclawArgs()` 已经把 `agent` 放在第一个），实测被 CLI 拒为 "Too many arguments for this command."。`agent` 归 driver，profile 归描述符 | ✅ 已验证（真机跑通，见下方 P1 验收） |
 | D13 | 驱动解析必须「白名单 + 静默忽略未知事件」 | codebuddy 实测发出 `system/status`、`file-history-snapshot` 等 claude 文档外事件 | ✅ 已验证 |
 | D14 | `session_id` 从 `system/init` 尽早捕获 | 实测 init 事件即带 session_id（对应 multica 的 early resume-pointer pinning） | ✅ 已验证 |
 | D15 | 冒烟命令用 `ctx.commands.register({name})`，名字 **不能含点号** | 实测本机 DSH 无 `ctx.command(...)`；命令名正则 `/^[a-z][a-z0-9_-]*$/u` 拒绝点号 → 命令名取 `agents-bridge-hello`。**dsh-plugin-studio 技能的 command-tool 配方对本版本 DSH 不适用** | ✅ 已修正 |
@@ -28,6 +28,8 @@
 | D20 | `agents_probe` 增补模型发现（P3） | 对应 multica `ModelDiscoveryFunc`；有了可取值的模型目录，`agents_run{model}` 才可校验，别名映射（按 `credits` 选性价比、按 `supportsImages` 判多模态）才有真实落点 | ✅ 已实现 |
 | D24 | P3 扫描**只读真实文件、绝不读 `app.asar`**；身份由 `product.json` 决定而非 bundle 名 | 实测两个 WorkBuddy 的 launcher 字节相同，唯一区别是 `cli/product.json` 的 `dataFolderName`/`isOversea`；按目录名猜会在重命名或多语言包上直接错。asar 是 297MB 存档，读它要解包器且零新增事实 | ✅ 已验证 |
 | D25 | P3 端口指纹**默认期望表为空**，且**永不影响 `available`** | 本机没有已验证的 gateway 端口，猜一个就是往探测输出塞假事实；且"没在监听"是桌面应用的常态（应用没开），不能因此把可启动的身份判为不可用——`available` 只回答"能不能真启动" | ✅ 已定 |
+| D28 | **argv 所有权切分**：driver 独占「子命令」token（openclaw 的 `agent`、codex 的 `exec`），描述符的 `argsPrefix` 只放 driver 无法知道的全局 token（`--profile autoclaw`、wrappers） | 两个 openclaw 身份都曾在 `argsPrefix` 里重复 driver 的子命令，`spawn.ts` 直接拼接后得到 `… agent agent …`，被 CLI 拒为 "Too many arguments for this command."。既有测试全部只断言**单个字段**（`argsPrefix === ['agent']`），于是每个测试都通过、唯独真正交给操作系统的 argv 是错的。护栏：`tests/integration/argv-shape.test.ts` 对**每一个内置身份**断言最终 argv（通用不变量：无相邻重复 token；openclaw 引擎的 `agent` 恰好出现一次；`--profile` 必须早于 `agent`） | ✅ 已实现 |
+| D29 | **`src/kernel/types.ts` 仅改注释**（冻结 ABI 的例外，纯文档） | `CommandSpec.argsPrefix` 的示例仍写作 `['agent']` —— 正是 D28 那个 bug 的示范值，留着会继续误导下一个读者。**只改注释，不改任何字段、类型或可选性**，故 ABI 不变、无需版本号变更 | ✅ 已改（本工作流唯一触碰 types.ts 之处） |
 
 ## 任务拆分（3 个并行工作流）
 
@@ -242,8 +244,29 @@ v3 那一批）。配套新增 `RunRejectionCode` 联合与 `AgentRunRejectedErr
 - [x] 集成：入口已接线 `installDriverRuntime()`；**端到端集成测试 5/5 通过**（真子进程 + 真 stream-json 解析 + 取消 + usage + resume 指针）
 - [x] 合同校验：`verify_plugin.py` **11/11 PASS**
 - [ ] 安装冒烟：装进 `desktop` profile → 重启 DSH → `/agents-bridge-hello` 与 `agents_probe` 可见（**待用户确认，因为需重启正在运行的会话**）
-- [ ] **P1 验收：WorkBuddy 跑通一次真实任务（证据：agents_output 事件流）** — 前置已证：codebuddy headless 实测可跑（findings §5.1）
-- [ ] **P1 验收：AutoClaw 跑通一次真实任务（证据：同上）** — 前置已证：`--profile autoclaw` 配置有效（findings §5.2）
+- [ ] **P1 验收：WorkBuddy 跑通一次真实任务（证据：agents_output 事件流）** — 前置已证：codebuddy headless 实测可跑（findings §5.1）。**注**：国内版 `workbuddy` 的上游当时 ETIMEDOUT（见 `docs/handoff-blockers.md` 记录 1）；国际版 `workbuddy-ai` 已用同一命令栈跑通（`status=completed`，`text: OK1`，11.6s，证据见 handoff-blockers §1.2）。两者是不同身份/不同上游，不能互相顶替，故国内版这一条仍留未勾。
+- [x] **P1 验收：AutoClaw 跑通一次真实任务（证据：同上）** — **2026-09-17 通过**（工作流 F 修掉 argv 重复子命令后）。
+  - 命令（`PATH=/opt/homebrew/bin:$PATH`）：
+    ```bash
+    node --experimental-strip-types scripts/acceptance.ts autoclaw "Reply with exactly: AUTOCLAW_OK"
+    ```
+  - 原始输出（两次独立运行结果一致，下为第二次全文，exit=0）：
+    ```
+    probe  autoclaw: track=desktop available=true
+           executable=/Applications/AutoClaw.app/Contents/Resources/gateway/openclaw/openclaw.mjs version=2026.6.8 reason=-
+    run    session=sess_0ecacf5a-8612-4fa2-bfa4-acc0e5f9f08d status=running
+
+    events (1):
+      [text] AUTOCLAW_OK
+
+    result status=completed exit=0 durationMs=6827
+    text: AUTOCLAW_OK
+    usage: {"inputTokens":14268,"outputTokens":23,"cacheReadTokens":15104,"cacheWriteTokens":0}
+    backendSessionId: 95b07772-8779-4e5e-80ef-e0e70445185d
+    ```
+  - 第一次运行：`session=sess_02da3568-… status=running` → `result status=completed exit=0 durationMs=7166`，`text: AUTOCLAW_OK`，`backendSessionId: 5ca9ade7-…`。
+  - 修复前同一命令的失败形态（审查者实测，留作回归对照）：`status=failed exit=1 durationMs=1171`，`error: openclaw returned no parseable output: Too many arguments for this command.` —— 根因是最终 argv 里的 `… agent agent …`。
+  - 另有一次**不经插件栈**的裸跑对照（证明 argv 形状本身可用）：`node <AutoClaw>/…/openclaw.mjs --profile autoclaw agent --local --json --session-id probe-test-1 --message "Reply with exactly: AUTOCLAW_OK"` → `"text": "AUTOCLAW_OK"`，`meta.durationMs: 3972`，`provider=zai`，HTTP `status=200`。
 - [x] **两条实现落地（D21）**：ABI v2（`track` 必填）+ CLI/桌面两个 catalog 与 policy + 15 个新测试；`tsc` 0 错误，**159/159 通过**
 - [x] **真机探测**：claude 2.8.4(/usr/local/bin，GUI PATH 下不可见)、codex 0.154.0(~/bin)、workbuddy 2.137.1、autoclaw 2026.6.8
 - [x] **桌面轨道真机跑通**：WorkBuddy + `deepseek-v4.1-flash` 完成一次真实任务（`scripts/acceptance.ts`：10.4s，text=OK，usage + backendSessionId）
@@ -264,17 +287,25 @@ v3 那一批）。配套新增 `RunRejectionCode` 联合与 `AgentRunRejectedErr
 - [x] **client half（监工 UI）落地**（工作流 A）：`src/client/**` + `src/host/api.ts` —— 宿主 HTTP 路由 `kind:"prefix"`、POST-only、复用 better-sidebar 的 `fence` 语义；`webServer` 用 `ctx.get` 惰性取而不进 `inject`（否则没有该服务的宿主会把整个插件判为 INACTIVE，D16），取不到只少 UI、工具面照常注册。client 侧按 slot 注册（`conversation.session.header.utilities` 常驻计数 + `sidebar.right.pane.tab` 完整面板，独立降级），增量读取回传 `nextIndex`，无会话时停轮询，中英双语 + 跟随宿主主题变量。`package.json` 加 `dsh.client` 与 `exports["./client"]`，`exports["."]` 保持字符串（D17）。新增 `lib/client.js` 产物与 `vitest.config.ts`（`tests/**` 锚定，避免 vitest 扫到兄弟 worktree——这个坑在合并期真实发生过）
 - [x] **P4 并行 fan-out（工作流 E）**：工具面 6 → 9。`agents_wait`（有界等待：全部 / 任一（`until:"any"`）终态或超时即返回；**超时是正常返回**，`timedOut: true`，什么都不取消；`timeoutMs` 缺省 20s、上限硬编码 60s、超了**钳位并在 render 里说明**）+ `agents_run_many`（一次起 ≤16 个；**单项被拒不影响其余**，错误带 `runs[i]` 前缀；超 `maxConcurrent` **不排队**、该项直接报错）+ `agents_usage`（逐会话 + 汇总；`reasoningTokens` 单列、**不计入 `totalTokens`**，因为它已被引擎算在 `output` 之内）。同一次交付还收了：**错误文案人因化**（`describeRunFailure` 就地增强 v3 的类型化拒绝、`unknownSessionMessage` 列出已知会话；`tests/tools/error-copy.test.ts` 11 个用例把「说了下一步」锁住）、**系统提示段重写**（何时委派 / prompt 必须自包含 / 先 `agents_wait` 再 `agents_output` 且回传 `nextIndex` / 并行用 `agents_run_many` / 方向错了 `agents_cancel` / 只看得到归一化事件）。**不变量 1 未被触碰**：`agents_run.execute()` 依旧立即返回（`tests/tools/wait.test.ts` 有用例锁住）。**证据**：`pnpm exec vitest run` → **691 passed / 1 skipped（40 个文件）**；`pnpm exec tsc --noEmit` → 0 错误；`pnpm run build` → `lib/index.js` 309.1 KB + `lib/client.js` 59.1 KB。（P4 的另外两件 —— ACP driver 与监工 UI —— 见上面两行，均已合并。）
 
+  - [x] **工作流 F · openclaw/autoclaw argv 重复子命令修复（2026-09-17）**：两个身份都跑不起来 —— `buildOpenclawArgs()`（`src/drivers/openclaw.ts:187`）**无条件**把 `agent` 放在 argv 最前，而 `spawn.ts:81` 的 `buildArgv()` 只是把 `argsPrefix` 拼在它前面，于是两个描述符里的 `argsPrefix: ['agent']` 把子命令变成了 `… agent agent …`，CLI 回 `Too many arguments for this command.`（审查者实测 `exit=1 durationMs=1171`）。
+    - **修复**：`src/tracks/desktop/catalog.ts` 的 `autoclaw` → `argsPrefix: ['--profile','autoclaw']`（原来**连 profile 都没有**，会去读 `~/.openclaw/openclaw.json` stub 报 config invalid）；`src/tracks/cli/catalog.ts` 的 `openclaw` → **删掉整个 `argsPrefix`**（driver 自己会给 `agent`）。两个身份的 `notes` 一并改正：profile 由**描述符**提供，driver 只在 `openclawProfileFromArgsPrefix()` 里**读**它。
+    - **护栏（本次最重要的产出）**：新增 `tests/integration/argv-shape.test.ts`（5 个用例）—— 对**每一个内置身份**用注入假 resolver 的 registry 解析出 `command`，再用 `spawn.ts` 的 `buildArgv()` 拼出最终 argv，断言：① 通用不变量「无相邻重复 token」；② 每个 openclaw 引擎的 `agent` **恰好出现一次**；③ `autoclaw` 的 `--profile` 值为 `autoclaw` 且**早于** `agent`；④ 没有身份的 `argsPrefix` 里出现 driver 独占的子命令（`agent`/`exec`）。**已验证它真的会红**：把两个描述符改回 bug 值后，5/5 全部失败（失败信息里能直接看到 `[ 'agent', 'agent', '--local' ]`）。测试不依赖宿主机安装（`scan: false` + `PATH: ''` + 注入 resolver）。
+    - **修断言（不删测试）**：`tests/kernel/registry.test.ts`、`tests/tracks/scan.test.ts`、`tests/tracks/desktop.test.ts` 三处把 bug 值当期望值的断言改成正确值（`['--profile','autoclaw']` / `toBeUndefined()`）。`tests/drivers/openclaw.test.ts` 里 `openclawProfileFromArgsPrefix(['--profile','autoclaw','agent'])` 是 helper 单测，保留。
+    - **真机验收通过**：`scripts/acceptance.ts autoclaw "Reply with exactly: AUTOCLAW_OK"` → `status=completed exit=0 durationMs=6827`，`text: AUTOCLAW_OK`（原始输出见上方 P1 验收条目）。
+    - **证据**：`pnpm exec vitest run` → **696 passed / 1 skipped（41 个文件）**；`tsc --noEmit` → 0 错误；`pnpm run build` → 见交付指标。
+
 ## 交付指标（当前）
 
-> 下表所有数字来自工作流 E 合并后**本机真跑**：`pnpm exec vitest run` / `pnpm exec tsc --noEmit` / `pnpm run build`。
+> 下表所有数字来自工作流 F 合并后**本机真跑**：`pnpm exec vitest run` / `pnpm exec tsc --noEmit` / `pnpm run build`。
 
 | 指标 | 值 |
 |---|---|
-| TS 文件 | 89 个（src 42 / tests 44 / scripts 3） |
-| 测试 | **691 个通过 + 1 skipped（40 个文件，`vitest run` 5.9s）** —— E 新增 46 个（`tests/tools/{wait,run-many,usage,error-copy}.test.ts` + 工具数断言同步） |
+| TS 文件 | 90 个（src 42 / tests 45 / scripts 3） |
+| 测试 | **696 个通过 + 1 skipped（41 个文件）** —— 基线 691/1（40 文件）；F 新增 5 个（`tests/integration/argv-shape.test.ts`），零删除、零跳过 |
 | `tsc --noEmit` | 0 错误 |
-| 构建产物 · `lib/index.js` | 309.1 KB（esbuild，`@deepseek-ai/*` 全部 external） |
+| 构建产物 · `lib/index.js` | 310.1 KB（esbuild，`@deepseek-ai/*` 全部 external） |
 | 构建产物 · `lib/client.js` | 59.1 KB（web platform，`react` external） |
 | 工具面 | **9 个**（`agents_probe` / `run` / `run_many` / `status` / `wait` / `output` / `usage` / `cancel` / `send`） |
-| 合同校验 | 11/11 PASS（**上一轮**结论；`verify_plugin.py` 不在本仓，本轮未重跑。E 只加 `defineTool`、未动 `package.json` / `exports` / `cordis.patch.yml`，合同面未变） |
-| 端到端集成 | `tests/integration/pipeline.test.ts`（真子进程 + 真 stream-json 解析 + 取消 + usage + resume 指针）全绿 |
+| 合同校验 | 11/11 PASS（**上一轮**结论；`verify_plugin.py` 不在本仓，本轮未重跑。E/F 只加 `defineTool` 与注释、未动 `package.json` / `exports` / `cordis.patch.yml`，合同面未变） |
+| 端到端集成 | `tests/integration/pipeline.test.ts`（真子进程 + 真 stream-json 解析 + 取消 + usage + resume 指针）全绿；`tests/integration/argv-shape.test.ts`（每个内置身份的最终 argv 形状，5 个用例）全绿 |
+| 真机验收 | `autoclaw` 端到端 **completed**（`scripts/acceptance.ts`，7.2s/6.8s 两次，`text: AUTOCLAW_OK`） |
