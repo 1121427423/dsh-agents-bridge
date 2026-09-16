@@ -452,17 +452,32 @@ export function createToolDefinitions(manager: AgentManager) {
       render: (_args, value) => {
         // `?? []` — see the note in the agents_status render above.
         const messages = value.messages ?? []
-        const blocks = messages.map(message => {
+        // One readable line per event. A `[text]` payload may itself be
+        // multi-line: it is shown rather than clipped to its first line,
+        // because this render is the model's only window into the transcript.
+        // Consecutive `text`/`thinking` events are joined — some dialects emit
+        // one event per streamed delta and a line per fragment is pure noise.
+        let textSeen = false
+        const blocks: string[] = []
+        for (const message of messages) {
           const prefix = `#${message.index} [${message.type}]`
+          const isText = message.type === 'text' || message.type === 'thinking'
+          if (isText && textSeen && blocks.length > 0) {
+            const last = blocks.length - 1
+            blocks[last] = `${blocks[last] ?? ''}${message.text ?? ''}`
+            continue
+          }
           switch (message.type) {
             case 'tool_use':
-              return `${prefix} ${message.tool ?? 'unknown'}`
             case 'tool_result':
-              return `${prefix} ${message.tool ?? 'unknown'}${message.text === undefined ? '' : ` → ${message.text}`}`
+              blocks.push(`${prefix} ${message.tool ?? 'unknown'}${message.text === undefined ? '' : ` → ${message.text}`}`)
+              break
             default:
-              return `${prefix} ${message.text ?? ''}`
+              blocks.push(`${prefix} ${message.text ?? ''}`)
+              break
           }
-        })
+          if (isText) textSeen = true
+        }
         const header = `session ${value.sessionId} status=${value.status} events=${messages.length} nextIndex=${value.nextIndex}`
         const body: string[] = [header]
         if (blocks.length === 0) {

@@ -22,6 +22,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { createBackend } from './drivers/index.ts'
+import { installDriverRuntime } from './integrate.ts'
 import { createLogger } from './kernel/logger.ts'
 import { createAgentManager } from './kernel/manager.ts'
 import type { AgentDescriptor, AgentId, BridgeLogger, ManagerOptions } from './kernel/types.ts'
@@ -65,6 +66,13 @@ export interface Config {
  */
 export function apply(ctx: Context, config: Config = {}): void {
   const logger: BridgeLogger = createLogger('dsh-agents-bridge')
+
+  // Wire the kernel's process factory into the drivers' runtime seam BEFORE any
+  // manager can start a run. Drivers resolve it lazily, so without this the
+  // first `agents_run` fails with "no driver runtime installed". Idempotent, and
+  // intentionally outside the effect: it is process-global wiring, not a
+  // resource this fiber owns (see src/integrate.ts).
+  installDriverRuntime()
 
   const managerOptions: ManagerOptions = {
     logger,

@@ -1,0 +1,6 @@
+{"type":"step_start"}
+{"type":"tool_use","tool":"bash","callId":"call_1","input":{"command":"ls -la"}}
+{"type":"tool_result","tool":"bash","callId":"call_1","text":"total 42\ndrwxr-xr-x"}
+{"type":"text","text":"Hello "}
+{"type":"text","text":"world","sessionId":"ses_stream_123"}
+{"type":"step_finish","usage":{"input":200,"output":100,"cacheRead":50,"cacheWrite":25}}

@@ -64,6 +64,7 @@ import {
   errorText,
   event,
   filterCustomArgs,
+  filterLaunchPrefix,
   readLines,
   resolveRuntime,
   tryParseJson,
@@ -95,6 +96,65 @@ export const MIN_OPENCLAW_VERSION = '2026.5.5'
 
 /** Default idle window before a complete result blob is treated as terminal. */
 export const DEFAULT_OPENCLAW_RESULT_IDLE_GRACE_MS = 2000
+
+/** First line of the config-invalid failure openclaw prints when a profile is missing. */
+export const OPENCLAW_CONFIG_INVALID_MARKER = 'OpenClaw config is invalid'
+
+/** The `--profile <name>` (or `--profile=<name>`) an identity's prefix selects. */
+export function openclawProfileFromArgsPrefix(
+  argsPrefix: readonly string[] | undefined,
+): string | undefined {
+  if (argsPrefix === undefined) return undefined
+  for (let i = 0; i < argsPrefix.length; i++) {
+    const arg = argsPrefix[i]
+    if (arg === undefined) continue
+    if (arg === '--profile') {
+      const value = argsPrefix[i + 1]
+      if (value !== undefined && value !== '') return value
+    } else if (arg.startsWith('--profile=')) {
+      return arg.slice('--profile='.length)
+    }
+  }
+  return undefined
+}
+
+/**
+ * Turn openclaw's config-invalid failure into something actionable.
+ *
+ * Measured on this machine: a bare `openclaw.mjs agent …` fails with
+ *
+ *     OpenClaw config is invalid
+ *     File: ~/.openclaw/openclaw.json
+ *     Problem: - <root>: Invalid input
+ *     Fix: openclaw doctor --fix
+ *
+ * because `~/.openclaw/openclaw.json` is a stub holding only `mcpServers`,
+ * while the AutoClaw desktop app keeps its complete config in its own profile
+ * directory (`~/.openclaw-autoclaw/openclaw.json`, verified with
+ * `openclaw --profile autoclaw config validate`). Without this hint the model
+ * sees a config error and has no idea the fix is a `--profile` prefix.
+ */
+export function openclawConfigDiagnosis(
+  text: string,
+  argsPrefix: readonly string[] | undefined,
+): string {
+  if (!text.includes(OPENCLAW_CONFIG_INVALID_MARKER)) return ''
+  const file = /File:\s*(\S+)/.exec(text)?.[1]
+  const profile = openclawProfileFromArgsPrefix(argsPrefix)
+  const headline = file === undefined
+    ? OPENCLAW_CONFIG_INVALID_MARKER
+    : `${OPENCLAW_CONFIG_INVALID_MARKER} (File: ${file})`
+  const hint =
+    profile === undefined
+      ? 'No --profile prefix is in use, so the default profile is being read. ' +
+        'Desktop installs (e.g. AutoClaw) keep a complete config under a named ' +
+        'profile: try the global prefix `--profile autoclaw` BEFORE the `agent` ' +
+        'subcommand, and verify with `openclaw --profile autoclaw config validate`.'
+      : `The identity already passes \`--profile ${profile}\`, so re-check that ` +
+        `~/.openclaw-${profile}/openclaw.json is the file that validates ` +
+        `(\`openclaw --profile ${profile} config validate\`).`
+  return `${headline}. ${hint} Fix: openclaw doctor --fix`
+}
 
 // ── argv ────────────────────────────────────────────────────────────────────
 
@@ -605,7 +665,9 @@ export async function runOpenclaw(
   const now = rt.now ?? Date.now
   const startedAt = now()
   const sessionId = nextSessionId(startedAt)
-  const agentSessionId = opts.resumeSessionId ?? newOpenclawSessionId(startedAt)
+  // Always present: `openclaw agent` refuses to run without a session selector,
+  // and the id it was launched with is what a later resume has to pass back.
+  const agentSessionId = opts.resumeSessionId ?? newOpenclawSessionId()
 
   const args = buildOpenclawArgs(
     {
@@ -619,7 +681,17 @@ export async function runOpenclaw(
     },
     deps.logger,
   )
-  const commandLine = buildCommandLine(deps.command, args)
+  const commandLine = buildCommandLine(
+    {
+      ...deps.command,
+      // autoclaw's identity puts the global `--profile autoclaw` in argsPrefix,
+      // which MUST precede the `agent` subcommand. Filtering it like every other
+      // prefix keeps a prefix from re-asserting a protocol flag, while the
+      // positional `agent`/profile tokens pass through untouched.
+      argsPrefix: filterLaunchPrefix(deps.command.argsPrefix, OPENCLAW_BLOCKED_ARGS, deps.logger),
+    },
+    args,
+  )
 
   // Declared before the session so the cancel hook always closes over an
   // initialized binding.
@@ -788,14 +860,28 @@ export async function runOpenclaw(
       errMsg = `openclaw exited with error: exit status ${exit.code ?? 'null'}`
     }
 
+    // A config-invalid run can still exit 0 and print its complaint as plain
+    // stdout text, which the raw-output fallback would otherwise report as a
+    // *successful* answer.
+    const combinedText = `${state.output}\n${stderrTail.value}`
+    const configDiagnosis = openclawConfigDiagnosis(combinedText, deps.command.argsPrefix)
+    if (configDiagnosis !== '' && status === 'completed' && state.eventCount === 0) {
+      status = 'failed'
+      errMsg = configDiagnosis
+    }
+
     if (status === 'failed') {
-      // Only replace the "nothing parsed" case with the richer diagnosis; a
-      // start/exit failure keeps its own message.
-      if (errMsg === '' || errMsg === OPENCLAW_NO_PARSEABLE_OUTPUT) {
-        errMsg = parser.diagnoseNoOutput(stderrTail.value)
-      }
-      if (stderrTail.value.trim() !== '') {
-        errMsg = `${errMsg}: ${stderrTail.value.trim()}`
+      if (configDiagnosis !== '') {
+        errMsg = configDiagnosis
+      } else {
+        // Only replace the "nothing parsed" case with the richer diagnosis; a
+        // start/exit failure keeps its own message.
+        if (errMsg === '' || errMsg === OPENCLAW_NO_PARSEABLE_OUTPUT) {
+          errMsg = parser.diagnoseNoOutput(stderrTail.value)
+        }
+        if (stderrTail.value.trim() !== '') {
+          errMsg = `${errMsg}: ${stderrTail.value.trim()}`
+        }
       }
     }
 
@@ -810,7 +896,11 @@ export async function runOpenclaw(
       ...(errMsg === '' ? {} : { error: errMsg }),
       ...(state.usage === undefined ? {} : { usage: state.usage }),
       durationMs: now() - startedAt,
-      backendSessionId: state.sessionId === '' ? agentSessionId : state.sessionId,
+      // The selector the run was launched with — that is the value a later
+      // `agents_send` has to pass back as `--session-id`. The runtime's own
+      // `meta.agentMeta.sessionId` names its session *file*, which is not a
+      // valid CLI selector.
+      backendSessionId: agentSessionId,
     })
   })()
 

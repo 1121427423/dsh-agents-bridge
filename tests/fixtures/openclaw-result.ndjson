@@ -1,0 +1,46 @@
+{
+  "payloads": [
+    {
+      "text": "hi from the raw fallback",
+      "mediaUrl": null
+    }
+  ],
+  "meta": {
+    "durationMs": 6115,
+    "agentMeta": {
+      "sessionId": "4dcd853a-6e6d-45af-977d-092f909a7a99",
+      "sessionFile": "/Users/joey/.openclaw/agents/main/sessions/4dcd853a-6e6d-45af-977d-092f909a7a99.jsonl",
+      "provider": "openrouter",
+      "model": "anthropic/claude-opus-4.7",
+      "agentHarnessId": "pi",
+      "usage": {
+        "input": 34620,
+        "output": 6,
+        "cacheWrite": 46482,
+        "total": 81108
+      },
+      "lastCallUsage": {
+        "input": 34620,
+        "output": 6,
+        "cacheRead": 0,
+        "cacheWrite": 46482,
+        "total": 81108
+      },
+      "promptTokens": 81102
+    },
+    "aborted": false,
+    "systemPromptReport": {
+      "source": "run",
+      "generatedAt": 1777999557022,
+      "sessionId": "aa49a251-053c-4a78-b7e4-767a2b5f7930",
+      "sessionKey": "agent:main:main",
+      "provider": "openrouter",
+      "model": "anthropic/claude-opus-4.7",
+      "workspaceDir": "/Users/joey/dev/red/workspace",
+      "sandbox": {
+        "mode": "off",
+        "sandboxed": false
+      }
+    }
+  }
+}
