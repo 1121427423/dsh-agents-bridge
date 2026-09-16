@@ -22,16 +22,25 @@ function fakeExecutable(name: string): string {
 }
 
 /**
- * A registry whose CLI track has NO extra search path.
+ * A registry cut off from the host machine — the default for this whole suite.
  *
- * Without this the suite is host-dependent in a very real way: the CLI track
- * searches `~/.local/bin`, `/usr/local/bin`, `/opt/homebrew/bin` and the nvm bin
- * dir, so on a machine where `claude`/`codex` are installed a "PATH is empty ⇒
- * not found" assertion silently becomes false. The track's own search behaviour
- * is covered explicitly in tests/tracks/cli.test.ts instead.
+ * Two leaks are closed here, both of the same kind (a test that passes on this
+ * laptop and fails on someone else's):
+ *
+ * 1. `searchPath: []` — the CLI track otherwise searches `~/.local/bin`,
+ *    `/usr/local/bin`, `/opt/homebrew/bin` and the nvm bin dir, so on a machine
+ *    where `claude`/`codex` are installed a "PATH is empty ⇒ not found"
+ *    assertion silently becomes false. The track's own search behaviour is
+ *    covered explicitly in tests/tracks/cli.test.ts.
+ * 2. `scan: false` — since P3 the desktop track auto-scans `/Applications` and
+ *    `~/Applications` on the first cold `probe()`. Without this, every probe in
+ *    this file would read the host's installed apps and could gain identities
+ *    (and shift the result count) depending on what the developer happens to
+ *    have installed. Tests that genuinely want scan behaviour opt IN with an
+ *    injected `scan: { roots: [<tmp fixture root>] }`.
  */
 function createHermeticRegistry(options: Parameters<typeof createRegistry>[0] = {}) {
-  return createRegistry({ ...options, trackPolicyOptions: { searchPath: [] } })
+  return createRegistry({ ...options, scan: false, trackPolicyOptions: { searchPath: [] } })
 }
 
 describe('built-in descriptor table', () => {
@@ -295,6 +304,52 @@ describe('probe() reports launch + credential health + model discovery', () => {
     expect(generic?.models).toBeUndefined()
     expect(generic?.modelsSource).toBeUndefined()
     expect(generic?.health?.credential).toBe('unknown')
+  })
+
+  it('probes workbuddy-ai as its own identity: delegated login + its own catalog', async () => {
+    // The two outstanding P3 rows, end to end through probe(). The two
+    // WorkBuddy builds differ ONLY in `cli/product.json` `dataFolderName`, so
+    // the international build must read `~/.workbuddy-ai` — never the domestic
+    // `~/.workbuddy` — and its auth is the app's own login, which the bridge
+    // must not go looking for a file to describe.
+    const international = JSON.stringify({
+      models: [{ id: 'deepseek-v4.1-flash-sg' }, { id: 'gpt-6-astra' }, { id: 'gemini-3.5-flash' }],
+    })
+    const domestic = JSON.stringify({ models: [{ id: 'hy3' }] })
+    const registry = createHermeticRegistry({
+      env: { PATH: '' },
+      hostOptions: {
+        home: '/home/test',
+        contents: {
+          '/home/test/.workbuddy-ai/cache/acc-product-config-v3.json': international,
+          '/home/test/.workbuddy/cache/acc-product-config-v3.json': domestic,
+        },
+      },
+    })
+    const result = (await registry.probe()).find((r) => r.id === 'workbuddy-ai')
+    expect(result).toBeDefined()
+    expect(result?.track).toBe('desktop')
+    expect(result?.family).toBe('codebuddy')
+    // not-applicable: a desktop login, not a file — and no configPath, because
+    // there is no file it was derived from.
+    expect(result?.health?.credential).toBe('not-applicable')
+    expect(result?.health?.configPath).toBeUndefined()
+    expect(result?.health?.detail).toContain('www.workbuddy.ai')
+    // Its OWN catalog, not the domestic one.
+    expect(result?.models).toEqual(['deepseek-v4.1-flash-sg', 'gpt-6-astra', 'gemini-3.5-flash'])
+    expect(result?.modelsSource).toContain('.workbuddy-ai/cache/acc-product-config-v3.json')
+  })
+
+  it('degrades workbuddy-ai model discovery to "not discovered" when its cache is unreadable', async () => {
+    // D19: this file is a SERVER-PUSHED cache, so its absence is routine and
+    // must never throw or claim the engine has no models.
+    const registry = createHermeticRegistry({ env: { PATH: '' }, hostOptions: { home: '/home/test', contents: {} } })
+    const result = (await registry.probe()).find((r) => r.id === 'workbuddy-ai')
+    expect(result).toBeDefined()
+    expect(result?.models).toBeUndefined()
+    expect(result?.modelsSource).toBeUndefined()
+    // The credential half is unaffected by a missing catalog, and vice versa.
+    expect(result?.health?.credential).toBe('not-applicable')
   })
 })
 

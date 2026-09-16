@@ -25,7 +25,9 @@
 | D17 | `exports['.']` 用字符串 `./lib/index.js` | DSH 插件合同校验器要求字符串形式；类型走顶层 `types` 字段，不影响 TS | ✅ 已修正 |
 | D18 | `src/integrate.ts` 作为 kernel↔drivers 的唯一适配层 | 两侧并行定下的形状不一致（行回调 vs stream、cancel vs terminate、SpawnExit vs ProcessExit）；单独适配比改任一冻结接口更安全 | ✅ 已实现 |
 | D19 | 模型目录从**服务端下发的缓存**读取，不搜 app 内置字符串 | 更正：`deepseek-v4.1-flash` 确实存在（0.03x、1M/默认300K、原生多模态），它在 `~/.workbuddy/cache/acc-product-config-v3.json` 里；我先前只搜 app.asar 内置串因而误判 | ✅ 已定位 |
-| D20 | `agents_probe` 增补模型发现（P3） | 对应 multica `ModelDiscoveryFunc`；有了可取值的模型目录，`agents_run{model}` 才可校验，别名映射（按 `credits` 选性价比、按 `supportsImages` 判多模态）才有真实落点 | ⏳ P3 |
+| D20 | `agents_probe` 增补模型发现（P3） | 对应 multica `ModelDiscoveryFunc`；有了可取值的模型目录，`agents_run{model}` 才可校验，别名映射（按 `credits` 选性价比、按 `supportsImages` 判多模态）才有真实落点 | ✅ 已实现 |
+| D24 | P3 扫描**只读真实文件、绝不读 `app.asar`**；身份由 `product.json` 决定而非 bundle 名 | 实测两个 WorkBuddy 的 launcher 字节相同，唯一区别是 `cli/product.json` 的 `dataFolderName`/`isOversea`；按目录名猜会在重命名或多语言包上直接错。asar 是 297MB 存档，读它要解包器且零新增事实 | ✅ 已验证 |
+| D25 | P3 端口指纹**默认期望表为空**，且**永不影响 `available`** | 本机没有已验证的 gateway 端口，猜一个就是往探测输出塞假事实；且"没在监听"是桌面应用的常态（应用没开），不能因此把可启动的身份判为不可用——`available` 只回答"能不能真启动" | ✅ 已定 |
 
 ## 任务拆分（3 个并行工作流）
 
@@ -141,18 +143,23 @@ kernel 只保留共享机制（`<PREFIX>_PATH` 覆盖、解析、`<exe> --versio
 - [x] **probe health / 模型发现（D20）**：`src/tracks/{health,models,host-files}.ts` + 60 个测试，已接进 `probe()`；真机输出 claude ok/6、codex ok/2、workbuddy n-a/51、autoclaw n-a/6、openclaw missing/未发现；关闭两个泄露面（V8 解析错误会回显输入、autoclaw 配置里存着 JWT）
 - [x] **D23 codebuddy-code 完成**：`family: codebuddy`（真实字节决定，非照文档猜）+ 20 测试 + 真实抓包 fixture；已接进 `agents_probe`（avail=true 2.151.0）。抓的是一次**鉴权失败**——退出码 0、stderr 空、错误只在 `errors[]`/assistant 文本里，正是最有价值的证据
 - [x] **桌面轨道新增 WorkBuddy AI（国际版）身份**：`workbuddy-ai`，与国内版是**两个 bundle、两个身份**（同一份字节相同的 launcher，靠各自 `product.json` 的 `dataFolderName` 选 `~/.workbuddy-ai` / `~/.workbuddy`）；`tests/tracks/desktop.test.ts` 11 个测试（含宿主相关断言：两份 product.json 的 dataFolderName 必须不同、launcher 字节相同）
-- [ ] 待两个子代理收工后补 `workbuddy-ai` 的 health（`not-applicable`）与 models（`~/.workbuddy-ai/cache/acc-product-config-v3.json`，22 个 id）行——**同一文件同一时刻只允许一个写者**
+- [x] **`workbuddy-ai` 的 health / models 两行补齐**（P3）：health = `not-applicable`（桌面登录，桥不持有凭据；实测 `~/.workbuddy-ai/security/` 下有 UUID 命名的凭据目录，而 `src/` 全树**不含 `security` 字样**，测试用 tripwire reader 断言"一个路径都没碰"）；models 读 `~/.workbuddy-ai/cache/acc-product-config-v3.json`（真机 22 个 id，含 `deepseek-v4.1-flash-sg` / `gpt-6-astra` / `gemini-3.5-flash`），**不读**国内版的目录；读失败（缺失/不可读/非法 JSON）一律降级为 "not discovered" 而非抛错（D19：服务端下发缓存，缺席是常态）
+- [x] **P3 probe 泛化（app bundle 扫描 + 端口指纹）**：`src/tracks/desktop/{scan,port-probe}.ts` + 50 个测试
+  - **扫描**：只读 `app.asar.unpacked/` 下的真实文件，**绝不读 `app.asar`**（297MB 存档）；身份来自 `product.json` 的 `applicationName`/`dataFolderName`/`isOversea`/`darwinBundleIdentifier`，**不靠 bundle 名猜**（实测 `WorkBuddy.app` 与 `WorkBuddy AI.app` 的 launcher 字节相同，只有 product.json 不同）；深度/单目录条目/单文件大小/整轮墙钟四重上限，任何异常降级为 "bundle unrecognized"；id 只由 bundle 相对路径与文件内容派生（无随机数、无时间戳、无绝对路径），可复现
+  - **合并语义**：内置表优先（`mergeScannedIdentities`），扫描只做补充；被遮蔽的 bundle 进 `scanDiagnostics()`，不静默丢弃
+  - **缓存**：复用 `registry.ts` 既有的 TTL probe 缓存，未新增第二套缓存机制（扫描结果额外 memoise：装了哪些 bundle 不随 60s TTL 变化）
+  - **端口指纹**：只探 `127.0.0.1` / `::1`（`localhost` 明确拒绝，避免走 resolver）；连接超时 ≤300ms、并发封顶、整轮墙钟预算；失败一律静默降级。**只有端口 + 响应签名同时命中才算 `confirmed`**，否则只是**疑似**，且**两者都不得影响 `available`**（`available` 仍只由"能不能真启动"决定）。默认期望表为**空**：本机没有已验证的 gateway 端口，猜一个等于往探测输出里塞假事实
+  - **扫描真机实测**：29ms 扫完 `/Applications` 的 64 个 bundle，识别出 AutoClaw 的 gateway（`Resources/gateway/openclaw/openclaw.mjs` + bundle 内 `Resources/node/darwin-arm64/node`），并按内置优先规则正确遮蔽
 - [ ] P2 取消/续接/watchdog 打磨
-- [ ] P3 probe 泛化（app bundle 扫描 + 端口指纹）
 - [ ] P4 ACP driver / 监工 UI / 并行 fan-out
 
 ## 交付指标（当前）
 
 | 指标 | 值 |
 |---|---|
-| TS 文件 | 45 个（src 33 / tests 11 / scripts 1） |
-| 测试 | **296 个全部通过**（+33 codex、+20 codebuddy-code、+9 desktop、+15 轨道、+60 health/models） |
+| TS 文件 | 47 个（src 35 / tests 11 / scripts 1） |
+| 测试 | **354 个全部通过（20 个文件）**（P3 +58：scan 31、port-probe 19、models +5、health +1、registry +2） |
 | `tsc --noEmit` | 0 错误 |
-| 构建产物 | `lib/index.js` 129.3 KB |
+| 构建产物 | `lib/index.js` 见顶部命令输出 |
 | 合同校验 | 11/11 PASS |
 | 端到端集成 | 5/5 PASS |

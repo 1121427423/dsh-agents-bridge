@@ -369,6 +369,112 @@ describe('workbuddy: acc-product-config-v3.json', () => {
   })
 })
 
+/**
+ * The international build (P3 completion of the two outstanding rows).
+ *
+ * `workbuddy-ai` is a SEPARATE identity, not a locale flag: its bundle's
+ * `product.json` sets `dataFolderName=.workbuddy-ai`, so the byte-identical
+ * launcher reads its own home. The model catalog therefore has to be read from
+ * `~/.workbuddy-ai/...`, and the two catalogs really do differ (22 international
+ * ids against 51 domestic ones on the target machine).
+ */
+describe('workbuddy-ai: the international build reads its own home', () => {
+  const AI_PATH = at('.workbuddy-ai', 'cache', 'acc-product-config-v3.json')
+
+  it('reads ~/.workbuddy-ai/cache/acc-product-config-v3.json, not the domestic path', () => {
+    const discovery = modelsFor('workbuddy-ai', {
+      home: HOME,
+      contents: { [AI_PATH]: WORKBUDDY_JSON },
+    })
+    expect(discovery.discovered).toBe(true)
+    if (!discovery.discovered) return
+    expect(discovery.models).toEqual(['fast-model', 'deep-model', 'hy3', 'deepseek-v4.1-flash', 'kimi-k3-1'])
+    expect(discovery.source).toBe('~/.workbuddy-ai/cache/acc-product-config-v3.json models (5 ids)')
+    // The evidence names the international home, which is the whole point.
+    expect(discovery.source).toContain('.workbuddy-ai')
+    expect(discovery.source).not.toContain('~/.workbuddy/cache')
+    // The same parser, so a credit multiplier is carried through identically.
+    expect(discovery.creditMultipliers).toEqual({
+      'fast-model': 'x0.21',
+      'deep-model': 'x1.20',
+      'deepseek-v4.1-flash': 'x0.30',
+    })
+  })
+
+  it('does NOT read the domestic catalog when asked for the international build', () => {
+    // Only the DOMESTIC file exists. The international identity must report
+    // "not discovered" rather than silently borrowing the other build's list —
+    // that would tell the model the engine accepts ids it may not.
+    const discovery = modelsFor('workbuddy-ai', {
+      home: HOME,
+      contents: { [WORKBUDDY_PATH]: WORKBUDDY_JSON },
+      readFile: throwingReader(notFound(AI_PATH)),
+    })
+    expect(discovery.discovered).toBe(false)
+    if (discovery.discovered) return
+    expect(discovery.reason).toContain('.workbuddy-ai')
+    expect(discovery.reason).toContain('not found')
+  })
+
+  it('degrades to "not discovered" when the cache file is absent (D19)', () => {
+    // The file is a SERVER-PUSHED cache, so its absence is routine — a user who
+    // has never signed in, or an app that has not synced yet. That must be a
+    // discovery failure, never a throw.
+    const absent = modelsFor('workbuddy-ai', { home: HOME, readFile: throwingReader(notFound(AI_PATH)) })
+    expect(absent.discovered).toBe(false)
+    if (!absent.discovered) {
+      expect(absent.reason).toBe('not discovered: ~/.workbuddy-ai/cache/acc-product-config-v3.json not found')
+    }
+    expect(() => modelsFor('workbuddy-ai', { home: HOME, readFile: throwingReader(notFound(AI_PATH)) })).not.toThrow()
+  })
+
+  it('degrades to "not discovered" when the cache file is unreadable or malformed', () => {
+    const unreadable = modelsFor('workbuddy-ai', {
+      home: HOME,
+      readFile: () => {
+        const error = new Error('EACCES: permission denied') as Error & { code?: string }
+        error.code = 'EACCES'
+        throw error
+      },
+    })
+    expect(unreadable.discovered).toBe(false)
+    if (!unreadable.discovered) expect(unreadable.reason).toContain('not readable')
+
+    const malformed = modelsFor('workbuddy-ai', {
+      home: HOME,
+      contents: { [AI_PATH]: '{ this is not json' },
+    })
+    expect(malformed.discovered).toBe(false)
+    if (!malformed.discovered) expect(malformed.reason).toContain('.workbuddy-ai')
+    // The parse error's POSITION is reported, never a snippet of the file, so a
+    // truncated cache cannot put its own bytes into probe output.
+    if (!malformed.discovered) expect(malformed.reason).toContain('position')
+
+    const noModels = modelsFor('workbuddy-ai', {
+      home: HOME,
+      contents: { [AI_PATH]: JSON.stringify({ agents: [] }) },
+    })
+    expect(noModels.discovered).toBe(false)
+    if (!noModels.discovered) expect(noModels.reason).toContain('no "models" array')
+  })
+
+  it('is a different identity from workbuddy, reading a different file', () => {
+    // Same content in both files: the two identities still report different
+    // sources, proving they are not one reader wearing two names.
+    const both = {
+      [WORKBUDDY_PATH]: WORKBUDDY_JSON,
+      [AI_PATH]: WORKBUDDY_JSON,
+    }
+    const domestic = modelsFor('workbuddy', { home: HOME, contents: both })
+    const international = modelsFor('workbuddy-ai', { home: HOME, contents: both })
+    expect(domestic.discovered && international.discovered).toBe(true)
+    if (!domestic.discovered || !international.discovered) return
+    expect(domestic.source).toContain('.workbuddy/cache')
+    expect(international.source).toContain('.workbuddy-ai/cache')
+    expect(domestic.source).not.toBe(international.source)
+  })
+})
+
 describe('autoclaw: openclaw.json models.providers', () => {
   it('flattens every provider, in file order, and names them in the source', () => {
     const discovery = modelsFor('autoclaw', {

@@ -40,10 +40,19 @@ describe('desktop track catalog', () => {
       expect(entry.command.executable.startsWith('/')).toBe(true)
     }
     expect(DESKTOP_TRACK_DESCRIPTORS.map((d) => d.id)).toContain('workbuddy-ai')
-    // Both halves are assembled into the one table the kernel reads.
-    expect(BUILTIN_DESCRIPTORS.filter((d) => d.track === 'desktop').length).toBe(
-      DESKTOP_TRACK_DESCRIPTORS.length,
-    )
+    // The built-in table is a SUPERSET of this catalog: `BUILTIN_DESCRIPTORS`
+    // also carries the CLI track, and the desktop half must appear in it
+    // unchanged and in the same order. (Not an equality against the catalog
+    // length: since P3 the registry may APPEND scan-discovered identities, so a
+    // count comparison here would be asserting the wrong thing — see
+    // tests/tracks/scan.test.ts for the built-in-wins rule.)
+    const desktopIds = BUILTIN_DESCRIPTORS.filter((d) => d.track === 'desktop').map((d) => d.id)
+    expect(desktopIds).toEqual(DESKTOP_TRACK_DESCRIPTORS.map((d) => d.id))
+    // And every built-in desktop descriptor is one of this catalog's, by
+    // identity — nothing was renamed or replaced on the way in.
+    for (const entry of DESKTOP_TRACK_DESCRIPTORS) {
+      expect(BUILTIN_DESCRIPTORS.find((d) => d.id === entry.id)).toEqual(entry)
+    }
   })
 
   it('models the two WorkBuddy builds as two identities, not one flag', () => {
