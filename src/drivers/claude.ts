@@ -309,6 +309,17 @@ export interface ClaudeStreamState {
   /** `result.result` — the authoritative final text when the run succeeded. */
   finalResultText: string
   resultIsError: boolean
+  /**
+   * First entry of the terminal frame's `errors[]`.
+   *
+   * Measured on two engines: the error path leaves `result` EMPTY and puts the
+   * engine's own words in `errors[]` instead. Real captures on this machine:
+   *   codebuddy-code → "Authentication required. Please use /login command to sign in to your account"
+   *   workbuddy-ai   → the 401 lands in an assistant text block and `result` is ''
+   * Without this, the model-facing error degraded to "<engine> returned an error
+   * result without details" while the useful sentence sat unread in the transcript.
+   */
+  resultError: string
   /** Non-empty only for a structured reason the dialect positively recognised. */
   terminalReasonError: string
   /**
@@ -330,6 +341,7 @@ function emptyState(): ClaudeStreamState {
     sessionId: '',
     sawResult: false,
     finalResultText: '',
+    resultError: '',
     resultIsError: false,
     terminalReasonError: '',
     lastAssistantText: '',
@@ -467,7 +479,7 @@ export class ClaudeStreamParser {
    * frame buried the transcript under 18 identical "running" events that the
    * model then paid for on every `agents_output` poll.
    */
-  #lastStatusText: string | undefined
+  #statusTextsSeen: Set<string> = new Set()
 
   constructor(
     dialect: StreamJsonDialect,
@@ -535,8 +547,12 @@ export class ClaudeStreamParser {
             reported !== undefined && reported !== '' ? `status=${reported}` : '',
           ].filter((part) => part !== '')
           const text = facts.length > 0 ? `running (${facts.join(', ')})` : 'running'
-          if (text !== this.#lastStatusText) {
-            this.#lastStatusText = text
+          // Deduped by the SET of texts already emitted, not by the previous
+          // one: the international WorkBuddy build emits `init`, then `status`,
+          // then `init` AGAIN, which an "only if different from the last" rule
+          // passes straight through (observed: 4 events where 3 are correct).
+          if (!this.#statusTextsSeen.has(text)) {
+            this.#statusTextsSeen.add(text)
             this.#sink.emit(event(this.#now, 'status', { content: text }))
           }
         }
@@ -694,6 +710,11 @@ export class ClaudeStreamParser {
   #handleResult(msg: Record<string, unknown>): void {
     this.#state.sawResult = true
     this.#state.finalResultText = asString(msg['result']) ?? ''
+    const errors = msg['errors']
+    if (Array.isArray(errors)) {
+      const first = errors.find((entry) => typeof entry === 'string' && entry.trim() !== '')
+      this.#state.resultError = typeof first === 'string' ? first.trim() : ''
+    }
     this.#state.resultIsError = msg['is_error'] === true
     this.#state.terminalReasonError = this.#dialect.readsTerminalReason
       ? claudeTerminalReasonFailure(msg['terminal_reason'], msg['result'])
@@ -1090,10 +1111,17 @@ export async function runStreamJsonFamily(
       errMsg = state.terminalReasonError
     } else if (state.resultIsError) {
       status = 'failed'
+      // Prefer the engine's own sentence, in descending order of authority:
+      // `result` (used by claude), then `errors[]` (codebuddy / codebuddy-code),
+      // then the last assistant text (the 401 sits there on workbuddy-ai).
       errMsg =
         state.finalResultText !== ''
           ? state.finalResultText
-          : `${label} returned an error result without details`
+          : state.resultError !== ''
+            ? state.resultError
+            : state.lastAssistantText !== ''
+              ? state.lastAssistantText
+              : `${label} returned an error result without details`
     }
     if (status === 'completed' && scanError !== undefined) {
       status = 'failed'

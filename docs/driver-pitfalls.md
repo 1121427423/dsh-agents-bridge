@@ -36,6 +36,15 @@
 | 21 | `reasoning_output_tokens` 是 `output_tokens` 的**子集** | 计入 `outputTokens` 会重复计数，丢掉又等于否认它推理过 → ABI v2 新增 `AgentUsage.reasoningTokens` 只作**披露**，任何求和都不得累加它 |
 | 22 | 0.154 把 MCP 工具藏在 **client 执行的 `tool_search`** 之后 | headless `codex exec` 没有 client，MCP 工具不会出现在 `tools[]`，**无法脚本化调用** → `mcp_tool_call` 那条 fixture 明确标为 DERIVED（文件名 + `CODEX-PROVENANCE.md`），不冒充抓包 |
 
+## 跨引擎的诊断文本（实测于 codebuddy-code 2.151.0 与 workbuddy-ai 2.137.1）
+
+| # | 坑 | 防御 |
+|---|---|---|
+| 23 | **错误路径上 `result` 字段是空的，引擎自己的话在 `errors[]` 里**（codebuddy-code：`Authentication required. Please use /login…`；workbuddy-ai：整段 401 诊断含 `auth-type`/`token-length`/`target`） | 终态错误按权威降级取：`result` → `errors[0]` → 最后一条 assistant 文本 → 兜底措辞。修之前模型只看到「returned an error result without details」，而原因就躺在转录里没人读 |
+| 24 | **退出码 0 + stderr 空 ≠ 成功**（codebuddy-code 鉴权失败时正是如此） | 终态判定以 `is_error` / `terminal_reason` / 退出码**共同**决定，任何单一信号都不够 |
+| 25 | **同一份 status 文本会在 A-B-A 模式下重复**（国际版 WorkBuddy 连发 `init` → `status` → `init`） | 去重按**已见文本集合**，不按"与上一条是否相同"：后者放行 A-B-A，转录里多一条死事件 |
+| 26 | 引擎的 401 诊断里带 `token-length:1325`、`token-type:Bearer` 这类**元数据** | 它们是**引擎自己的输出**，原样透传（这是诊断价值所在）；而桥自己**合成**的文本（probe detail、错误包装）必须过 `redactSecrets()`。"桥不得新增凭据信息" ≠ "桥要替引擎修改措辞" |
+
 ## 跨 driver 通用规则
 
 | # | 规则 | 说明 |
@@ -43,6 +52,7 @@
 | 13 | **`interpreter` 规则是全 driver 通用的** | `[interpreter, executable, ...argsPrefix, ...args]`，不是 codebuddy 专属 |
 | 14 | **`generic-argv` 的 `argsPrefix` 是身份唯一的协议声明位** | 它的前缀可能就是 `--output-format stream-json`（stdin 提示模式的开关），被 blocked 过滤掉就没法调用 → 该 driver **不过滤前缀**，改用"前缀在前、驱动 flag 在后（last-wins）" |
 | 15 | launch prefix 过滤只对 claude/codebuddy/openclaw 生效 | multica 的 `filterLaunchPrefix` 语义 |
+| 27 | **空的本地缓存不是"没有模型"** | `~/.codebuddy/models.json` 是 19 字节的 `{"models": []}`，报 `models: []` 等于宣称该引擎不接受任何模型 → 一律走「not discovered + 原因」，空数组绝不外泄 |
 
 ## 已知 ABI 缺口（待定）
 

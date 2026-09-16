@@ -111,8 +111,16 @@ kernel 只保留共享机制（`<PREFIX>_PATH` 覆盖、解析、`<exe> --versio
   ACP driver 提供了本机可验证的第一个真实对端，不必只依赖 multica 的移植笔记。
 - 模型 id：`default-model / fast-model / balanced-model / primary-model / deep-model`，
   以及 `gpt-5.6-sol|terra|luna`、`gpt-5.5`、`gpt-5.4`、`gpt-5.3-codex`、
-  `gemini-3.5-flash`、`glm-5.3|5.2`、`kimi-k3|k2.6`、`minimax-m3`（可直接喂给
-  模型发现，无需读配置文件）。
+  `gemini-3.5-flash`、`glm-5.3|5.2`、`kimi-k3|k2.6`、`minimax-m3`。
+  **更正（实测）**：这些 id 只能当文档，**不能**当作模型发现的结果——
+  `~/.codebuddy/models.json` 只有 19 字节的 `{"models": []}`，是用户缓存而非目录，
+  报 `models: []` 等于宣称"这引擎不接受任何模型"。所以 `codebuddy-code` 的行为是
+  **not discovered + 原因**，凭据是 `unknown`（`~/.codebuddy` 下没有任何 key/token
+  文件，也没有复用桌面登录，所以既不是 `missing` 也不是 `not-applicable`）。
+- **实测结论（已落地）**：方言 = `codebuddy` 族（不是 `claude`）。真抓包五个顶层帧
+  与 WorkBuddy 完全同序同名（含两个未文档化帧），`apiKeySource` 同为
+  `copilot.tencent.com`，且 `terminal_reason` 在 2.151.0 里根本不存在 → claude 的
+  结构化原因读取器无字段可读。**零 ABI 变更**。默认模型（不传 `--model`）是 `hy3`。
 
 ## 阶段状态
 
@@ -131,7 +139,7 @@ kernel 只保留共享机制（`<PREFIX>_PATH` 覆盖、解析、`<exe> --versio
 - [x] **CLI 轨道真机跑通（到引擎边界）**：claude 被搜索路径找到 → 子进程 → stream-json 解析 → 终态失败=引擎自己的上游 401（凭据不归桥管）
 - [x] **D22 codex driver 完成**：`src/drivers/codex.ts` + 33 测试 + **真实抓包 fixtures**（本地 Responses stub 驱动真二进制）；真实端到端跑通（成功 / resume / 凭据失败三条路径）。三个关键发现：位置参数仍读 stdin 且不关就**永久阻塞**（与 claude 相反）、`turn.failed` 才是终态失败事件、`-c model_providers.OpenAI.*` 被拒为保留 id
 - [x] **probe health / 模型发现（D20）**：`src/tracks/{health,models,host-files}.ts` + 60 个测试，已接进 `probe()`；真机输出 claude ok/6、codex ok/2、workbuddy n-a/51、autoclaw n-a/6、openclaw missing/未发现；关闭两个泄露面（V8 解析错误会回显输入、autoclaw 配置里存着 JWT）
-- [ ] **D23 codebuddy-code**（最后做，先抓包验证方言）
+- [x] **D23 codebuddy-code 完成**：`family: codebuddy`（真实字节决定，非照文档猜）+ 20 测试 + 真实抓包 fixture；已接进 `agents_probe`（avail=true 2.151.0）。抓的是一次**鉴权失败**——退出码 0、stderr 空、错误只在 `errors[]`/assistant 文本里，正是最有价值的证据
 - [x] **桌面轨道新增 WorkBuddy AI（国际版）身份**：`workbuddy-ai`，与国内版是**两个 bundle、两个身份**（同一份字节相同的 launcher，靠各自 `product.json` 的 `dataFolderName` 选 `~/.workbuddy-ai` / `~/.workbuddy`）；`tests/tracks/desktop.test.ts` 11 个测试（含宿主相关断言：两份 product.json 的 dataFolderName 必须不同、launcher 字节相同）
 - [ ] 待两个子代理收工后补 `workbuddy-ai` 的 health（`not-applicable`）与 models（`~/.workbuddy-ai/cache/acc-product-config-v3.json`，22 个 id）行——**同一文件同一时刻只允许一个写者**
 - [ ] P2 取消/续接/watchdog 打磨
@@ -143,7 +151,7 @@ kernel 只保留共享机制（`<PREFIX>_PATH` 覆盖、解析、`<exe> --versio
 | 指标 | 值 |
 |---|---|
 | TS 文件 | 45 个（src 33 / tests 11 / scripts 1） |
-| 测试 | **296 个全部通过**（+33 codex、+20 codebuddy-code、+9 desktop、+… 见各 commit） |
+| 测试 | **296 个全部通过**（+33 codex、+20 codebuddy-code、+9 desktop、+15 轨道、+60 health/models） |
 | `tsc --noEmit` | 0 错误 |
 | 构建产物 | `lib/index.js` 129.3 KB |
 | 合同校验 | 11/11 PASS |
