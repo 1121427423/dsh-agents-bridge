@@ -96,10 +96,23 @@ kernel 只保留共享机制（`<PREFIX>_PATH` 覆盖、解析、`<exe> --versio
 （`codex exec --json` 输出 JSONL：`thread.started` / `item.completed` /
 `turn.started` / `turn.completed` / `error`）。driver 由子代理实现中。
 
-**D23 — `codebuddy-code` 放最后**：`@tencent-ai/codebuddy-code@2.151.0` 已装
-（`~/.nvm/.../bin/{codebuddy,codebuddy-code,cbc}`），但它自带 `dist-server`，
-headless 方言**未经验证**，可能说 claude stream-json 也可能自成一派。
-在拿到真实抓包前不加描述符。
+**D23 — `codebuddy-code` 放最后**（用户指定顺序）。`@tencent-ai/codebuddy-code@2.151.0`
+已装（`~/.nvm/.../bin/{codebuddy,codebuddy-code,cbc}`，`#!/usr/bin/env node` 脚本）。
+已完成侦察（`--help`，未跑真实请求）：
+
+- **方言倾向 claude 族**：参数面与 Claude Code 几乎逐条对应 —— `-p/--print`、
+  `--output-format text|json|stream-json`、`--input-format stream-json`、
+  `--model`、`--permission-mode {acceptEdits,bypassPermissions,default,plan,dontAsk,auto}`、
+  `--session-id`、`-r/--resume`、`--mcp-config`、`--dangerously-skip-permissions`、
+  `--include-partial-messages`。与 WorkBuddy 内的 codebuddy 同源，因此预期**复用
+  `claude` driver + 一个 dialect 配置**，而不是新写方言——但必须先用一次真实
+  headless 抓包确认帧结构（`--output-format stream-json`），再落描述符。
+- **额外发现**：它支持 `--acp`（ACP over stdin/stdout，ndJsonStream），这为 P4 的
+  ACP driver 提供了本机可验证的第一个真实对端，不必只依赖 multica 的移植笔记。
+- 模型 id：`default-model / fast-model / balanced-model / primary-model / deep-model`，
+  以及 `gpt-5.6-sol|terra|luna`、`gpt-5.5`、`gpt-5.4`、`gpt-5.3-codex`、
+  `gemini-3.5-flash`、`glm-5.3|5.2`、`kimi-k3|k2.6`、`minimax-m3`（可直接喂给
+  模型发现，无需读配置文件）。
 
 ## 阶段状态
 
