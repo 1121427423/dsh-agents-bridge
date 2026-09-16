@@ -27,6 +27,15 @@
  *    `system/status`, `file-history-snapshot`, `assistant`, `result`) with the
  *    same `apiKeySource: copilot.tencent.com`. Hence `family: 'codebuddy'`
  *    rather than `'claude'`; see tests/drivers/codebuddy-code.test.ts.
+ *  - `codebuddy-code --acp` → the SAME binary as above, reached over the Agent
+ *    Client Protocol instead of the stream-json dialect, and therefore a
+ *    SEPARATE identity (`codebuddy-code-acp`, family `'acp'`, decision D24).
+ *    Captured 2026-09-17 against 2.151.0: headerless NDJSON JSON-RPC on stdio
+ *    (`initialize` → `protocolVersion`/`authMethods`/`agentCapabilities`,
+ *    `session/new` → `sessionId`/`models`/`configOptions`, then a
+ *    `session/update` notification stream during `session/prompt`). The wire
+ *    protocol is pinned in `command.protocolArgs`, never inferred from the
+ *    binary name; see tests/fixtures/ACP-PROVENANCE.md.
  *
  * @module dsh-agents-bridge/tracks/cli/catalog
  */
@@ -92,5 +101,26 @@ export const CLI_TRACK_DESCRIPTORS: readonly AgentDescriptor[] = [
     capabilities: { resume: true, model: true, effort: true, mcpConfig: true },
     notes:
       'Headless contract verified 2026-09-16 (@tencent-ai/codebuddy-code 2.151.0): `codebuddy-code -p --output-format stream-json --input-format stream-json --verbose --permission-mode bypassPermissions --disallowedTools AskUserQuestion EnterPlanMode ExitPlanMode`, prompt as one stream-json line on stdin; the frames are the CodeBuddy/claude dialect (system/init, system/status, file-history-snapshot, assistant, result). NOT verified: a completed turn — this host is not signed in, so the run ends result{is_error:true} with "Authentication required. Please use /login command", and the model ids its --help advertises are documentation only (see docs/design-tracks.md).',
+  },
+  {
+    // SAME BINARY, DIFFERENT PROTOCOL — a second identity, not a correction of
+    // `codebuddy-code` above. The bridge must not choose between the two stream
+    // dialects by guessing: each identity pins its own wire protocol in
+    // `command.protocolArgs`, so a caller picks a protocol by picking an id.
+    id: 'codebuddy-code-acp',
+    track: 'cli',
+    family: 'acp',
+    displayName: 'Tencent CodeBuddy Code CLI over ACP (codebuddy-code --acp)',
+    command: { executable: 'codebuddy-code', protocolArgs: ['--acp'] },
+    envPrefix: 'CODEBUDDY_ACP',
+    // Honest about what ACP actually supports here: `resume` (session/resume),
+    // `model` and `effort` (session/new `models` + `configOptions`, driven
+    // through session/set_config_option), `mcpConfig` (session/new `mcpServers`,
+    // which is JSON over the wire rather than a config FILE the bridge writes).
+    // Deliberately NOT `clientTools`: this host's engine never issued an fs/*
+    // or terminal/* callback, so claiming the capability would be a guess.
+    capabilities: { resume: true, model: true, effort: true, mcpConfig: true, clientTools: false },
+    notes:
+      'The ACP face of the SAME binary as `codebuddy-code` (family `codebuddy`); the two ids are distinct identities and the argv differs only by --acp. Verified 2026-09-17 (2.151.0): headerless NDJSON JSON-RPC on stdio — `initialize` answers protocolVersion/authMethods/agentCapabilities, `session/new` answers sessionId + models.availableModels + configOptions (incl. thought_level), and `session/prompt` streams session/update notifications. NOT verified: a completed turn — this host is not signed in, and the engine answers with exit code 0 plus stopReason "refusal" carrying a 401 only in _meta (the bridge maps that to a failed run, never a "model declined" answer).',
   },
 ]

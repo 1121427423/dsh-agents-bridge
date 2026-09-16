@@ -189,7 +189,7 @@ export function createToolDefinitions(manager: AgentManager) {
             id: { type: 'string' },
             displayName: { type: 'string' },
             track: { type: 'string', enum: ['cli', 'desktop'] },
-            family: { type: 'string', enum: ['claude', 'codebuddy', 'codex', 'openclaw', 'generic'] },
+            family: { type: 'string', enum: ['claude', 'codebuddy', 'codex', 'openclaw', 'acp', 'generic'] },
             available: { type: 'boolean' },
             executable: { type: 'string' },
             version: { type: 'string' },
@@ -210,6 +210,7 @@ export function createToolDefinitions(manager: AgentManager) {
             },
             models: { type: 'array', items: { type: 'string' } },
             modelsSource: { type: 'string' },
+            authMethods: { type: 'array', items: { type: 'string' } },
           },
         },
       },
@@ -219,11 +220,13 @@ export function createToolDefinitions(manager: AgentManager) {
       const results = await manager.probe(args.refresh === undefined ? {} : { refresh: args.refresh })
       // Spread into mutable JSON arrays: the kernel returns `readonly` views,
       // and `output.schema` materialization must see plain lossless JSON.
-      return results.map(({ models, ...rest }) => ({
+      return results.map(({ models, authMethods, ...rest }) => ({
         ...rest,
         // `ProbeResult.models` is a readonly view; materialization needs a
-        // plain mutable array to satisfy the schema type.
+        // plain mutable array to satisfy the schema type. Same for the ACP-only
+        // `authMethods`.
         ...(models === undefined ? {} : { models: [...models] }),
+        ...(authMethods === undefined ? {} : { authMethods: [...authMethods] }),
       }))
     },
   })

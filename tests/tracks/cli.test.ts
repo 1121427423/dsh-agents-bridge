@@ -316,6 +316,43 @@ describe('the codebuddy-code identity on the CLI track', () => {
   })
 })
 
+describe('the codebuddy-code-acp identity on the CLI track', () => {
+  it('is a SECOND identity for the same binary, not a replacement', () => {
+    const cli = builtinDescriptor('codebuddy-code')
+    const acp = builtinDescriptor('codebuddy-code-acp')
+    expect(acp.command.executable).toBe(cli.command.executable)
+    expect(acp.id).not.toBe(cli.id)
+    expect(acp.family).toBe('acp')
+    // Distinct credential/override namespaces, so pinning one does not move
+    // the other.
+    expect(acp.envPrefix).not.toBe(cli.envPrefix)
+  })
+
+  it('carries the wire protocol in command.protocolArgs', () => {
+    expect(builtinDescriptor('codebuddy-code-acp').command.protocolArgs).toEqual(['--acp'])
+  })
+
+  it('carries protocolArgs THROUGH launch, so the argv reaches the child', () => {
+    // Dropping this is silent: the ACP identity would launch the same binary on
+    // the codebuddy stream-json protocol and the run would fail in a way that
+    // looks like an engine fault rather than a wiring fault.
+    const bin = path.join(tmpRoot, 'acp-bin')
+    fs.mkdirSync(bin, { recursive: true })
+    writeFile('acp-bin/codebuddy-code', '#!/bin/sh\nexec "$@"\n')
+
+    const resolved = createRegistry({
+      env: { PATH: bin },
+      trackPolicyOptions: { searchPath: [bin] },
+    }).resolve('codebuddy-code-acp')
+    expect(resolved.command.protocolArgs).toEqual(['--acp'])
+    expect(resolved.descriptor.family).toBe('acp')
+  })
+
+  it('advertises clientTools honestly (false: this engine never called back)', () => {
+    expect(builtinDescriptor('codebuddy-code-acp').capabilities?.clientTools).toBe(false)
+  })
+})
+
 function builtinDescriptor(id: string) {
   const found = BUILTIN_DESCRIPTORS.find((descriptor) => descriptor.id === id)
   if (found === undefined) throw new Error(`no built-in descriptor for ${id}`)
