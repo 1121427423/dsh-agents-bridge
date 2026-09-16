@@ -112,3 +112,69 @@ Fix: openclaw doctor --fix
 | session_id 从 init 事件捕获 | resume 支持不依赖 result 事件 |
 | codebuddy 用 `interpreter` 拉 node 才能跑 | `CommandSpec.interpreter` 是必需字段，不是可选优化 |
 | openclaw 身份必须带 profile | registry 的 `argsPrefix` 要支持「全局 flag + 子命令」组合 |
+
+---
+
+## 6. 模型目录是**服务端下发**的（重要更正）
+
+**教训**：不要在 app 内置字符串里找模型 id。`app.asar` 里只有历史遗留的少量 id；**真正的账号模型目录**是服务端下发的，缓存在：
+
+```
+~/.workbuddy/cache/acc-product-config-v3.json      # 383 KB
+```
+
+结构（实测）：
+
+| 键 | 内容 |
+|---|---|
+| `models[]` | 51 个条目：`id` / `name` / `credits`（倍率）/ `contextWindow{defaultLength, supportedLengths}` / `maxOutputTokens` / `supportsImages` / `supportsReasoning` / `supportsToolCall` / `reasoning{effort, summary}` |
+| `modelPromotions[]` | 促销规则，每条带 `modelIds[]` + `schedule` + `hover.textZh` |
+| `modelTiers[]` | 会员档位与可调度模型 |
+
+### 6.1 `deepseek-v4.1-flash`（用户界面上看到的那个）
+
+```json
+{
+  "id": "deepseek-v4.1-flash",
+  "name": "Deepseek-V4.1-Flash",
+  "credits": "x0.03",
+  "descriptionZh": "DeepSeek 旗舰模型，支持 1M 上下文窗口，原生多模态",
+  "contextWindow": { "defaultLength": 300000, "supportedLengths": [300000, 1000000] },
+  "maxInputTokens": 1000000,
+  "maxOutputTokens": 128000,
+  "onlyReasoning": true,
+  "reasoning": { "effort": "high", "summary": "auto" },
+  "supportsImages": true
+}
+```
+
+UI 上每个数字的来源：
+
+| UI 文案 | 配置字段 |
+|---|---|
+| 「支持 1M 上下文窗口」 | `maxInputTokens` / `supportedLengths` 上限 1000000 |
+| 「上下文窗口 300K」 | `contextWindow.defaultLength: 300000`（**默认值**，不是上限——同一张卡同时出现 1M 与 300K 的原因） |
+| 「0.03x 倍率」 | `credits: "x0.03"` —— **账号里最便宜的付费模型**（v4-flash 0.17、v4-pro 0.51；hy3 是 0.00 免费） |
+| 「原生多模态」 | `supportsImages: true` + `descriptionZh` |
+| 「9月10日-9月23日…工作日高峰期消耗翻倍」 | 促销 `ds-09discount-daytime-badge-202609`，`modelIds: ["deepseek-v4.1-flash"]`，`schedule` 全天 `0:00–23:59` Asia/Shanghai |
+
+### 6.2 实测跑通（真活 + 机器验证）
+
+```bash
+node "<app>/cli/bin/codebuddy" -p --output-format stream-json \
+  --model deepseek-v4.1-flash --permission-mode bypassPermissions "<任务>"
+```
+
+- 8 turns / 13.0s / `is_error:false`；usage `in=71043 out=409 cache_read=50176 cache_write=20867`
+- 动作序列：`thinking` → `Write sample.txt` → `Write wordcount.py` → `Bash python3 wordcount.py`
+- 汇报：「sample.txt 共 5 行、43 个单词、258 个字符」→ **独立复跑 `python3 wordcount.py` 输出逐字一致**（Lines 5 / Words 43 / Characters 258）
+- 对比 `deepseek-v4-flash`：7 turns / 11.6s，倍率 0.17（v4.1-flash 便宜约 5.7 倍）
+
+### 6.3 对插件的直接影响（→ P3）
+
+这正是 multica `ModelDiscoveryFunc`（`builtin_runtimes.go:77`）对应的场景。当前 `agents_probe` 只报「哪个引擎可用」，**应该再报「这个引擎能用哪些模型」**：
+
+- 数据源不是猜、不是抓 help 文本，而是读各自的模型目录缓存（WorkBuddy 已定位到具体文件）。
+- 有了模型目录，`agents_run` 的 `model` 参数才有可校验的取值域；`big/fast/vision` 这类别名映射也能落到真实 id 与倍率上（按 `credits` 选性价比，按 `supportsImages` 决定能不能读图）。
+- 注意 `onlyReasoning: true` 的模型要配 `--effort`（`supportedEfforts`）；v4.1-flash 只接受 `high`/`xhigh`。
+
