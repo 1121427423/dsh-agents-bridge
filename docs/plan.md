@@ -142,7 +142,7 @@ kernel 只保留共享机制（`<PREFIX>_PATH` 覆盖、解析、`<exe> --versio
 - [x] **D23 codebuddy-code 完成**：`family: codebuddy`（真实字节决定，非照文档猜）+ 20 测试 + 真实抓包 fixture；已接进 `agents_probe`（avail=true 2.151.0）。抓的是一次**鉴权失败**——退出码 0、stderr 空、错误只在 `errors[]`/assistant 文本里，正是最有价值的证据
 - [x] **桌面轨道新增 WorkBuddy AI（国际版）身份**：`workbuddy-ai`，与国内版是**两个 bundle、两个身份**（同一份字节相同的 launcher，靠各自 `product.json` 的 `dataFolderName` 选 `~/.workbuddy-ai` / `~/.workbuddy`）；`tests/tracks/desktop.test.ts` 11 个测试（含宿主相关断言：两份 product.json 的 dataFolderName 必须不同、launcher 字节相同）
 - [ ] 待两个子代理收工后补 `workbuddy-ai` 的 health（`not-applicable`）与 models（`~/.workbuddy-ai/cache/acc-product-config-v3.json`，22 个 id）行——**同一文件同一时刻只允许一个写者**
-- [ ] P2 取消/续接/watchdog 打磨
+- [x] **P2 取消/续接/watchdog 打磨**：三段式取消（SIGTERM → grace → **进程组** SIGKILL）配孤儿证明测试（假 CLI fork 出孙进程 + 故意忽略 SIGTERM，cancel 后断言两个 pid 都 ESRCH）；watchdog 硬超时/idle 各自独立、终态 `timeout`、终态后定时器归零；`send` 对终态会话给可执行错误；`cwd`/agent 白名单（`realpath` 后比较）+ `maxConcurrent`（同步拒绝，不排队）；store 并发写者不再撞临时文件名（原 bug：per-instance 计数器 → 丢记录）。新增 81 个测试
 - [ ] P3 probe 泛化（app bundle 扫描 + 端口指纹）
 - [ ] P4 ACP driver / 监工 UI / 并行 fan-out
 
@@ -150,9 +150,9 @@ kernel 只保留共享机制（`<PREFIX>_PATH` 覆盖、解析、`<exe> --versio
 
 | 指标 | 值 |
 |---|---|
-| TS 文件 | 45 个（src 33 / tests 11 / scripts 1） |
-| 测试 | **296 个全部通过**（+33 codex、+20 codebuddy-code、+9 desktop、+15 轨道、+60 health/models） |
+| TS 文件 | 57 个（src 30 / tests 26 / scripts 1） |
+| 测试 | **377 个全部通过**（P2 新增 81：cancel 10 / watchdog 10 / policy 17 / resume 7 / store 健壮性 21 / 入口配置 13，另 spawn +3） |
 | `tsc --noEmit` | 0 错误 |
-| 构建产物 | `lib/index.js` 129.3 KB |
+| 构建产物 | `lib/index.js` 192.6 KB |
 | 合同校验 | 11/11 PASS |
 | 端到端集成 | 5/5 PASS |

@@ -20,6 +20,15 @@
  *      otherwise: `CommandSpec.searchPath`, `ProbeResult.track` / `.health` /
  *      `.models`, `ProtocolFamily` += 'codex'. Only `track` is breaking, and
  *      the compiler flags every descriptor that lacks it.
+ *  v3  P2 hardening, ADDITIVE ONLY (every new field is optional or widened, no
+ *      existing field changed meaning):
+ *        - `ManagerOptions.allowedCwd` / `.deniedCwd` / `.allowedAgents` /
+ *          `.maxConcurrent` / `.graceMs` — the new host policy knobs.
+ *        - `RunRejection` + `AgentRunRejectedError`: a `run()` refused by policy
+ *          is now a typed error carrying machine-readable context, instead of a
+ *          bare `Error` whose only contract was its message text.
+ *      Nothing here is required, so an embedder that constructs `ManagerOptions`
+ *      exactly as before keeps today's behaviour.
  *
  * @module dsh-agents-bridge/kernel/types
  */
@@ -331,6 +340,59 @@ export interface AgentManager {
   dispose(): Promise<void>
 }
 
+/**
+ * Why `run()` refused to start, in a shape a model can act on (ABI v3).
+ *
+ * These are all *pre-flight* refusals: nothing was spawned, so there is no
+ * session to poll, cancel or clean up. The tool layer renders `message`
+ * verbatim — it is written for the model, not for a log file.
+ */
+export type RunRejectionCode =
+  | 'unknown-agent'
+  | 'unsupported-agent'
+  | 'agent-not-allowed'
+  | 'cwd-denied'
+  | 'cwd-not-allowed'
+  | 'cwd-unresolvable'
+  | 'max-concurrent'
+
+/**
+ * Pre-flight refusal from `AgentManager.run()`.
+ *
+ * Carries structured context *and* the message, because the two audiences
+ * differ: the model reads `message`, while the tool layer / tests want to assert
+ * on `code` without string-matching prose that will be reworded eventually.
+ */
+export class AgentRunRejectedError extends Error {
+  readonly code: RunRejectionCode
+  /** The offending value (agent id, cwd) when the refusal has one. */
+  readonly value?: string
+  /** What the host would have accepted, when that is expressible. */
+  readonly allowed?: readonly string[]
+  /** For `max-concurrent`: the cap and the current count. */
+  readonly maxConcurrent?: number
+  readonly running?: number
+
+  constructor(
+    code: RunRejectionCode,
+    message: string,
+    fields: {
+      readonly value?: string
+      readonly allowed?: readonly string[]
+      readonly maxConcurrent?: number
+      readonly running?: number
+    } = {},
+  ) {
+    super(message)
+    this.name = 'AgentRunRejectedError'
+    this.code = code
+    if (fields.value !== undefined) this.value = fields.value
+    if (fields.allowed !== undefined) this.allowed = fields.allowed
+    if (fields.maxConcurrent !== undefined) this.maxConcurrent = fields.maxConcurrent
+    if (fields.running !== undefined) this.running = fields.running
+  }
+}
+
 /** Kernel construction inputs (keeps the kernel free of host imports). */
 export interface ManagerOptions {
   readonly logger: BridgeLogger
@@ -344,4 +406,42 @@ export interface ManagerOptions {
   readonly defaultCwd?: string
   /** Factory injected by the entry so the kernel never imports drivers directly. */
   readonly createBackend: (family: ProtocolFamily, deps: DriverDeps) => AgentBackend
+
+  /* ── P2 policy knobs (ABI v3, all optional) ────────────────────────────── */
+
+  /**
+   * Allow-list of directory prefixes a run's `cwd` must fall under.
+   *
+   * Unset/empty = no restriction (today's behaviour). Both the configured root
+   * and the requested `cwd` are `realpath`-resolved before comparison, so a
+   * symlink alias (`/tmp` → `/private/tmp` on macOS) cannot slip past.
+   *
+   * Scope, deliberately: this stops the model from pointing `cwd` at `/` by
+   * accident. It is NOT a sandbox — an agent that can write files can still
+   * escape through the tools it is given.
+   */
+  readonly allowedCwd?: readonly string[]
+  /**
+   * Deny-list of directory prefixes, evaluated BEFORE `allowedCwd` and
+   * winning over it. Unset/empty = nothing denied.
+   */
+  readonly deniedCwd?: readonly string[]
+  /**
+   * Allow-list of agent ids the model may run. Unset/empty = every registered
+   * identity. Applies to `run` and `send` alike.
+   */
+  readonly allowedAgents?: readonly AgentId[]
+  /**
+   * Upper bound on sessions running at once (default 4, see `DEFAULT_MAX_CONCURRENT`).
+   * An over-limit `run()` is rejected immediately — never queued, because a
+   * queued run would sit past the tool call's own timeout budget.
+   */
+  readonly maxConcurrent?: number
+  /**
+   * Timer seam for the run watchdog. Defaults to the real `globalThis` timers;
+   * tests inject a deterministic clock so a hard deadline can be asserted
+   * without sleeping for it, and so "were the timers actually cleared?" is a
+   * question with an observable answer.
+   */
+  readonly clock?: import('./watchdog.ts').Clock
 }

@@ -22,6 +22,7 @@
 import { PassThrough, Writable, type Readable } from 'node:stream'
 
 import {
+  getDriverRuntime,
   setDriverRuntime,
   type ProcessExit,
   type SpawnFn,
@@ -49,18 +50,24 @@ class DiscardingWritable extends Writable {
  * `buildCommandLine()` (drivers) has already folded `interpreter` and
  * `argsPrefix` into a flat command line, so the whole thing is expressible as a
  * bare `CommandSpec` with no interpreter and no prefix.
+ *
+ * `graceMs` is read from the module-level runtime seam on every spawn rather
+ * than captured: `installDriverRuntime()` may be called again after a settings
+ * change, and a captured value would silently keep the old window.
  */
 export const kernelSpawn: SpawnFn = (spec: SpawnSpec): SpawnedProcess => {
   const stdout = new PassThrough()
   const stderr = new PassThrough()
 
   const command: CommandSpec = { executable: spec.command }
+  const graceMs = runtimeGraceMs()
 
   const handle = spawnDetached({
     command,
     args: spec.args,
     ...(spec.cwd === undefined ? {} : { cwd: spec.cwd }),
     env: spec.env,
+    ...(graceMs === undefined ? {} : { graceMs }),
     // Keep stdin open: the stream-json family answers `control_request` frames
     // through it (see docs/multica-reference.md §2).
     stdin: true,
@@ -101,7 +108,25 @@ export const kernelSpawn: SpawnFn = (spec: SpawnSpec): SpawnedProcess => {
  * lazily on each run and throw a readable error naming this call if it is
  * missing (see `getDriverRuntime` in `src/drivers/argv.ts`). Idempotent, and
  * safe to call again after a settings change.
+ *
+ * @param graceMs SIGTERM → SIGKILL window for cancelled runs; `undefined` keeps
+ *   the spawner default (5 s). Validated again inside `spawnDetached`, so a bad
+ *   value degrades to the default instead of wedging a cancel.
  */
-export function installDriverRuntime(): void {
-  setDriverRuntime({ spawn: kernelSpawn })
+export function installDriverRuntime(graceMs?: number): void {
+  setDriverRuntime({
+    spawn: kernelSpawn,
+    ...(graceMs !== undefined ? { graceMs } : {}),
+  })
+}
+
+/** Current grace window from the installed runtime, if any. */
+function runtimeGraceMs(): number | undefined {
+  try {
+    return getDriverRuntime().graceMs
+  } catch {
+    // No runtime installed yet: `kernelSpawn` is only reachable through one, so
+    // this is unreachable in practice; returning undefined keeps it harmless.
+    return undefined
+  }
 }

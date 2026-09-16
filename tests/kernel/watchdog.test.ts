@@ -1,49 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { createWatchdog, type Clock, type WatchdogFire } from '../../src/kernel/watchdog.ts'
-
-/** Deterministic timer queue: `advance()` fires everything that came due. */
-class FakeClock implements Clock {
-  #now = 0
-  #nextId = 1
-  #timers = new Map<number, { at: number; handler: () => void }>()
-
-  /** `Clock.now` is a method on the interface. Exposing it as a number field
-   *  made the watchdog detach the reference and throw "now is not a function". */
-  now(): number {
-    return this.#now
-  }
-
-  setTimeout(handler: () => void, ms: number): unknown {
-    const id = this.#nextId++
-    this.#timers.set(id, { at: this.#now + ms, handler })
-    return id
-  }
-
-  clearTimeout(handle: unknown): void {
-    this.#timers.delete(handle as number)
-  }
-
-  /** Fire due timers one at a time, in due order, letting handlers re-arm. */
-  advance(ms: number): void {
-    const target = this.#now + ms
-    for (;;) {
-      const due = [...this.#timers.entries()]
-        .filter(([, timer]) => timer.at <= target)
-        .sort((a, b) => a[1].at - b[1].at)[0]
-      if (!due) break
-      const [id, timer] = due
-      this.#timers.delete(id)
-      this.#now = Math.max(this.#now, timer.at)
-      timer.handler()
-    }
-    this.#now = target
-  }
-
-  get pending(): number {
-    return this.#timers.size
-  }
-}
+import { createWatchdog, type WatchdogFire } from '../../src/kernel/watchdog.ts'
+import { FakeClock } from '../helpers/fake-clock.ts'
 
 describe('createWatchdog', () => {
   it('fires the hard deadline once with kind "timeout"', () => {

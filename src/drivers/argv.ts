@@ -119,6 +119,15 @@ export interface DriverRuntime {
   readonly spawn: SpawnFn
   /** Injectable clock so tests do not depend on wall time. */
   readonly now?: () => number
+  /**
+   * SIGTERM → SIGKILL grace window for cancelled runs, in ms.
+   *
+   * Lives on the runtime seam rather than in `SpawnSpec` because it is a
+   * *policy* setting (host config), not a per-run argument: every driver would
+   * otherwise have to thread a value it does not interpret from `AgentRunOptions`
+   * down to `spawn()` untouched. `undefined` = the spawner's own default (5 s).
+   */
+  readonly graceMs?: number
 }
 
 let runtime: DriverRuntime | undefined
