@@ -65,7 +65,9 @@ export interface Config {
  * everything to this fiber's lifetime.
  */
 export function apply(ctx: Context, config: Config = {}): void {
-  const logger: BridgeLogger = createLogger('dsh-agents-bridge')
+  // Scope `surface`: `createLogger` already stamps `[dsh-agents-bridge:...]`, so
+  // passing the plugin name here would print it twice.
+  const logger: BridgeLogger = createLogger('surface')
 
   // Wire the kernel's process factory into the drivers' runtime seam BEFORE any
   // manager can start a run. Drivers resolve it lazily, so without this the
@@ -151,6 +153,7 @@ export function buildPromptSection(configuredIds: readonly string[] = []): strin
     'When to delegate: long multi-step work you want kept out of this context (a build-and-fix loop in another repo), two or more independent tasks that should run in parallel, a task better served by a different vendor\'s model, or work in a directory you do not want to disturb here. Do not delegate a one-command check you can do yourself.',
     'How: call agents_probe once to see which identities are actually available, and why an unavailable one is unavailable (a sealed desktop app reports its boundary instead of silently vanishing). Then agents_run — it returns a sessionId IMMEDIATELY and never waits for the task, because these tasks take minutes and a tool call does not.',
     'Then poll agents_output with the returned sessionId: read with sinceIndex=0 first, and pass back the nextIndex it returns on every later call so you only receive new events. Use agents_status for a cheap liveness check, agents_cancel to stop a run (it kills the whole process group, not just the parent), and agents_send to continue a finished conversation when the dialect supports resume.',
+    'Polling shape: call agents_output → do other useful work while the task runs → call it again with the returned nextIndex. Never re-run the same task because an early read looked empty; a session that reports running is still working. When status becomes terminal, the transcript and the final result are both in that read — report them instead of guessing at the outcome.',
   ]
   if (configuredIds.length > 0) {
     lines.push(`Identities named by this deployment's config: ${configuredIds.join(', ')}. Confirm them with agents_probe before the first run — being listed in config is not the same as being installed.`)

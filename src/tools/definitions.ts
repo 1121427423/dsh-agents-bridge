@@ -20,7 +20,7 @@
 
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { AgentManager, AgentMessage, AgentRunStatus, ProbeResult, SessionSnapshot } from '../kernel/types.ts'
+import type { AgentManager, AgentMessage, SessionSnapshot } from '../kernel/types.ts'
 
 /** Lifecycle states a session can be in, in the order a model should reason about them. */
 const RUN_STATUSES = ['running', 'completed', 'failed', 'cancelled', 'timeout'] as const
@@ -633,7 +633,8 @@ export function createToolDefinitions(manager: AgentManager) {
         [
           `${value.resumed ? 'continued' : 'started a follow-up in'} ${value.sessionId} (status=${value.status}, messages=${value.messageCount})`,
           '',
-          `Next: agents_output { "sessionId": "${value.sessionId}", "sinceIndex": ${value.messageCount} } to read only the new turns.`,
+          `Next: agents_output { "sessionId": "${value.sessionId}", "sinceIndex": ${value.messageCount} } to read only the new turns` +
+          ' (or sinceIndex=0 to re-read the whole transcript).',
         ].join('\n'),
       ),
     },

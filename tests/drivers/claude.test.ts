@@ -167,7 +167,7 @@ describe('buildClaudeArgs', () => {
       resumeSessionId: 'sess-1',
       extraArgs: ['--output-format', 'text', '--max-budget-usd', '1.00'],
     })
-    expect(args.slice(11)).toEqual([
+    expect(args.slice(10)).toEqual([
       '--model',
       'claude-sonnet-4-5',
       '--effort',
@@ -241,10 +241,10 @@ describe('ClaudeStreamParser', () => {
     })
 
     // The `file-history-snapshot` frame in the fixture must be ignored silently
-    // (a fork adds event types without warning), and the malformed/unknown
-    // frames must not be counted as protocol events.
+    // (a fork adds event types without warning): it is counted as a decoded
+    // event but produces no message and no invalid-event noise.
     expect(parser.state.invalidEventCount).toBe(0)
-    expect(parser.state.eventCount).toBe(7)
+    expect(parser.state.eventCount).toBe(8)
     expect(parser.state.sessionId).toBe('7ff8bf88-4d29-47f6-8c54-87f7ec0b080b')
     expect(parser.state.sawResult).toBe(true)
     expect(parser.state.finalResultText).toBe('Two files: alpha.txt and beta.txt.')

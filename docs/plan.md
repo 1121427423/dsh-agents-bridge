@@ -20,6 +20,10 @@
 | D12 | `autoclaw` 身份 argv 前缀为 `['--profile','autoclaw','agent']` | 裸跑报 config invalid（`~/.openclaw/openclaw.json` 是 stub）；`--profile autoclaw` 实测 `Config valid` | ✅ 已验证 |
 | D13 | 驱动解析必须「白名单 + 静默忽略未知事件」 | codebuddy 实测发出 `system/status`、`file-history-snapshot` 等 claude 文档外事件 | ✅ 已验证 |
 | D14 | `session_id` 从 `system/init` 尽早捕获 | 实测 init 事件即带 session_id（对应 multica 的 early resume-pointer pinning） | ✅ 已验证 |
+| D15 | 冒烟命令用 `ctx.commands.register({name})`，名字 **不能含点号** | 实测本机 DSH 无 `ctx.command(...)`；命令名正则 `/^[a-z][a-z0-9_-]*$/u` 拒绝点号 → 命令名取 `agents-bridge-hello`。**dsh-plugin-studio 技能的 command-tool 配方对本版本 DSH 不适用** | ✅ 已修正 |
+| D16 | `commands` 不放进 `inject`，改惰性 `ctx.get` | 放进 inject 会让无命令注册表的宿主把整个插件判为 INACTIVE（6 个工具一起丢） | ✅ 已定 |
+| D17 | `exports['.']` 用字符串 `./lib/index.js` | DSH 插件合同校验器要求字符串形式；类型走顶层 `types` 字段，不影响 TS | ✅ 已修正 |
+| D18 | `src/integrate.ts` 作为 kernel↔drivers 的唯一适配层 | 两侧并行定下的形状不一致（行回调 vs stream、cancel vs terminate、SpawnExit vs ProcessExit）；单独适配比改任一冻结接口更安全 | ✅ 已实现 |
 
 ## 任务拆分（3 个并行工作流）
 
@@ -67,11 +71,25 @@
 ## 阶段状态
 
 - [x] 仓库创建 + git init + 骨架（package.json / tsconfig / cordis.patch.yml / build.mjs / types.ts）
-- [ ] A/B/C 三工作流实现（并行进行中）
-- [ ] 集成：入口接线 + 构建通过
-- [ ] 安装冒烟：`dsh plugin --profile web add .` → 重启 web → `agents_probe` 可见
-- [ ] **P1 验收：WorkBuddy 跑通一次真实任务（证据：agents_output 事件流）**
-- [ ] **P1 验收：AutoClaw 跑通一次真实任务（证据：同上）**
-- [ ] P2 取消/续接/watchdog
-- [ ] P3 probe 泛化
-- [ ] P4 ACP driver / 监工 UI
+- [x] **A · kernel 完成**：7 个模块 + 6 个测试文件，**50/50 单测通过**（修掉了 Clock 契约漂移：`Clock.now` 是方法，须经 `clock` 调用）
+- [x] **C · 工具面完成**：入口 + 6 个 defineTool + 冒烟命令 + README；`tsc` 零错误；`pnpm run build` → `lib/index.js`
+- [~] **B · drivers**：4 个方言 driver + argv 工具 + fixtures 已落盘，**B 仍在收敛 2 个测试失败**（`generic-argv` 的 argv 断言、`openclaw` 无输出时的错误文案）
+- [x] 集成：入口已接线 `installDriverRuntime()`；**端到端集成测试 5/5 通过**（真子进程 + 真 stream-json 解析 + 取消 + usage + resume 指针）
+- [x] 合同校验：`verify_plugin.py` **11/11 PASS**
+- [ ] 安装冒烟：装进 `desktop` profile → 重启 DSH → `/agents-bridge-hello` 与 `agents_probe` 可见（**待用户确认，因为需重启正在运行的会话**）
+- [ ] **P1 验收：WorkBuddy 跑通一次真实任务（证据：agents_output 事件流）** — 前置已证：codebuddy headless 实测可跑（findings §5.1）
+- [ ] **P1 验收：AutoClaw 跑通一次真实任务（证据：同上）** — 前置已证：`--profile autoclaw` 配置有效（findings §5.2）
+- [ ] P2 取消/续接/watchdog 打磨
+- [ ] P3 probe 泛化（app bundle 扫描 + 端口指纹）
+- [ ] P4 ACP driver / 监工 UI / 并行 fan-out
+
+## 交付指标（当前）
+
+| 指标 | 值 |
+|---|---|
+| TS 文件 | 30 个（src 23 / tests 7） |
+| 测试 | 145 个，143 通过（2 个属 B 收敛中） |
+| `tsc --noEmit` | 0 错误 |
+| 构建产物 | `lib/index.js` 129.3 KB |
+| 合同校验 | 11/11 PASS |
+| 端到端集成 | 5/5 PASS |

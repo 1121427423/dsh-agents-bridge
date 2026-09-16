@@ -412,6 +412,13 @@ export class OpenclawStreamParser {
   #cutShort = false
   #eventCount = 0
   readonly #rawLines: string[] = []
+  /**
+   * The buffer text at the moment a result blob was last applied. Guards
+   * against emitting the same payloads twice when a single-line blob is applied
+   * by the line scanner and then seen again by the whole-buffer parse in
+   * `finish()`.
+   */
+  #appliedBlobBuffer: string | undefined
 
   constructor(sink: { emit(message: AgentMessage): void }, now: () => number = Date.now) {
     this.#sink = sink
@@ -455,6 +462,7 @@ export class OpenclawStreamParser {
     const blob = tryParseOpenclawResult(line)
     if (blob !== undefined) {
       this.#applyResultBlob(blob)
+      this.#appliedBlobBuffer = this.bufferedText()
       return
     }
 
@@ -560,10 +568,21 @@ export class OpenclawStreamParser {
    */
   finish(): OpenclawStreamState {
     // The whole-buffer parse is authoritative for the current CLI: it emits one
-    // pretty-printed blob that no single line can match.
-    const whole = parseWholeBufferOpenclawResult(this.bufferedText())
-    if (whole !== undefined) {
-      this.#applyResultBlob(whole)
+    // pretty-printed blob that no single line can match. Skipped when the same
+    // buffer was already applied by the line scanner, so a single-line blob is
+    // not emitted twice.
+    const buffer = this.bufferedText()
+    if (this.#appliedBlobBuffer !== buffer) {
+      const whole = parseWholeBufferOpenclawResult(buffer)
+      if (whole !== undefined) {
+        this.#applyResultBlob(whole)
+        this.#appliedBlobBuffer = buffer
+      }
+    }
+
+    // A result blob — line-level or whole-buffer — is a clean terminal state,
+    // whatever a stream of events reported before it.
+    if (this.#appliedBlobBuffer !== undefined) {
       this.#status = 'completed'
       this.#error = ''
       return this.state
@@ -784,10 +803,13 @@ export async function runOpenclaw(
 
   function armResultBoundary(line: string): void {
     if (boundaryArmed || terminalReason !== 'none') return
-    // Cheap gate before the O(n) whole-buffer parse: a complete JSON object has
-    // just closed. Without it, a 1000-line pretty-printed blob costs a parse
-    // per line.
-    if (!line.trimEnd().endsWith('}')) return
+    // Cheap gate before the O(n) whole-buffer parse: only two shapes can close a
+    // top-level result object — a bare `}` on its own line (the pretty-printed
+    // blob the CLI emits today) or a single line that opens and closes one.
+    // Without this, every nested `}` of a 1000-line blob costs a full parse.
+    const trimmed = line.trim()
+    const candidate = trimmed === '}' || (line.startsWith('{') && trimmed.endsWith('}'))
+    if (!candidate) return
     if (parseWholeBufferOpenclawResult(parser.bufferedText()) === undefined) return
     if (idleGraceMs <= 0) {
       finishAtBoundary()
