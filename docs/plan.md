@@ -150,16 +150,16 @@ kernel 只保留共享机制（`<PREFIX>_PATH` 覆盖、解析、`<exe> --versio
   - **缓存**：复用 `registry.ts` 既有的 TTL probe 缓存，未新增第二套缓存机制（扫描结果额外 memoise：装了哪些 bundle 不随 60s TTL 变化）
   - **端口指纹**：只探 `127.0.0.1` / `::1`（`localhost` 明确拒绝，避免走 resolver）；连接超时 ≤300ms、并发封顶、整轮墙钟预算；失败一律静默降级。**只有端口 + 响应签名同时命中才算 `confirmed`**，否则只是**疑似**，且**两者都不得影响 `available`**（`available` 仍只由"能不能真启动"决定）。默认期望表为**空**：本机没有已验证的 gateway 端口，猜一个等于往探测输出里塞假事实
   - **扫描真机实测**：29ms 扫完 `/Applications` 的 64 个 bundle，识别出 AutoClaw 的 gateway（`Resources/gateway/openclaw/openclaw.mjs` + bundle 内 `Resources/node/darwin-arm64/node`），并按内置优先规则正确遮蔽
-- [ ] P2 取消/续接/watchdog 打磨
+- [x] **P2 取消/续接/watchdog 打磨**：三段式取消（SIGTERM → grace → **进程组** SIGKILL）配孤儿证明测试（假 CLI fork 出孙进程 + 故意忽略 SIGTERM，cancel 后断言两个 pid 都 ESRCH）；watchdog 硬超时/idle 各自独立、终态 `timeout`、终态后定时器归零；`send` 对终态会话给可执行错误；`cwd`/agent 白名单（`realpath` 后比较）+ `maxConcurrent`（同步拒绝，不排队）；store 并发写者不再撞临时文件名（原 bug：per-instance 计数器 → 丢记录）。新增 81 个测试
 - [ ] P4 ACP driver / 监工 UI / 并行 fan-out
 
 ## 交付指标（当前）
 
 | 指标 | 值 |
 |---|---|
-| TS 文件 | 47 个（src 35 / tests 11 / scripts 1） |
-| 测试 | **354 个全部通过（20 个文件）**（P3 +58：scan 31、port-probe 19、models +5、health +1、registry +2） |
+| TS 文件 | MEASURE_TS |
+| 测试 | MEASURE_TESTS |
 | `tsc --noEmit` | 0 错误 |
-| 构建产物 | `lib/index.js` 见顶部命令输出 |
+| 构建产物 | MEASURE_BUILD |
 | 合同校验 | 11/11 PASS |
 | 端到端集成 | 5/5 PASS |

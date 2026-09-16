@@ -58,6 +58,24 @@ const STORE_VERSION = 1
 const FILE_NAME = 'sessions.json'
 const MAX_RECORDS = 500
 
+/**
+ * Process-wide temp-file counter.
+ *
+ * Deliberately NOT per-store-instance. Two stores over the same directory in one
+ * process (a second manager after an HMR reload, or a test that builds two) each
+ * started their own counter at 0 and therefore chose the SAME temp path — the
+ * second `rename` moved a file the first writer had already replaced, and the
+ * first writer's records were lost with no error anywhere. One counter per
+ * process removes the collision entirely.
+ */
+let tmpSequence = 0
+
+/** Unique per (process, store instance, write): pid + counter is enough. */
+function nextTmpPath(filePath: string): string {
+  tmpSequence += 1
+  return `${filePath}.${process.pid}.${tmpSequence}.tmp`
+}
+
 /** `~/.dsh/state/dsh-agents-bridge`, honouring `DSH_HOME` when set. */
 export function defaultStoreDir(env: Readonly<Record<string, string | undefined>> = process.env): string {
   const home = env['DSH_HOME']?.trim()
@@ -102,7 +120,6 @@ export function createSessionStore(options: SessionStoreOptions = {}): SessionSt
 
   const table = new Map<string, StoredSession>()
   let dirty = false
-  let tmpCounter = 0
 
   function persist(): void {
     if (!dirty) return
@@ -111,7 +128,7 @@ export function createSessionStore(options: SessionStoreOptions = {}): SessionSt
       null,
       2,
     )
-    const tmpPath = `${filePath}.${process.pid}.${tmpCounter++}.tmp`
+    const tmpPath = nextTmpPath(filePath)
     try {
       fs.mkdirSync(dir, { recursive: true })
       fs.writeFileSync(tmpPath, payload, { encoding: 'utf8', mode: 0o600 })
@@ -125,6 +142,9 @@ export function createSessionStore(options: SessionStoreOptions = {}): SessionSt
       } catch {
         /* best effort */
       }
+      // Degrade, never throw: losing session bookkeeping must not fail the run
+      // that triggered the write. The caller (a run settling) has already done
+      // its real work by this point.
       logger?.warn('failed to persist session store', {
         filePath,
         error: err instanceof Error ? err.message : String(err),

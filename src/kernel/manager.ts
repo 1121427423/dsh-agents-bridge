@@ -28,10 +28,13 @@ import type {
   DriverDeps,
   ManagerOptions,
   ProbeResult,
+  ProtocolFamily,
   SessionOutput,
   SessionSnapshot,
 } from './types.ts'
+import { AgentRunRejectedError } from './types.ts'
 import { childLogger } from './logger.ts'
+import { checkAgent, checkConcurrency, checkCwd, createRunPolicy, type RunPolicy } from './policy.ts'
 import { createRegistry, type AgentRegistry, type ResolvedIdentity } from './registry.ts'
 import { createAgentSession, type AgentSession, type SessionCompletion } from './session.ts'
 import { createSessionStore, type StoredSession } from './store.ts'
@@ -49,6 +52,28 @@ const POLL_INTERVAL_MS = 100
 const CANCEL_AWAIT_MS = 3_000
 /** How long we wait for the driver's `done` to settle after cancelling. */
 const CANCEL_SETTLE_MS = 2_000
+
+/**
+ * Manager-layer default idle window, per protocol family.
+ *
+ * Deliberately duplicated from the drivers' own table rather than imported:
+ * `src/kernel/**` must not import `src/drivers/**` (design doc D3), and the two
+ * numbers serve different layers. The driver timer watches its own protocol
+ * stream; this one watches the *manager's* view of the run and is the only thing
+ * that catches a driver wedged before it arms its own timer. They are kept equal
+ * so a run cannot be killed at two different thresholds.
+ */
+const DEFAULT_IDLE_TIMEOUT_MS: Readonly<Record<ProtocolFamily, number>> = {
+  claude: 300_000,
+  codebuddy: 300_000,
+  codex: 300_000,
+  openclaw: 600_000,
+  generic: 300_000,
+}
+
+function defaultIdleMs(family: ProtocolFamily): number {
+  return DEFAULT_IDLE_TIMEOUT_MS[family] ?? 300_000
+}
 
 type TerminalStatus = Exclude<AgentRunStatus, 'running'>
 
@@ -130,6 +155,13 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
     dir: options.storeDir,
     logger: childLogger(logger, 'store'),
   })
+  /** Host policy: cwd/agent allow-lists and the concurrent-session cap. */
+  const policy: RunPolicy = createRunPolicy({
+    ...(options.allowedCwd !== undefined ? { allowedCwd: options.allowedCwd } : {}),
+    ...(options.deniedCwd !== undefined ? { deniedCwd: options.deniedCwd } : {}),
+    ...(options.allowedAgents !== undefined ? { allowedAgents: options.allowedAgents } : {}),
+    ...(options.maxConcurrent !== undefined ? { maxConcurrent: options.maxConcurrent } : {}),
+  })
 
   const live = new Map<string, LiveSession>()
   /** Sessions from a previous process: metadata only, no transcript. */
@@ -153,6 +185,15 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
   }
 
   /* -------------------------------------------------------------- helpers */
+
+  /** Sessions still in the `running` state — what the concurrency cap counts. */
+  function runningCount(): number {
+    let count = 0
+    for (const rec of live.values()) {
+      if (!rec.session.snapshot().terminal) count += 1
+    }
+    return count
+  }
 
   function syncFromHandle(rec: LiveSession): number {
     const handle = rec.handle
@@ -313,26 +354,47 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
     }
   }
 
-  async function runInternal(runOptions: AgentRunOptions, resumedFrom?: string): Promise<SessionSnapshot> {
+  /**
+   * Pre-flight, entirely synchronous, in cheapest-rejection-first order.
+   *
+   * Nothing here awaits: `agents_run.execute()` must return a `running` snapshot
+   * without ever yielding (design doc D5). The consequence is that every refusal
+   * is a *throw* from a synchronous path, which is exactly what the tool layer
+   * renders into an actionable message.
+   */
+  function runInternal(runOptions: AgentRunOptions, resumedFrom?: string): SessionSnapshot {
     if (disposed) throw new Error('the agent manager has been disposed')
     const descriptor = registry.get(runOptions.agent)
     if (!descriptor) {
-      throw new Error(
+      throw new AgentRunRejectedError(
+        'unknown-agent',
         `unknown agent "${runOptions.agent}"; run agents_probe to see the identities this bridge can drive`,
+        { value: runOptions.agent },
       )
     }
     if (descriptor.unsupported) {
-      throw new Error(`${descriptor.id} cannot be driven: ${descriptor.unsupported.reason}`)
+      throw new AgentRunRejectedError(
+        'unsupported-agent',
+        `${descriptor.id} cannot be driven: ${descriptor.unsupported.reason}`,
+        { value: descriptor.id },
+      )
     }
     if (runOptions.mode === 'connect') {
       throw new Error('mode "connect" is not implemented in v1; omit mode to spawn the CLI')
     }
+    // Policy before resolution: a denied agent should never cost a PATH lookup.
+    checkAgent(descriptor.id, policy)
+    checkConcurrency(runningCount(), policy)
+
     const resolved = registry.resolve(descriptor.id)
     if (resolved.reason !== undefined) {
       throw new Error(`${descriptor.id} is not available: ${resolved.reason}`)
     }
 
-    const cwd = runOptions.cwd ?? options.defaultCwd
+    // The RESOLVED cwd is what the child is spawned with, so the path that was
+    // checked and the path that is used cannot disagree.
+    const requestedCwd = runOptions.cwd ?? options.defaultCwd
+    const cwd = checkCwd(requestedCwd, policy)
     const model = runOptions.model ?? resolved.model
     const effective: AgentRunOptions = {
       ...runOptions,
@@ -357,7 +419,14 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
 
     const watchdog = createWatchdog({
       timeoutMs: effective.timeoutMs,
-      idleTimeoutMs: effective.idleTimeoutMs,
+      // The manager's idle window is the *outer* of the two layers: the driver
+      // arms its own per-family idle timer as well, but a driver that is wedged
+      // before it reaches that code (a hang inside `backend.run`) is exactly the
+      // case the manager-level watchdog exists to catch. Applying the family
+      // default here keeps both layers on the same number instead of leaving the
+      // outer one silently disabled.
+      idleTimeoutMs: effective.idleTimeoutMs ?? defaultIdleMs(descriptor.family),
+      ...(options.clock !== undefined ? { clock: options.clock } : {}),
       logger: runLogger,
       onFire: (fire) => {
         if (rec.session.snapshot().terminal) return
@@ -400,7 +469,14 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
     },
 
     run(runOptions): Promise<SessionSnapshot> {
-      return runInternal(runOptions)
+      // `runInternal` is synchronous (nothing in the start path may await), but
+      // the facade contract is a promise — a synchronous throw would otherwise
+      // escape `await manager.run(...)` in the tool layer as a sync exception.
+      try {
+        return Promise.resolve(runInternal(runOptions))
+      } catch (err) {
+        return Promise.reject(err)
+      }
     },
 
     status(sessionId) {
@@ -462,35 +538,66 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
       if (rec) target = liveSnapshot(rec)
       else if (stored) target = restoredSnapshot(stored)
       if (!target) {
-        throw new Error(`unknown session "${sessionId}"; run agents_status to list known sessions`)
+        throw new Error(
+          `unknown session "${sessionId}"; run agents_status to list known sessions, or agents_run to start a new one`,
+        )
       }
       if (!target.terminal) {
+        // The one case the model actually hits: it treated an async run as a
+        // chat and sent a second prompt while the first is still going. Say what
+        // to do next, not just what went wrong.
         throw new Error(
-          `session ${sessionId} is still ${target.status}; wait for it to finish or cancel it before sending a new prompt`,
+          `session ${sessionId} is still ${target.status}, so there is nothing to resume yet. ` +
+            'Wait for it to finish (agents_status) and then agents_send, or agents_cancel it and ' +
+            'start over with agents_run.',
         )
       }
       const descriptor = registry.get(target.agentId)
       if (!descriptor) {
-        throw new Error(`session ${sessionId} belongs to unknown agent "${target.agentId}"`)
+        throw new Error(
+          `session ${sessionId} belongs to unknown agent "${target.agentId}"; it cannot be resumed`,
+        )
       }
+      // A resumed run is still a run: the policy must apply, or the allow-list
+      // would be trivially bypassable by resuming a session started before a
+      // config change.
+      checkAgent(descriptor.id, policy)
+
       const backendSessionId = target.result?.backendSessionId
       if (backendSessionId === undefined || backendSessionId === '') {
         throw new Error(
-          `cannot resume session ${sessionId}: the ${descriptor.id} driver reported no backend session id, so there is nothing to continue (v1 resume is best-effort — start a new run with agents_run)`,
+          `cannot resume session ${sessionId}: the ${descriptor.id} driver reported no backend session id, ` +
+            'so there is nothing to continue. Start a fresh run with agents_run instead.',
         )
       }
+
       const cwd = rec?.options.cwd ?? stored?.cwd
       const model = rec?.options.model ?? stored?.model
-      return runInternal(
-        {
-          agent: descriptor.id,
-          prompt,
-          resumeSessionId: backendSessionId,
-          ...(cwd !== undefined ? { cwd } : {}),
-          ...(model !== undefined ? { model } : {}),
-        },
-        sessionId,
-      )
+
+      // Resume is best-effort: some engines reject a session id they no longer
+      // know (a restarted server, an expired conversation). The failure must be
+      // diagnosable instead of surfacing later as a stuck `running` session, so
+      // it is caught here and re-thrown with the resume context attached.
+      let resumed: SessionSnapshot
+      try {
+        resumed = runInternal(
+          {
+            agent: descriptor.id,
+            prompt,
+            resumeSessionId: backendSessionId,
+            ...(cwd !== undefined ? { cwd } : {}),
+            ...(model !== undefined ? { model } : {}),
+          },
+          sessionId,
+        )
+      } catch (err) {
+        const detail = errorMessage(err)
+        throw new Error(
+          `failed to resume session ${sessionId} (backend session ${backendSessionId}): ${detail}. ` +
+            'The previous conversation may no longer exist on the engine side; start a new run with agents_run.',
+        )
+      }
+      return resumed
     },
 
     async dispose(): Promise<void> {
@@ -508,7 +615,13 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
           rec.poll = undefined
         }
         rec.watchdog.stop()
-        store.upsert(toStoreRecord(rec))
+        const record = toStoreRecord(rec)
+        store.upsert(record)
+        // Keep the session readable after disposal. `live` is dropped below, so
+        // without this a disposed session would vanish from `status()`/`list()`
+        // even though its transcript and terminal state are still meaningful —
+        // the model would be told a session it just cancelled never existed.
+        restored.set(record.sessionId, record)
       }
       store.flush()
       live.clear()

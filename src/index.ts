@@ -65,6 +65,28 @@ export interface Config {
   readonly storeDir?: string
   /** Default working directory for runs that pass no `cwd`. */
   readonly defaultCwd?: string
+
+  /* ── P2 hardening knobs (all optional; unset = today's behaviour) ───────── */
+
+  /**
+   * Allow-list of directory prefixes a run's `cwd` must fall under. Both sides
+   * are `realpath`-resolved before comparison, so symlink aliases (`/tmp` →
+   * `/private/tmp`) cannot slip past. Unset = any directory.
+   */
+  readonly allowedCwd?: readonly string[]
+  /** Deny-list of directory prefixes; wins over `allowedCwd`. Unset = none. */
+  readonly deniedCwd?: readonly string[]
+  /** Allow-list of agent ids. Unset = every identity the bridge registers. */
+  readonly allowedAgents?: readonly AgentId[]
+  /**
+   * Maximum sessions running at once. A run that would exceed it fails
+   * immediately rather than queueing. Default `DEFAULT_MAX_CONCURRENT` (4).
+   */
+  readonly maxConcurrent?: number
+  /**
+   * SIGTERM → SIGKILL grace window for cancellation, in ms. Default 5000.
+   */
+  readonly graceMs?: number
 }
 
 /**
@@ -81,7 +103,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   // first `agents_run` fails with "no driver runtime installed". Idempotent, and
   // intentionally outside the effect: it is process-global wiring, not a
   // resource this fiber owns (see src/integrate.ts).
-  installDriverRuntime()
+  installDriverRuntime(config.graceMs)
 
   const managerOptions: ManagerOptions = {
     logger,
@@ -92,6 +114,11 @@ export function apply(ctx: Context, config: Config = {}): void {
     ...(config.descriptors === undefined ? {} : { extraDescriptors: config.descriptors }),
     ...(config.storeDir === undefined ? {} : { storeDir: config.storeDir }),
     ...(config.defaultCwd === undefined ? {} : { defaultCwd: config.defaultCwd }),
+    ...(config.allowedCwd === undefined ? {} : { allowedCwd: config.allowedCwd }),
+    ...(config.deniedCwd === undefined ? {} : { deniedCwd: config.deniedCwd }),
+    ...(config.allowedAgents === undefined ? {} : { allowedAgents: config.allowedAgents }),
+    ...(config.maxConcurrent === undefined ? {} : { maxConcurrent: config.maxConcurrent }),
+    ...(config.graceMs === undefined ? {} : { graceMs: config.graceMs }),
   }
 
   const manager = createAgentManager(managerOptions)
@@ -124,7 +151,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     const sectionDisposer = ctx.systemPrompt.section({
       name: 'tool:agents-bridge',
       order: 108,
-      text: buildPromptSection(configuredIds),
+      text: buildPromptSection(configuredIds, config.allowedAgents),
     })
 
     // Optional: the smoke command needs a command registry, the tools do not.
@@ -178,8 +205,13 @@ export function apply(ctx: Context, config: Config = {}): void {
  * costs context and invites drift.
  *
  * @param configuredIds - identities named by this deployment's config row.
+ * @param allowedAgents - when the config narrows the agent allow-list, the model
+ *   is told the boundary up front instead of discovering it by being rejected.
  */
-export function buildPromptSection(configuredIds: readonly string[] = []): string {
+export function buildPromptSection(
+  configuredIds: readonly string[] = [],
+  allowedAgents?: readonly string[],
+): string {
   const lines = [
     'Agent bridge: this host can drive other agent CLIs installed locally — `claude` (Claude Code), `workbuddy` (CodeBuddy/WorkBuddy), `autoclaw`/`openclaw` (OpenClaw/AutoClaw), plus any generic CLI configured for this plugin. They run as separate processes with their own tools and their own conversation; none of them can see this conversation, so every prompt must be self-contained.',
     'When to delegate: long multi-step work you want kept out of this context (a build-and-fix loop in another repo), two or more independent tasks that should run in parallel, a task better served by a different vendor\'s model, or work in a directory you do not want to disturb here. Do not delegate a one-command check you can do yourself.',
@@ -189,6 +221,9 @@ export function buildPromptSection(configuredIds: readonly string[] = []): strin
   ]
   if (configuredIds.length > 0) {
     lines.push(`Identities named by this deployment's config: ${configuredIds.join(', ')}. Confirm them with agents_probe before the first run — being listed in config is not the same as being installed.`)
+  }
+  if (allowedAgents !== undefined && allowedAgents.length > 0) {
+    lines.push(`This deployment only enables: ${allowedAgents.join(', ')}. Asking for any other identity is refused before a process starts.`)
   }
   lines.push(`Tools: ${TOOL_NAMES.join(', ')}. Smoke command: /${HELLO_COMMAND_NAME}.`)
   return lines.join('\n')

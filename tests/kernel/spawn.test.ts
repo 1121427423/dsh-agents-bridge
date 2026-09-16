@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { LineSplitter, buildArgv, spawnDetached } from '../../src/kernel/spawn.ts'
+import {
+  DEFAULT_GRACE_MS,
+  LineSplitter,
+  buildArgv,
+  processGone,
+  spawnDetached,
+} from '../../src/kernel/spawn.ts'
 
 describe('buildArgv', () => {
   it('prepends the interpreter and argsPrefix in the frozen order', () => {
@@ -62,5 +68,60 @@ describe('spawnDetached', () => {
     const exit = await handle.exited
     expect(exit.error).toBeInstanceOf(Error)
     expect(handle.pid).toBeUndefined()
+  })
+
+  it('kills a signal-ignoring child within the configured grace window', async () => {
+    // The child ignores SIGTERM (`process.on` with an empty handler), which is
+    // exactly the shape that makes a naive SIGTERM-only cancel leak a process.
+    // A short grace keeps the test fast; the assertion is that cancel() still
+    // resolves and the process really is gone afterwards.
+    const handle = spawnDetached({
+      command: {
+        executable: process.execPath,
+        argsPrefix: ['-e', 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)'],
+      },
+      graceMs: 50,
+    })
+    const pid = handle.pid
+    expect(pid).toBeGreaterThan(0)
+
+    await handle.cancel('test: ignores SIGTERM')
+
+    // cancel() resolving is not the claim — the process being gone is.
+    expect(processGone(pid!)).toBe(true)
+    await expect(handle.exited).resolves.toBeDefined()
+  })
+
+  it('is idempotent: concurrent cancels share one escalation run', async () => {
+    const handle = spawnDetached({
+      command: {
+        executable: process.execPath,
+        argsPrefix: ['-e', 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)'],
+      },
+      graceMs: 50,
+    })
+    const pid = handle.pid
+    const results = await Promise.all([
+      handle.cancel('first'),
+      handle.cancel('second'),
+      handle.cancel('third'),
+    ])
+    expect(results).toEqual([undefined, undefined, undefined])
+    // Still idempotent after the process is already dead.
+    await expect(handle.cancel('after death')).resolves.toBeUndefined()
+    await expect(handle.cancel('again')).resolves.toBeUndefined()
+    expect(processGone(pid!)).toBe(true)
+  })
+
+  it('treats a non-finite grace as the default instead of firing immediately', async () => {
+    // NaN would make setTimeout fire on the next tick, silently skipping the
+    // graceful attempt; the guard maps it back to DEFAULT_GRACE_MS.
+    const handle = spawnDetached({
+      command: { executable: process.execPath, argsPrefix: ['-e', ''] },
+      graceMs: Number.NaN,
+    })
+    await handle.exited
+    expect(DEFAULT_GRACE_MS).toBe(5_000)
+    await expect(handle.cancel('already exited')).resolves.toBeUndefined()
   })
 })

@@ -111,6 +111,27 @@ agents-bridge:
   defaultCwd: /Users/king/BigModel/LLM       # agents_run 不传 cwd 时的默认工作目录
 ```
 
+### 4.1 P2 加固项（都可选，不配 = 与之前完全一致）
+
+```yaml
+agents-bridge:
+  allowedCwd: ["/Users/king/BigModel/LLM"]   # cwd 必须落在其中之一（含子目录）
+  deniedCwd: ["/etc", "/System", "/private/var"]  # 优先级高于 allowedCwd
+  allowedAgents: ["workbuddy", "autoclaw"]   # 缺省 = 全部内置身份
+  maxConcurrent: 4                           # 同时运行的会话上限
+  graceMs: 5000                              # 取消时 SIGTERM → SIGKILL 的宽限期
+```
+
+- **`cwd` 校验先 `realpath` 再比较**。macOS 上 `/tmp` 是指向 `/private/tmp` 的
+  符号链接，只比字符串的话 `cwd: /tmp/x` 能绕进按 `/private/var` 配置的规则里。
+  被拒时的错误会同时说明**被拒的值**和**允许的范围**。
+- **`maxConcurrent` 超限时立刻失败，绝不排队**。排队会撞上工具调用自己的超时预算，
+  最后失败得更难解释；现在的错误直接说明「当前几个在跑、上限多少、怎么办」。
+  缺省 4 的理由见 `src/kernel/policy.ts` 的 `DEFAULT_MAX_CONCURRENT` 注释。
+- **尺度**：这套白名单是「防模型手滑把 `cwd` 指到 `/`」，**不是沙箱**。
+  被委派的 agent 拿到写文件的工具后仍能走出 cwd —— 那只能靠 OS 层的 approval /
+  sandbox 拦，见 §5。
+
 环境变量覆盖沿用 multica 的 `MULTICA_<ID>_PATH` 思路：`envPrefix` 决定前缀（`CLAUDE` / `WORKBUDDY` / `AUTOCLAW` / `OPENCLAW` / `GENERIC` / `MIMO`），例如 `WORKBUDDY_PATH`、`AUTOCLAW_MODEL`。
 
 ---
@@ -122,7 +143,7 @@ agents-bridge:
 - **AutoClaw 走 `openclaw.mjs` + `interpreter`**：`/Applications/AutoClaw.app/Contents/Resources/gateway/openclaw/openclaw.mjs agent --local --json …`。若 app 自带引擎起不来（例如缺 `~/.openclaw/openclaw.json`），退到 PATH 版身份 `openclaw`；再不行就是它的 gateway HTTP API（P4 的 `connect` 模式，v1 只留字段）。
 - **`connect` 模式未实现**：`mode` 参数收 `spawn` | `connect`，但只有 `spawn` 有实现。拨已运行实例（openclaw gateway / WorkBuddy sidecar）是 P4。
 - **ACP driver 未实现**：hermes/kimi/qoder 等 12 家走 ACP，是 v2 的一条 entry 解锁多家；v1 明确不做（设计文档 D1）。
-- **安全**：spawn 任意 CLI = 任意代码执行。v1 依赖 DSH 自身的 approval / sandbox 语义；`cwd` 与 agent 白名单是 P2 的加固项。注意被委派的 agent **看不到本对话**，prompt 必须自包含（系统提示段已告知模型）。
+- **安全**：spawn 任意 CLI = 任意代码执行。这仍然是**设计前提**，没有变：v1 依赖 DSH 自身的 approval / sandbox 语义。P2 补上的是 `cwd` / agent 白名单与并发上限（§4.1），它们的作用域是「防误操作」——防止模型手滑把 `cwd` 指到 `/`、或一次点起十几个 agent 树把机器打死。它们**不是**沙箱：被委派的 agent 一旦拿到写文件的工具，仍然可以走出 `cwd`；真正拦这件事的只有 OS 层的 approval / sandbox。注意被委派的 agent **看不到本对话**，prompt 必须自包含（系统提示段已告知模型）。
 
 ---
 

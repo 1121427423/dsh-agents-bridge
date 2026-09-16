@@ -22,6 +22,16 @@ import { redactArgs } from './logger.ts'
 export const DEFAULT_GRACE_MS = 5_000
 /** How long we wait for the group to die after SIGKILL before giving up. */
 const KILL_CONFIRM_MS = 2_000
+/**
+ * Upper bound on the caller-supplied grace window.
+ *
+ * `graceMs` is model/host configuration, so it is validated rather than
+ * trusted: a negative or non-finite value would make `setTimeout` fire
+ * immediately (skipping the graceful attempt entirely) and an absurd value
+ * would pin a cancel for hours. `0` is legal and means "skip straight to
+ * SIGKILL" — useful in tests, pointless in production.
+ */
+const MAX_GRACE_MS = 60_000
 
 export interface SpawnRequest {
   readonly command: CommandSpec
@@ -108,6 +118,28 @@ function toError(err: unknown): Error {
   return err instanceof Error ? err : new Error(String(err))
 }
 
+function errorCode(err: unknown): string | undefined {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code
+  return typeof code === 'string' ? code : undefined
+}
+
+/** Normalized, bounded grace window (see {@link MAX_GRACE_MS}). */
+function coerceGrace(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return DEFAULT_GRACE_MS
+  return Math.min(Math.floor(value), MAX_GRACE_MS)
+}
+
+/** True when no process (or group) with that pid exists any more. */
+export function processGone(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return false
+  } catch (err) {
+    // EPERM means "exists, owned by someone else" — alive for our purposes.
+    return errorCode(err) === 'ESRCH'
+  }
+}
+
 /**
  * Spawn one engine in its own process group.
  *
@@ -116,7 +148,7 @@ function toError(err: unknown): Error {
  * so a driver only has to handle one failure shape.
  */
 export function spawnDetached(request: SpawnRequest): SpawnHandle {
-  const graceMs = request.graceMs ?? DEFAULT_GRACE_MS
+  const graceMs = coerceGrace(request.graceMs)
   const command = request.command
   const argv = buildArgv(command, request.args ?? [])
   const logger = request.logger
@@ -202,15 +234,26 @@ export function spawnDetached(request: SpawnRequest): SpawnHandle {
     try {
       // Negative pid = the whole group (pid is its pgid because of detached).
       process.kill(-pid, sig)
+      return
     } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code
-      if (code === 'ESRCH') return // already gone: nothing to signal
-      // Not a process group we can address (e.g. Windows, or the group is gone
-      // but the child lingers): fall back to the direct child.
+      const code = errorCode(err)
+      // Nothing left to signal: the whole group is already gone.
+      if (code === 'ESRCH') return
+      // Anything else (notably EPERM on a platform without process groups, or
+      // a group we cannot address) falls back to the direct child. EPERM must
+      // NOT be treated as "gone": the process is alive, we simply lack the
+      // right to signal *the group*, and skipping the fallback would leak it.
+      if (code !== 'EPERM') {
+        logger?.debug('process-group signal rejected; falling back to the child', {
+          pid,
+          signal: sig,
+          code,
+        })
+      }
       try {
         child?.kill(sig)
       } catch (fallbackErr) {
-        const fallbackCode = (fallbackErr as NodeJS.ErrnoException).code
+        const fallbackCode = errorCode(fallbackErr)
         if (fallbackCode !== 'ESRCH') {
           logger?.warn('failed to signal agent process', {
             pid,
