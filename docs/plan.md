@@ -70,6 +70,37 @@
 
 **验收**：`pnpm run build` 产出 `lib/index.js`；`inject` 覆盖所有用到的服务；注册全在 `ctx.effect()` 内并返回 disposer；不直接 import drivers（通过 manager）。
 
+## 决策 D21–D23（两条实现）
+
+**D21 — 集成轨道（track）是与协议族正交的独立轴，两个实现分开。**
+
+`ProtocolFamily` 回答"说什么方言"，不回答"怎么在本机拿到一个可启动的引擎"。
+两者独立（openclaw 同时存在于两条轨道上：PATH 上的二进制 vs AutoClaw.app 内的
+`openclaw.mjs`）。因此 `AgentDescriptor.track` 是**必填**字段，两侧各自一个模块、
+互不 import：
+
+| | CLI 轨道 | 桌面轨道 |
+|---|---|---|
+| 启动物 | 用户自己装的二进制，裸名 + 搜索路径 | 应用包内绝对路径 |
+| 找不到时 | 提示 `<PREFIX>_PATH` | "应用不在这" — 是发现，不是可修配置 |
+| 凭据 | CLI 自己的配置；桥只读状态，不持有 | 应用自己的登录，复用 |
+| 解释器 | 通常不需要（shim 才修复） | 必需（node 不随 PATH 来） |
+| 失败模式 | GUI PATH 导致"装了但看不见" | 包路径过期 / profile 选错 |
+
+实现位置：`src/tracks/{types,index}.ts`、`src/tracks/cli/**`、`src/tracks/desktop/**`；
+kernel 只保留共享机制（`<PREFIX>_PATH` 覆盖、解析、`<exe> --version` 探测），
+并按 `descriptor.track` 调 `policyFor(track).launch()`，自身不判断 agent id。
+`notFoundReason()` 两轨共用，保证探测输出只有一种措辞。
+
+**D22 — `codex` 方言**：ABI 已加 `'codex'` 族与 `codex` CLI 身份
+（`codex exec --json` 输出 JSONL：`thread.started` / `item.completed` /
+`turn.started` / `turn.completed` / `error`）。driver 由子代理实现中。
+
+**D23 — `codebuddy-code` 放最后**：`@tencent-ai/codebuddy-code@2.151.0` 已装
+（`~/.nvm/.../bin/{codebuddy,codebuddy-code,cbc}`），但它自带 `dist-server`，
+headless 方言**未经验证**，可能说 claude stream-json 也可能自成一派。
+在拿到真实抓包前不加描述符。
+
 ## 阶段状态
 
 - [x] 仓库创建 + git init + 骨架（package.json / tsconfig / cordis.patch.yml / build.mjs / types.ts）
@@ -81,6 +112,13 @@
 - [ ] 安装冒烟：装进 `desktop` profile → 重启 DSH → `/agents-bridge-hello` 与 `agents_probe` 可见（**待用户确认，因为需重启正在运行的会话**）
 - [ ] **P1 验收：WorkBuddy 跑通一次真实任务（证据：agents_output 事件流）** — 前置已证：codebuddy headless 实测可跑（findings §5.1）
 - [ ] **P1 验收：AutoClaw 跑通一次真实任务（证据：同上）** — 前置已证：`--profile autoclaw` 配置有效（findings §5.2）
+- [x] **两条实现落地（D21）**：ABI v2（`track` 必填）+ CLI/桌面两个 catalog 与 policy + 15 个新测试；`tsc` 0 错误，**159/159 通过**
+- [x] **真机探测**：claude 2.8.4(/usr/local/bin，GUI PATH 下不可见)、codex 0.154.0(~/bin)、workbuddy 2.137.1、autoclaw 2026.6.8
+- [x] **桌面轨道真机跑通**：WorkBuddy + `deepseek-v4.1-flash` 完成一次真实任务（`scripts/acceptance.ts`：10.4s，text=OK，usage + backendSessionId）
+- [x] **CLI 轨道真机跑通（到引擎边界）**：claude 被搜索路径找到 → 子进程 → stream-json 解析 → 终态失败=引擎自己的上游 401（凭据不归桥管）
+- [ ] **D22 codex driver**（子代理实现中：`codex exec --json`）
+- [ ] **probe health / 模型发现**（子代理实现中：`src/tracks/health.ts`、`models.ts`）
+- [ ] **D23 codebuddy-code**（最后做，先抓包验证方言）
 - [ ] P2 取消/续接/watchdog 打磨
 - [ ] P3 probe 泛化（app bundle 扫描 + 端口指纹）
 - [ ] P4 ACP driver / 监工 UI / 并行 fan-out
@@ -89,8 +127,8 @@
 
 | 指标 | 值 |
 |---|---|
-| TS 文件 | 30 个（src 23 / tests 7） |
-| 测试 | 145 个，143 通过（2 个属 B 收敛中） |
+| TS 文件 | 39 个（src 29 / tests 9 / scripts 1） |
+| 测试 | **159 个全部通过**（+ 15 个轨道测试） |
 | `tsc --noEmit` | 0 错误 |
 | 构建产物 | `lib/index.js` 129.3 KB |
 | 合同校验 | 11/11 PASS |
