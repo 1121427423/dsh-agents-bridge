@@ -1,0 +1,412 @@
+/**
+ * `src/client/panel.ts` + `src/client/indicator.ts` — the rendered surfaces.
+ *
+ * The host's rendering environment is not worth simulating, but the components
+ * are plain `createElement` calls, so calling them with a props object returns
+ * an inspectable element tree. That is enough to assert the two rules that
+ * matter most for a HUMAN surface and are easy to break silently:
+ *
+ *  - every non-happy state renders READABLE copy with a way out (never a blank
+ *    panel, never a raw code, never an English stack);
+ *  - the indicator appears only when there is something to say.
+ *
+ * @module tests/client/components
+ */
+
+import { describe, expect, it } from 'vitest'
+
+import type { BridgeApi } from '../../src/client/api.ts'
+import { ApiError } from '../../src/client/api.ts'
+import { createTranslator, DICTS } from '../../src/client/i18n.ts'
+import { Indicator } from '../../src/client/indicator.ts'
+import { SupervisorPanel, useSupervisor } from '../../src/client/panel.ts'
+import { createSupervisorStore, type SupervisorStore } from '../../src/client/store.ts'
+import { DEFAULT_POLL_POLICY, type ClientRunStatus, type ClientSession } from '../../src/client/util.ts'
+import { ROOT_CLASS } from '../../src/client/styles.ts'
+import { createElement, type StubElement } from '../stubs/react.ts'
+
+/* -------------------------------------------------------------------------- */
+/* Harness                                                                    */
+/* -------------------------------------------------------------------------- */
+
+function session(sessionId: string, status: ClientRunStatus): ClientSession {
+  return {
+    sessionId,
+    agentId: 'claude',
+    status,
+    startedAt: 0,
+    messageCount: 3,
+    terminal: status !== 'running',
+    lastMessage: { index: 2, type: 'text', text: 'working on the build', at: 2 },
+  }
+}
+
+function makeStore(script: {
+  readonly sessions?: () => readonly ClientSession[]
+  readonly failStatus?: boolean
+  readonly output?: (sessionId: string, sinceIndex: number) => { readonly nextIndex: number; readonly messages: readonly { readonly index: number; readonly type: string; readonly text?: string | undefined; readonly tool?: string | undefined; readonly at: number }[] }
+} = {}): SupervisorStore {
+  const api: BridgeApi = {
+    async status() {
+      if (script.failStatus === true) throw new ApiError('missing', 'not-found', 404, 'no route')
+      const rows = script.sessions?.() ?? []
+      return { sessions: rows, concurrency: { running: 0, limit: 200 }, now: 1_000 }
+    },
+    async output(sessionId, sinceIndex) {
+      return {
+        sessionId,
+        status: 'running',
+        terminal: false,
+        ...(script.output?.(sessionId, sinceIndex) ?? { nextIndex: sinceIndex, messages: [] }),
+      }
+    },
+    async cancel() {
+      return { sessionId: 'x', cancelled: true, status: 'running', note: 'ok' }
+    },
+    async probe() {
+      return {
+        available: true,
+        results: [{ id: 'claude', available: true, health: { credential: 'ok' }, models: ['a', 'b'] }],
+        at: 1_000,
+        cached: true,
+      }
+    },
+  }
+  return createSupervisorStore(api, createTranslator('en'), { policy: DEFAULT_POLL_POLICY, autoRefresh: true }, {
+    setTimeout: () => 1,
+    clearTimeout: () => {},
+    now: () => Date.now(),
+    hidden: () => false,
+    onVisibilityChange: () => () => {},
+  })
+}
+
+/**
+ * Deep-walk an element tree and collect every string it renders.
+ *
+ * A child whose `type` is a FUNCTION is a nested component (the panel composes
+ * `SessionRow`, `EngineStrip`, …); the stub renderer does not invoke it, so this
+ * walker does — with its own props — which is what makes an assertion about
+ * rendered copy meaningful rather than vacuous.
+ */
+function textOf(node: unknown): string {
+  if (typeof node === 'string') return node
+  if (typeof node === 'number') return String(node)
+  if (node === null || node === undefined || typeof node !== 'object') return ''
+  const element = node as StubElement
+  if (typeof element.type === 'function') {
+    const rendered = (element.type as (props: unknown) => unknown)(element.props)
+    return textOf(rendered)
+  }
+  const children = Array.isArray(element.props?.children) ? element.props.children : []
+  return children.map(textOf).join(' ')
+}
+
+/** Every element of a given `type` in the tree, descending into components. */
+function findAll(node: unknown, type: unknown): StubElement[] {
+  if (node === null || typeof node !== 'object') return []
+  const element = node as StubElement
+  if (typeof element.type === 'function') {
+    return findAll((element.type as (props: unknown) => unknown)(element.props), type)
+  }
+  const children = Array.isArray(element.props?.children) ? element.props.children : []
+  return [
+    ...(element.type === type ? [element] : []),
+    ...children.flatMap(child => findAll(child, type)),
+  ]
+}
+
+/** Render the panel once and return the tree plus its flattened text. */
+async function renderPanel(store: SupervisorStore): Promise<{ readonly tree: StubElement; readonly text: string }> {
+  // `start()` is what kicks off the engine probe (the panel mounts through it,
+  // not through a bare `refresh()`); awaiting both keeps the assertions about
+  // the engine strip honest.
+  store.start()
+  await store.refresh()
+  await store.refreshEngines()
+  const tree = SupervisorPanel({ store, translator: createTranslator('en') }) as unknown as StubElement
+  return { tree, text: textOf(tree) }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Panel states                                                               */
+/* -------------------------------------------------------------------------- */
+
+describe('SupervisorPanel — every state is readable', () => {
+  it('shows an empty state that explains what will appear, not a blank panel', async () => {
+    const store = makeStore({ sessions: () => [] })
+    const { tree, text } = await renderPanel(store)
+    expect(text).toContain(DICTS.en.emptyTitle)
+    expect(text).toContain(DICTS.en.emptyBody)
+    // Not blank: the panel root and its chrome are always rendered.
+    expect(tree.props.className).toBe(ROOT_CLASS)
+    expect(text).toContain(DICTS.en.panelTitle)
+    store.stop()
+  })
+
+  it('shows an actionable error state when the host has no route', async () => {
+    const store = makeStore({ failStatus: true })
+    const { text } = await renderPanel(store)
+    expect(text).toContain(DICTS.en.errorUnavailableTitle)
+    expect(text).toContain(DICTS.en.errorMissing)
+    expect(text).toContain(DICTS.en.retry)
+    // Never the wire code or a stack.
+    expect(text).not.toContain('not-found')
+    expect(text).not.toContain('at ')
+    store.stop()
+  })
+
+  it('renders one row per session with identity, status, elapsed and token figures', async () => {
+    const store = makeStore({ sessions: () => [session('a', 'running'), session('b', 'failed')] })
+    const { text } = await renderPanel(store)
+    expect(text).toContain('claude')
+    expect(text).toContain(DICTS.en.running)
+    expect(text).toContain(DICTS.en.failed)
+    expect(text).toContain('working on the build')
+    expect(text).toContain(DICTS.en.instantaneous)
+    expect(text).toContain(DICTS.en.openOutput)
+    store.stop()
+  })
+
+  it('does NOT render the cancel confirmation until the human asks for it', async () => {
+    // Cancelling kills a process group and loses unfinished work, so it is
+    // behind a two-step confirm. The dialog must not be in the DOM on mount.
+    const store = makeStore({ sessions: () => [session('a', 'running'), session('b', 'completed')] })
+    const { text } = await renderPanel(store)
+    expect(text).not.toContain(DICTS.en.cancelConfirmTitle)
+    expect(text).not.toContain(DICTS.en.cancelConfirmYes)
+    // ...but the affordance itself is there for the running row.
+    expect(text).toContain(DICTS.en.cancel)
+    store.stop()
+  })
+
+  it('offers no cancel affordance on a terminal row', async () => {
+    const store = makeStore({ sessions: () => [session('b', 'completed')] })
+    const { tree } = await renderPanel(store)
+    const labels = findAll(tree, 'button').flatMap(button => button.props.children.map(child => (typeof child === 'string' ? child : '')))
+    expect(labels).not.toContain(DICTS.en.cancel)
+    expect(labels).toContain(DICTS.en.openOutput)
+    store.stop()
+  })
+
+  it('shows the engine strip with availability and credential state', async () => {
+    const store = makeStore({ sessions: () => [] })
+    const { text } = await renderPanel(store)
+    expect(text).toContain(DICTS.en.enginesTitle)
+    expect(text).toContain(DICTS.en.enginesAvailable.replace('{n}', '1').replace('{total}', '1'))
+    expect(text).toContain('claude')
+    expect(text).toContain(DICTS.en.enginesCredentialOk)
+    store.stop()
+  })
+
+  it('renders the incremental transcript view once a session is opened', async () => {
+    const store = makeStore({
+      sessions: () => [session('a', 'running')],
+      output: (_id, since) => ({
+        nextIndex: since + 2,
+        messages: [
+          { index: since, type: 'text', text: 'hello from the agent', at: 1 },
+          // `tool` (not `text`) is how the host serializes a tool event — see
+          // `OutputPayload` on the host side. The panel must read that field.
+          { index: since + 1, type: 'tool_use', tool: 'Bash', at: 2 },
+        ],
+      }),
+    })
+    store.start()
+    await store.refresh()
+    await store.openSession('a')
+    const tree = SupervisorPanel({ store, translator: createTranslator('en') }) as unknown as StubElement
+    const text = textOf(tree)
+    expect(text).toContain('hello from the agent')
+    expect(text).toContain('[tool_use] Bash')
+    expect(text).toContain(DICTS.en.back)
+    store.stop()
+  })
+
+  it('shows a readable transcript empty state while the agent has produced nothing', async () => {
+    const store = makeStore({ sessions: () => [session('a', 'running')] })
+    store.start()
+    await store.refresh()
+    await store.openSession('a')
+    const text = textOf(SupervisorPanel({ store, translator: createTranslator('en') }))
+    expect(text).toContain(DICTS.en.noEventsYet)
+    expect(text).toContain(DICTS.en.waitingForAgent)
+    store.stop()
+  })
+
+  it('labels the poll state so "it stopped updating" is never a mystery', async () => {
+    const idle = makeStore({ sessions: () => [session('a', 'completed')] })
+    expect((await renderPanel(idle)).text).toContain(DICTS.en.pollIdle)
+    idle.stop()
+
+    const live = makeStore({ sessions: () => [session('a', 'running')] })
+    expect((await renderPanel(live)).text).toContain(DICTS.en.pollLive)
+    live.stop()
+  })
+
+  it('renders in Chinese when the host locale is Chinese', async () => {
+    const store = makeStore({ sessions: () => [session('a', 'running')] })
+    await store.refresh()
+    const text = textOf(SupervisorPanel({ store, translator: createTranslator('zh') }))
+    expect(text).toContain(DICTS.zh.panelTitle)
+    expect(text).toContain(DICTS.zh.running)
+    expect(text).toContain(DICTS.zh.openOutput)
+    store.stop()
+  })
+
+  it('renders a retry affordance on the stale-data strip after a mid-session failure', async () => {
+    let failing = false
+    const api: BridgeApi = {
+      async status() {
+        if (failing) throw new ApiError('network', 'network', 0, 'offline')
+        return { sessions: [session('a', 'running')], concurrency: { running: 1, limit: 200 }, now: 1 }
+      },
+      async output() {
+        return { sessionId: 'a', status: 'running', nextIndex: 0, terminal: false, messages: [] }
+      },
+      async cancel() {
+        return { sessionId: 'a', cancelled: true, status: 'running', note: '' }
+      },
+      async probe() {
+        return { available: true, results: [], at: 0, cached: false }
+      },
+    }
+    const store = createSupervisorStore(api, createTranslator('en'), { policy: DEFAULT_POLL_POLICY, autoRefresh: true }, {
+      setTimeout: () => 1,
+      clearTimeout: () => {},
+      now: () => 1,
+      hidden: () => false,
+      onVisibilityChange: () => () => {},
+    })
+    await store.refresh()
+    failing = true
+    await store.refresh()
+    const text = textOf(SupervisorPanel({ store, translator: createTranslator('en') }))
+    // The row survives AND the unreachable state is stated in the host's own
+    // words: the last known data is still the best information the human has,
+    // and it must be labelled as stale rather than silently trusted.
+    expect(text).toContain(DICTS.en.errorNetwork)
+    expect(text).toContain(DICTS.en.retry)
+    expect(text).toContain('claude')
+    // Never the raw transport text.
+    expect(text).not.toContain('offline')
+    store.stop()
+  })
+})
+
+/* -------------------------------------------------------------------------- */
+/* Indicator                                                                  */
+/* -------------------------------------------------------------------------- */
+
+describe('Indicator — visible only when there is something to say', () => {
+  it('renders nothing before the first read completes', () => {
+    const store = makeStore({ sessions: () => [] })
+    expect(Indicator({ store, translator: createTranslator('en') })).toBeNull()
+    store.stop()
+  })
+
+  it('renders a running chip with the count', async () => {
+    const store = makeStore({ sessions: () => [session('a', 'running'), session('b', 'running')] })
+    await store.refresh()
+    const text = textOf(Indicator({ store, translator: createTranslator('en') }))
+    expect(text).toContain(DICTS.en.indicatorRunning.replace('{n}', '2'))
+    store.stop()
+  })
+
+  it('gives an UNSEEN failure priority over a running session', async () => {
+    // A failure is the only state that needs a human; it must not be hidden
+    // behind a green "still working" chip.
+    const store = makeStore({ sessions: () => [session('a', 'running'), session('b', 'failed')] })
+    await store.refresh()
+    const element = Indicator({ store, translator: createTranslator('en') }) as StubElement
+    expect(element.props['data-status']).toBe('failed')
+    expect(textOf(element)).toContain(DICTS.en.indicatorFailed.replace('{n}', '1'))
+    store.stop()
+  })
+
+  it('shows a quiet idle chip once loaded, and drops it when nothing is drivable', async () => {
+    const store = makeStore({ sessions: () => [session('a', 'completed')] })
+    await store.refresh()
+    const idle = Indicator({ store, translator: createTranslator('en') }) as StubElement
+    expect(idle.props['data-status']).toBe('idle')
+    store.stop()
+
+    const dead = createSupervisorStore(
+      {
+        async status() {
+          return { sessions: [], concurrency: { running: 0, limit: 0 }, now: 1 }
+        },
+        async output() {
+          return { sessionId: 'a', status: 'running', nextIndex: 0, terminal: false, messages: [] }
+        },
+        async cancel() {
+          return { sessionId: 'a', cancelled: false, status: 'cancelled', note: '' }
+        },
+        async probe() {
+          return { available: false, results: [], at: 0, cached: false }
+        },
+      } satisfies BridgeApi,
+      createTranslator('en'),
+      { policy: DEFAULT_POLL_POLICY, autoRefresh: true },
+      { setTimeout: () => 1, clearTimeout: () => {}, now: () => 1, hidden: () => false, onVisibilityChange: () => () => {} },
+    )
+    await dead.refresh()
+    await dead.refreshEngines()
+    // Nothing delegated, nothing drivable: stay out of the session header.
+    expect(Indicator({ store: dead, translator: createTranslator('en') })).toBeNull()
+    dead.stop()
+  })
+
+  it('renders in Chinese when the host locale is Chinese', async () => {
+    const store = makeStore({ sessions: () => [session('a', 'running')] })
+    await store.refresh()
+    expect(textOf(Indicator({ store, translator: createTranslator('zh') }))).toContain(DICTS.zh.indicatorRunning.replace('{n}', '1'))
+    store.stop()
+  })
+})
+
+/* -------------------------------------------------------------------------- */
+/* The subscription hook                                                      */
+/* -------------------------------------------------------------------------- */
+
+describe('useSupervisor', () => {
+  it('returns the store snapshot through the external-store contract', () => {
+    const store = makeStore()
+    const snapshot = useSupervisor(store)
+    expect(snapshot).toBe(store.getSnapshot())
+    store.stop()
+  })
+})
+
+/* -------------------------------------------------------------------------- */
+/* createElement hygiene                                                      */
+/* -------------------------------------------------------------------------- */
+
+describe('component tree shape', () => {
+  it('uses no JSX runtime and builds plain elements', async () => {
+    // The bundle keeps `react/jsx-runtime` external for a reason: a second React
+    // entry point. Every component here calls `createElement` directly, and this
+    // asserts the stub (which mirrors the real one) sees a well-formed tree.
+    const store = makeStore({ sessions: () => [session('a', 'running')] })
+    const { tree } = await renderPanel(store)
+    expect(findAll(tree, 'div').length).toBeGreaterThan(0)
+    expect(tree.props.children).toBeInstanceOf(Array)
+    store.stop()
+  })
+
+  it('gives every rendered child a position in the tree (no undefined holes)', async () => {
+    const store = makeStore({ sessions: () => [session('a', 'running')] })
+    const { tree } = await renderPanel(store)
+    const children = tree.props.children as unknown[]
+    expect(children.some(child => child === undefined)).toBe(false)
+    store.stop()
+  })
+
+  it('renders the panel without a sessionId (the slot may pass none)', async () => {
+    const store = makeStore({ sessions: () => [session('a', 'running')] })
+    await store.refresh()
+    expect(() => SupervisorPanel({ store, translator: createTranslator('en'), sessionId: undefined })).not.toThrow()
+    expect(() => createElement(SupervisorPanel, { store, translator: createTranslator('en') })).not.toThrow()
+    store.stop()
+  })
+})

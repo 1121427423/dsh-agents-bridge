@@ -3,7 +3,7 @@
     "target": "esnext",
     "module": "node16",
     "moduleResolution": "node16",
-    "lib": ["esnext"],
+    "lib": ["esnext", "dom", "dom.iterable"],
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "esModuleInterop": true,
@@ -18,7 +18,13 @@
     "sourceMap": false,
     "outDir": "lib/types",
     "rootDir": "src",
-    "types": ["node"]
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "react": ["./vendor/react/@types/react/index.d.ts"],
+      "react/*": ["./vendor/react/@types/react/*"],
+      "csstype": ["./vendor/react/csstype/index.d.ts"]
+    }
   },
   "include": ["src"],
   "exclude": ["tests", "node_modules", "lib"]

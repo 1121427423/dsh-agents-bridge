@@ -3,3 +3,4 @@ lib/
 coverage/
 *.tsbuildinfo
 .DS_Store
+vendor/

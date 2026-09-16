@@ -22,6 +22,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { createBackend } from './drivers/index.ts'
+import { attachHostApi, type WebRuntimeFace, type WebServerFace } from './host/api.ts'
 import { installDriverRuntime } from './integrate.ts'
 import { createLogger } from './kernel/logger.ts'
 import { createAgentManager } from './kernel/manager.ts'
@@ -36,11 +37,17 @@ export const name = 'agents-bridge'
 /**
  * Services read at apply time.
  *
- * Only `tools` and `systemPrompt` are declared. The command registry
- * (`commands`) is deliberately NOT here: cordis marks a plugin INACTIVE when an
- * inject-listed service is unmounted, and a host without a command registry
- * must still get the six agent tools. The smoke command resolves `commands`
- * lazily and skips itself when it is absent.
+ * Only `tools` and `systemPrompt` are declared. Two more services are resolved
+ * LAZILY, and both omissions are load-bearing:
+ *
+ *  - `commands` — cordis marks a plugin INACTIVE when an inject-listed service
+ *    is unmounted, and a host without a command registry must still get the six
+ *    agent tools. The smoke command resolves `commands` lazily and skips itself
+ *    when it is absent (design doc D16).
+ *  - `webServer` — same trap, larger blast radius: the HTTP API only powers the
+ *    Web client half, so declaring it would cost a headless deployment all six
+ *    tools in exchange for a panel it cannot show. When it is absent the plugin
+ *    logs why and registers the tools exactly as before.
  */
 export const inject = ['tools', 'systemPrompt'] as const
 
@@ -97,6 +104,13 @@ export function apply(ctx: Context, config: Config = {}): void {
     ...Object.keys(config.overrides ?? {}),
   ])]
 
+  // Resolved BEFORE the effect so the log line about a missing service is
+  // emitted once, but consumed INSIDE it — see the note on `inject` above.
+  // A host without a web server simply has no client half; the tools are
+  // unaffected, which is the whole point of not declaring `webServer`.
+  const webServer = ctx.get('webServer') as WebServerFace | undefined
+  const webRuntime = ctx.get('webRuntime') as WebRuntimeFace | undefined
+
   // Everything registrable goes inside ONE effect so the disposers run in
   // reverse order on unload and nothing is left registered on a half-torn-down
   // fiber (HMR reloads included).
@@ -116,6 +130,17 @@ export function apply(ctx: Context, config: Config = {}): void {
     // Optional: the smoke command needs a command registry, the tools do not.
     const smokeDisposer = registerSmokeCommand(ctx)
 
+    // Optional: the HTTP API serves the Web client half only. `null` when the
+    // host has no web server — the six tools above are already registered.
+    const apiDisposer = webServer === undefined
+      ? null
+      : attachHostApi({
+          webServer,
+          ...(webRuntime === undefined ? {} : { webRuntime }),
+          manager,
+          logger,
+        })
+
     return () => {
       // Unregister the tools explicitly instead of relying on fiber teardown:
       // `ctx.tools.register` hands back the exact disposer, and releasing the
@@ -124,12 +149,19 @@ export function apply(ctx: Context, config: Config = {}): void {
       for (const dispose of toolDisposers) dispose()
       smokeDisposer?.()
       sectionDisposer()
+      // Before `manager.dispose()`: a route that outlived the manager would
+      // answer `cancel`/`output` against a disposed facade.
+      apiDisposer?.()
       // `void`: the effect disposer is synchronous by contract; disposal of the
       // child process groups continues in the background and is not awaited
       // (awaiting it would make plugin unload wait on a kill grace window).
       void manager.dispose()
     }
   }, 'agents-bridge.register()')
+
+  if (webServer === undefined) {
+    logger.info('host has no webServer: the agent supervisor panel is unavailable, the six tools are unaffected')
+  }
 
   // Logged rather than thrown: a deployment that has no agent CLI installed is
   // still a working plugin — `agents_probe` reports the empty surface and the
@@ -163,3 +195,4 @@ export function buildPromptSection(configuredIds: readonly string[] = []): strin
 }
 
 export { createToolDefinitions, registerTools, HELLO_COMMAND_NAME, registerSmokeCommand }
+export { API_PREFIX, attachHostApi, createApiRouteHandler, isTrustedApiRequest } from './host/api.ts'
