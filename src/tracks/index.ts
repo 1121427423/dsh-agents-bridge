@@ -18,7 +18,7 @@ import { DESKTOP_TRACK_DESCRIPTORS } from './desktop/catalog.ts'
 import { createDesktopPolicy } from './desktop/index.ts'
 import type { TrackPolicy } from './types.ts'
 
-export { CLI_SEARCH_PATH, createCliPolicy, findNode, readShebang, wantsNode } from './cli/index.ts'
+export { CLI_SEARCH_PATH, createCliPolicy, expandSearchPath, findNode, readShebang, wantsNode } from './cli/index.ts'
 export { createDesktopPolicy } from './desktop/index.ts'
 export { CLI_TRACK_DESCRIPTORS } from './cli/catalog.ts'
 export { DESKTOP_TRACK_DESCRIPTORS } from './desktop/catalog.ts'

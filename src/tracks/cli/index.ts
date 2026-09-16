@@ -116,8 +116,27 @@ export function findNode(searchPath: readonly string[]): string | undefined {
  * shim all come back as `{ reason }`, because the caller turns that into a
  * probe line rather than an exception a model has to interpret.
  */
+/**
+ * Turn the DECLARED search path into the operational one: version-manager
+ * entries are globs (`~/.nvm/versions/node/<version>/bin`) and a locator that
+ * receives them literally would look for a directory actually named `*`.
+ *
+ * Verified failure this fixes: `codebuddy-code` exists ONLY under
+ * `~/.nvm/versions/node/v22.22.3/bin`, so probe reported an installed engine as
+ * unavailable while `claude` (also in /usr/local/bin) and `codex` (also in
+ * ~/bin) happened to resolve through a later entry and hid the bug.
+ *
+ * `~` is deliberately left in place: the resolver expands it against the home
+ * directory it was handed, so the policy does not have to know one.
+ */
+export function expandSearchPath(dirs: readonly string[]): string[] {
+  return dirs.flatMap((dir) => (dir.includes('*') ? expandGlob(dir) : [dir]))
+}
+
 export function createCliPolicy(deps: CliPolicyDeps = {}): TrackPolicy {
-  const searchPath = deps.searchPath ?? CLI_SEARCH_PATH
+  // Expanded once, at construction: `policy.searchPath` is what the resolver
+  // iterates, so it must be a list of real directories.
+  const searchPath = expandSearchPath(deps.searchPath ?? CLI_SEARCH_PATH)
   const readFile = deps.readFile ?? defaultReadFile
   const resolveNode =
     deps.resolveNode ??
@@ -219,7 +238,12 @@ function expandHome(raw: string): string {
  * a general globber here would be a liability, and nvm's layout is the only
  * version-manager path in `CLI_SEARCH_PATH`.
  */
-function expandGlob(raw: string): string[] {
+function expandGlob(rawInput: string): string[] {
+  // `~` must go BEFORE readdir: Node does not expand it, so a glob handed in as
+  // `~/.nvm/.../*/bin` would silently readdir a literal `~` and find nothing.
+  // (Caught on the real machine: the registry test passed because it used an
+  // absolute temp path, while this host's declared entry starts with `~`.)
+  const raw = expandHome(rawInput)
   const marker = raw.indexOf('*')
   if (marker === -1) return [raw]
   const dir = raw.slice(0, raw.lastIndexOf(path.sep, marker))

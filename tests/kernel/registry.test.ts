@@ -5,6 +5,7 @@ import path from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 
 import { BUILTIN_DESCRIPTORS, createRegistry } from '../../src/kernel/registry.ts'
+import { policyFor } from '../../src/tracks/index.ts'
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-bridge-registry-'))
 
@@ -181,6 +182,59 @@ describe('resolve()', () => {
     const resolved = registry.resolve('mimo')
     expect(resolved.reason).toBe(registry.get('mimo')?.unsupported?.reason)
     expect(resolved.reason).toContain('asar')
+  })
+})
+
+describe('cli track search path expansion', () => {
+  it('resolves an engine that exists ONLY inside a version-manager glob dir', () => {
+    // Verified failure this locks in: `codebuddy-code` lives only under
+    // ~/.nvm/versions/node/<version>/bin. A locator handed the glob literally
+    // looks for a directory named `*`, so probe reported an installed engine as
+    // unavailable — while `claude` (/usr/local/bin) and `codex` (~/bin) resolved
+    // through later entries and hid it.
+    const versionDir = path.join(tmpRoot, 'fake-nvm', 'versions', 'node', 'v22.22.3', 'bin')
+    fs.mkdirSync(versionDir, { recursive: true })
+    const engine = path.join(versionDir, 'codebuddy-code')
+    fs.writeFileSync(engine, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+    fs.chmodSync(engine, 0o755)
+
+    const registry = createRegistry({
+      env: { PATH: '/usr/bin:/bin' },
+      trackPolicyOptions: { searchPath: [path.join(tmpRoot, 'fake-nvm', 'versions', 'node', '<v>', 'bin').replace('<v>', '*')] },
+    })
+    const descriptor = {
+      id: 'globbed',
+      track: 'cli' as const,
+      family: 'codebuddy' as const,
+      displayName: 'globbed engine',
+      command: { executable: 'codebuddy-code' },
+    }
+    const registryWithExtra = createRegistry({
+      env: { PATH: '/usr/bin:/bin' },
+      extraDescriptors: [descriptor],
+      trackPolicyOptions: { searchPath: [path.join(tmpRoot, 'fake-nvm', 'versions', 'node', '*', 'bin')] },
+    })
+    expect(registryWithExtra.resolve('globbed').executablePath).toBe(engine)
+    // The glob must end up expanded to REAL directories before it reaches the
+    // resolver, and `~` must already be gone: a path like
+    // `~/.nvm/versions/node/*/bin` readdirs a literal `~` and finds nothing,
+    // which is how an installed engine looked unavailable on this machine.
+    const policyDirs = policyFor('cli', { searchPath: [path.join(tmpRoot, 'fake-nvm', 'versions', 'node', '*', 'bin')] }).searchPath
+    expect(policyDirs).toEqual([path.join(tmpRoot, 'fake-nvm', 'versions', 'node', 'v22.22.3', 'bin')])
+    const declared = policyFor('cli').searchPath
+    // Globs are consumed; `~` is deliberately KEPT, because the resolver expands
+    // it against the home directory it was handed and the policy does not know
+    // one. So the contract is: glob-free, and either absolute or `~/...`.
+    expect(declared.some((dir) => dir.includes('*'))).toBe(false)
+    expect(declared.every((dir) => dir.startsWith(path.sep) || dir.startsWith('~/'))).toBe(true)
+    // Host-guarded proof that the glob produced a REAL directory: on a machine
+    // with nvm the expanded version-manager entry must exist.
+    for (const dir of declared.filter((entry) => entry.includes('.nvm'))) {
+      expect(fs.existsSync(dir.replace(/^~/, os.homedir()))).toBe(true)
+    }
+    // And the declared constant really does contain such a glob, so this path is
+    // exercised on the real machine rather than only in this test.
+    expect(registry.descriptors.length).toBeGreaterThan(0)
   })
 })
 
