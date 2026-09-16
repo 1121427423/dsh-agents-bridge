@@ -4,7 +4,7 @@
  *
  * WHY THIS FILE EXISTS
  * --------------------
- * The six model-facing tools are only visible to the model. A human running the
+ * The nine model-facing tools are only visible to the model. A human running the
  * desktop client cannot see which delegated agents are alive, how long they
  * have been running, what they last said, or how many tokens they burned. The
  * client half (`src/client/**`) is a browser module and cannot reach a Cordis
@@ -26,7 +26,7 @@
  * -------------------------------------
  * `webServer` is NOT in the plugin's `inject`. Cordis marks a plugin INACTIVE
  * when an inject-listed service is unmounted, so a host without a web server
- * would lose the plugin ENTIRELY — all six tools included — just because it
+ * would lose the plugin ENTIRELY — all nine tools included — just because it
  * cannot serve a panel. `attachHostApi` therefore takes the service as an
  * argument, resolved lazily by the entry via `ctx.get('webServer')`; when it is
  * absent this module is never called and the tools register exactly as before.

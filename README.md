@@ -8,14 +8,17 @@
 
 ## 1. 这个插件给你什么
 
-6 个模型可见的工具，一次 run 是一个**分钟级的长任务**：
+9 个模型可见的工具，一次 run 是一个**分钟级的长任务**：
 
 | 工具 | 参数 | 返回 | 说明 |
 |---|---|---|---|
 | `agents_probe` | `refresh?` | `ProbeResult[]` | 探测本机可用身份；**先调它**。冒烟点 |
 | `agents_run` | `agent`, `prompt`（必填）, `cwd?`, `model?`, `effort?`, `timeoutMs?`, `mode?` | `{sessionId, agent, status, startedAt}` | **立即返回**，绝不等任务结束 |
+| `agents_run_many` | `runs: [{agent, prompt, cwd?, model?, effort?, timeoutMs?}]`（1..16） | `{requested, started, failed, runs: [{index, agent, started, sessionId?, status?, error?}], hint}` | **并行 fan-out**：一次调用起 N 个；单项被拒只让那一项报错，其余照常启动；超并发上限**不排队**，该项直接报错 |
 | `agents_status` | `sessionId?` | `{sessions: [...]}` | 不传 = 全部会话（running 优先） |
+| `agents_wait` | `sessionIds`（字符串或数组，必填）, `timeoutMs?`（缺省 20s，**上限 60s**）, `until?`（`all`\|`any`）, `sinceIndex?` | `{waitedMs, timedOut, until, timeoutMs, sessions: [{sessionId, agentId, status, terminal, waitedMs, nextIndex, result?, events?}], hint}` | **有界等待**：全部终态 / 任一终态 / 超时即返回。**超时不是错误**（`timedOut: true`），什么都没取消 |
 | `agents_output` | `sessionId`, `sinceIndex?`, `limit?` | `{sessionId, status, messages, nextIndex, terminal, result, hint}` | 增量拉事件；**把 `nextIndex` 回传** |
+| `agents_usage` | `sessionIds?`, `includeFinished?`（缺省 `true`） | `{sessions: [...], summary: {...}, note}` | **账单**：逐会话 + 汇总 token/时长。`reasoningTokens` **单列且不计入总量**（见 §5） |
 | `agents_cancel` | `sessionId`, `reason?` | `{sessionId, cancelled, status, note}` | 杀整个进程组；幂等 |
 | `agents_send` | `sessionId`, `prompt` | `{sessionId, status, resumed, messageCount}` | 续接（v1 best-effort resume） |
 
@@ -24,22 +27,32 @@
 ```
 agents_probe
     → 拿到可用身份（例如 workbuddy / autoclaw / claude）
+
+# 单个任务
 agents_run { "agent": "workbuddy", "prompt": "<自包含的任务描述>", "cwd": "/path/to/repo" }
     → { sessionId: "s-1", status: "running" }        ← 立即返回，不要在这里等
+agents_wait { "sessionIds": "s-1", "timeoutMs": 20000 }
+    → 全部终态就返回（timedOut=false）；20s 还没完也返回（timedOut=true，正常结果）
+      想继续等就再调一次 agents_wait，想看细节用 agents_output 拉增量
 agents_output { "sessionId": "s-1", "sinceIndex": 0 }
-    → { messages: [...], nextIndex: 7, status: "running" }
-agents_status { "sessionId": "s-1" }                  ← 想省 token 时用这个探活
-agents_output { "sessionId": "s-1", "sinceIndex": 7 } ← 只读增量
-    → status: "completed"，result.text 是最终答复
-agents_cancel { "sessionId": "s-1", "reason": "方向错了" }   ← 需要时
-agents_send   { "sessionId": "s-1", "prompt": "把第 2 步也改掉" } ← 续接
+    → { messages: [...], nextIndex: 7, status: "completed", result: {...} }
+
+# 并行 fan-out（「这 5 个文件各让一个 agent 去改」）
+agents_run_many { "runs": [ {"agent":"claude","prompt":"改 a.ts"}, {"agent":"claude","prompt":"改 b.ts"} ] }
+    → { started: 2, failed: 0, runs: [{sessionId:"s-2"},{sessionId:"s-3"}] }   ← 立即返回
+agents_wait { "sessionIds": ["s-2","s-3"], "timeoutMs": 20000 }
+    → 一次等到两个都终态（或超时，仍是正常结果）
+agents_usage { "sessionIds": ["s-2","s-3"] }        ← 这套编排烧了多少 token
+agents_cancel { "sessionId": "s-3", "reason": "方向错了" }   ← 需要时
+agents_send   { "sessionId": "s-2", "prompt": "把第 2 步也改掉" } ← 续接
 ```
 
-**三条硬约束（改动前先读）**
+**四条硬约束（改动前先读）**
 
-1. `agents_run` 的 `execute()` **不许等待**。工具调用有协作式超时预算，agent 任务是分钟级；在 `execute()` 里 `await` 会话结束 = 每个真实任务都会被中断。模型被明确告知要轮询 `agents_output`。
+1. `agents_run` 的 `execute()` **不许等待**。工具调用有协作式超时预算，agent 任务是分钟级；在 `execute()` 里 `await` 会话结束 = 每个真实任务都会被中断。**等待是另一个工具**：`agents_wait` 的全部意义就是有界等待，它的等待不许被塞回 `agents_run`。
 2. **分层**：`src/index.ts`（入口）→ `AgentManager`（`src/kernel/**`）→ `createBackend(family, deps)`（`src/drivers/**`）。kernel **不 import** drivers（工厂由入口注入），drivers **不 import** kernel（只 `import type` `src/kernel/types.ts`）。跨层类型只在 `src/kernel/types.ts`，那是冻结 ABI。
 3. 所有注册都在 `ctx.effect()` 内，disposer 里按序 unregister 工具 + `void manager.dispose()`。
+4. **面向模型的错误必须说下一步**：哪个参数、什么值、为什么不行、合法范围是什么。裸 `Error:`/堆栈/只有错误码没有出路都不合格 —— 回归测试见 `tests/tools/error-copy.test.ts`。
 
 ---
 
@@ -62,12 +75,12 @@ dsh plugin --profile web add .
 
 ```
 /agents-bridge-hello 世界
-→ agents-bridge is alive: hello 世界. Tools agents_probe/run/status/output/cancel/send are registered…
+→ agents-bridge is alive: hello 世界. Tools agents_probe/agents_run/agents_run_many/agents_status/agents_wait/agents_output/agents_usage/agents_cancel/agents_send are registered…
 ```
 
 再让模型调一次 `agents_probe`：能列出身份 = 工具面已注册。
 
-> **契约偏差（相对任务书原文）**：任务书写的是 `ctx.command('agents-bridge.hello <name>', …)`。真实 DSH 的 command 注册表（`@deepseek-ai/dsh-commands`）**没有**这个简写，只有 `ctx.commands.register({ name, description, input, handler })`，而且命令名正则是 `/^[a-z][a-z0-9_-]*$/u` —— **点号会被拒绝**，用点名注册会让整条冒烟命令注册失败。因此实现为 `/agents-bridge-hello <name>` + `ctx.commands.register`。`commands` 服务**没有**放进 `inject`（放进去会让没有命令注册表的宿主把整个插件判为 INACTIVE），而是 `ctx.get` 惰性取，取不到就跳过冒烟命令，六个工具照常注册。
+> **契约偏差（相对任务书原文）**：任务书写的是 `ctx.command('agents-bridge.hello <name>', …)`。真实 DSH 的 command 注册表（`@deepseek-ai/dsh-commands`）**没有**这个简写，只有 `ctx.commands.register({ name, description, input, handler })`，而且命令名正则是 `/^[a-z][a-z0-9_-]*$/u` —— **点号会被拒绝**，用点名注册会让整条冒烟命令注册失败。因此实现为 `/agents-bridge-hello <name>` + `ctx.commands.register`。`commands` 服务**没有**放进 `inject`（放进去会让没有命令注册表的宿主把整个插件判为 INACTIVE），而是 `ctx.get` 惰性取，取不到就跳过冒烟命令，九个工具照常注册。
 
 ---
 
@@ -88,7 +101,7 @@ pnpm exec vitest run      # 单测
 |---|---|---|
 | `src/kernel/**` | A | registry / spawn / session / watchdog / store / manager / logger |
 | `src/drivers/**` | B | claude / codebuddy / openclaw / generic-argv / argv |
-| `src/index.ts`、`src/tools/**`、`README.md` | C | 入口装配 + 6 个工具定义/注册 + 冒烟命令 |
+| `src/index.ts`、`src/tools/**`、`README.md` | C | 入口装配 + 9 个工具定义/注册（E 加了 wait/run_many/usage）+ 冒烟命令 |
 | `src/kernel/types.ts` | **冻结 ABI** | 任何一方都不要改；要改先改 `docs/plan.md` |
 
 **`lib/index.js` 的构建规则**：`@deepseek-ai/*` 必须保持 external。把 `@deepseek-ai/dsh-tools` 打进 bundle 会产生**第二个工具注册表**，表现是工具静默丢失（见 `scripts/build.mjs` 注释）。
@@ -142,7 +155,8 @@ agents-bridge:
 - **WorkBuddy 必须带 `interpreter`**：它自带的 `cli/bin/codebuddy` 是 `#!/usr/bin/env node` 脚本，而本机 PATH 上**没有 node**，直接 spawn 会 `env: node: No such file or directory`。描述符里已经指向 app 自带的 node（实测 D7）。
 - **AutoClaw 走 `openclaw.mjs` + `interpreter`**：`/Applications/AutoClaw.app/Contents/Resources/gateway/openclaw/openclaw.mjs agent --local --json …`。若 app 自带引擎起不来（例如缺 `~/.openclaw/openclaw.json`），退到 PATH 版身份 `openclaw`；再不行就是它的 gateway HTTP API（P4 的 `connect` 模式，v1 只留字段）。
 - **`connect` 模式未实现**：`mode` 参数收 `spawn` | `connect`，但只有 `spawn` 有实现。拨已运行实例（openclaw gateway / WorkBuddy sidecar）是 P4。
-- **ACP driver 未实现**：hermes/kimi/qoder 等 12 家走 ACP，是 v2 的一条 entry 解锁多家；v1 明确不做（设计文档 D1）。
+- **ACP driver 已实现（D27）**：`ProtocolFamily += 'acp'`（ABI v4）+ `src/drivers/acp.ts` + CLI 轨道身份 `codebuddy-code-acp`（真机 2.151.0 端到端跑通）。一条 ACP entry 解锁 multica 里 12 家说 ACP 的 CLI。
+- **`agents_usage` 的 token 记账规则**：`totalTokens` **只加四个互斥桶**（input / output / cache read / cache write）。`reasoningTokens` 是**披露项不是桶** —— codex 把它报成 `output_tokens` 的**子集**，加进去就是重复计数，所以它单列并标注「已含在 output 内」。同一个会话没有终态结果时用量按 0 计并标 `usageReported: false`，零不能被读成「这次没花钱」。
 - **安全**：spawn 任意 CLI = 任意代码执行。这仍然是**设计前提**，没有变：v1 依赖 DSH 自身的 approval / sandbox 语义。P2 补上的是 `cwd` / agent 白名单与并发上限（§4.1），它们的作用域是「防误操作」——防止模型手滑把 `cwd` 指到 `/`、或一次点起十几个 agent 树把机器打死。它们**不是**沙箱：被委派的 agent 一旦拿到写文件的工具，仍然可以走出 `cwd`；真正拦这件事的只有 OS 层的 approval / sandbox。注意被委派的 agent **看不到本对话**，prompt 必须自包含（系统提示段已告知模型）。
 
 ---

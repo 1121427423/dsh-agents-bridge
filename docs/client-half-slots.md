@@ -103,7 +103,7 @@ ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.regist
 
 | 服务 | 声明方式 | 缺失时的行为 |
 |---|---|---|
-| `slots` | `inject: ['slots']` | 整块 UI 不挂载（`ctx.get('slots') === undefined` 时 `apply` 直接 return）。Host half 的 6 个工具与 HTTP 路由**完全不受影响**。 |
+| `slots` | `inject: ['slots']` | 整块 UI 不挂载（`ctx.get('slots') === undefined` 时 `apply` 直接 return）。Host half 的 9 个工具与 HTTP 路由**完全不受影响**。 |
 | `sidebar.right.pane.tab` slot | 不判断，`slots.inject` 等它 | 面板不出现；头部指示器照常。**不抛错、不白屏**。 |
 | `conversation.session.header.utilities` slot | 同上 | 指示器不出现；面板照常。 |
 | `locale`（宿主语言） | `ctx.get('locale')` | 回退到 `navigator.language`，取 `zh*` → 中文，否则英文。**它的注册器是 try/catch 包住的**：`locale.register` 的具体签名在宿主版本间有差异，失败只丢翻译。 |

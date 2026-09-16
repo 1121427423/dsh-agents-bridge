@@ -91,17 +91,27 @@ async function call(registered: Registered, name: string, args: unknown): Promis
 }
 
 describe('plugin entry registration', () => {
-  it('registers all six tools plus the prompt section', () => {
+  it('registers all nine tools plus the prompt section', () => {
     const registered = boot()
     expect([...registered.tools.keys()].sort()).toEqual(
-      ['agents_cancel', 'agents_output', 'agents_probe', 'agents_run', 'agents_send', 'agents_status'],
+      [
+        'agents_cancel',
+        'agents_output',
+        'agents_probe',
+        'agents_run',
+        'agents_run_many',
+        'agents_send',
+        'agents_status',
+        'agents_usage',
+        'agents_wait',
+      ],
     )
     expect(registered.sections.some((section) => section.name === 'tool:agents-bridge')).toBe(true)
   })
 
   it('unregisters every tool when the effect is disposed', () => {
     const registered = boot()
-    expect(registered.tools.size).toBe(6)
+    expect(registered.tools.size).toBe(9)
     for (const dispose of registered.disposers) dispose()
     expect(registered.tools.size).toBe(0)
   })
@@ -176,7 +186,7 @@ describe('apply() survives a hostile config row', () => {
   it('does not throw on an empty allow-list', () => {
     const registered = boot({ allowedAgents: [] })
     // An empty allow-list means "no restriction", matching the documented default.
-    expect(registered.tools.size).toBe(6)
+    expect(registered.tools.size).toBe(9)
   })
 
   it('ignores a maxConcurrent that is not a usable number', () => {

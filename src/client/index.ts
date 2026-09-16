@@ -4,7 +4,7 @@
  * host).
  *
  * This is the other half of design decision D4 ("`bundle`, pure Node half; P4
- * adds the client half directly"): the six tools make "agent calls agent"
+ * adds the client half directly"): the nine tools make "agent calls agent"
  * possible, and this makes it VISIBLE — which delegated agents are alive, for
  * how long, what they last said, what they cost, and how to stop one.
  *
@@ -144,7 +144,7 @@ export function apply(ctx: Context): void {
   const slots = ctx.get('slots') as SlotsService | undefined
   if (slots === undefined) {
     // No slot registry: there is nowhere to render. Silent by design — a host
-    // without a UI is a normal deployment for the Node half's six tools.
+    // without a UI is a normal deployment for the Node half's nine tools.
     return
   }
 

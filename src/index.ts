@@ -2,9 +2,10 @@
  * dsh-agents-bridge — plugin entry.
  *
  * Exposes local agent CLIs (Claude Code, CodeBuddy/WorkBuddy, OpenClaw/AutoClaw,
- * and any configured generic argv CLI) to the DSH main agent as six tools:
- * `agents_probe`, `agents_run`, `agents_status`, `agents_output`,
- * `agents_cancel`, `agents_send`.
+ * and any configured generic argv CLI) to the DSH main agent as nine tools:
+ * `agents_probe`, `agents_run`, `agents_run_many`, `agents_status`,
+ * `agents_wait`, `agents_output`, `agents_usage`, `agents_cancel`,
+ * `agents_send`.
  *
  * Layering (see docs/design.md §2): this file is the only place that knows all
  * three layers. It builds the kernel (`createAgentManager`) and injects the
@@ -14,8 +15,9 @@
  *
  * The lifetime rule that makes the whole design work: a run is a MINUTES-long
  * child process while a tool call has a cooperative timeout budget, so
- * `agents_run` returns as soon as the child is spawned and the model polls
- * `agents_output`. Nothing in this file may await a session's `done` promise.
+ * `agents_run` returns as soon as the child is spawned and the model waits
+ * through the separate `agents_wait` tool. Nothing in this file may await a
+ * session's `done` promise.
  *
  * @module dsh-agents-bridge
  */
@@ -41,11 +43,11 @@ export const name = 'agents-bridge'
  * LAZILY, and both omissions are load-bearing:
  *
  *  - `commands` — cordis marks a plugin INACTIVE when an inject-listed service
- *    is unmounted, and a host without a command registry must still get the six
+ *    is unmounted, and a host without a command registry must still get the nine
  *    agent tools. The smoke command resolves `commands` lazily and skips itself
  *    when it is absent (design doc D16).
  *  - `webServer` — same trap, larger blast radius: the HTTP API only powers the
- *    Web client half, so declaring it would cost a headless deployment all six
+ *    Web client half, so declaring it would cost a headless deployment all nine
  *    tools in exchange for a panel it cannot show. When it is absent the plugin
  *    logs why and registers the tools exactly as before.
  */
@@ -158,7 +160,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     const smokeDisposer = registerSmokeCommand(ctx)
 
     // Optional: the HTTP API serves the Web client half only. `null` when the
-    // host has no web server — the six tools above are already registered.
+    // host has no web server — the nine tools above are already registered.
     const apiDisposer = webServer === undefined
       ? null
       : attachHostApi({
@@ -187,7 +189,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   }, 'agents-bridge.register()')
 
   if (webServer === undefined) {
-    logger.info('host has no webServer: the agent supervisor panel is unavailable, the six tools are unaffected')
+    logger.info('host has no webServer: the agent supervisor panel is unavailable, the nine tools are unaffected')
   }
 
   // Logged rather than thrown: a deployment that has no agent CLI installed is
@@ -199,10 +201,16 @@ export function apply(ctx: Context, config: Config = {}): void {
 /**
  * Assemble the prompt section the model reads before choosing a tool.
  *
- * Written as one short statement per decision the model has to make (discover,
- * choose, run, poll, stop) rather than a tool catalogue: the tool schemas
- * already describe the parameters, and a second catalogue in the prompt only
- * costs context and invites drift.
+ * Written as one short statement per decision the model has to make (delegate or
+ * not, write the prompt, start, wait, read, stop) rather than a tool catalogue:
+ * the tool schemas already describe the parameters, and a second catalogue in
+ * the prompt only costs context and invites drift. The last line names the
+ * surface so a model that only reads this section still knows the tools exist.
+ *
+ * Every line is a rule the model can be held to, and each one exists because
+ * the alternative wastes the caller's money: delegating a one-command check,
+ * sending a prompt that assumes shared context, polling `agents_output` in a
+ * loop, or letting a run that went the wrong way keep burning tokens.
  *
  * @param configuredIds - identities named by this deployment's config row.
  * @param allowedAgents - when the config narrows the agent allow-list, the model
@@ -213,11 +221,13 @@ export function buildPromptSection(
   allowedAgents?: readonly string[],
 ): string {
   const lines = [
-    'Agent bridge: this host can drive other agent CLIs installed locally — `claude` (Claude Code), `workbuddy` (CodeBuddy/WorkBuddy), `autoclaw`/`openclaw` (OpenClaw/AutoClaw), plus any generic CLI configured for this plugin. They run as separate processes with their own tools and their own conversation; none of them can see this conversation, so every prompt must be self-contained.',
-    'When to delegate: long multi-step work you want kept out of this context (a build-and-fix loop in another repo), two or more independent tasks that should run in parallel, a task better served by a different vendor\'s model, or work in a directory you do not want to disturb here. Do not delegate a one-command check you can do yourself.',
-    'How: call agents_probe once to see which identities are actually available, and why an unavailable one is unavailable (a sealed desktop app reports its boundary instead of silently vanishing). Then agents_run — it returns a sessionId IMMEDIATELY and never waits for the task, because these tasks take minutes and a tool call does not.',
-    'Then poll agents_output with the returned sessionId: read with sinceIndex=0 first, and pass back the nextIndex it returns on every later call so you only receive new events. Use agents_status for a cheap liveness check, agents_cancel to stop a run (it kills the whole process group, not just the parent), and agents_send to continue a finished conversation when the dialect supports resume.',
-    'Polling shape: call agents_output → do other useful work while the task runs → call it again with the returned nextIndex. Never re-run the same task because an early read looked empty; a session that reports running is still working. When status becomes terminal, the transcript and the final result are both in that read — report them instead of guessing at the outcome.',
+    'Agent bridge: this host can drive other agent CLIs installed locally — `claude` (Claude Code), `workbuddy` (CodeBuddy/WorkBuddy), `autoclaw`/`openclaw` (OpenClaw/AutoClaw), plus any generic CLI configured for this plugin. Each runs as its own process with its own tools and its own conversation.',
+    'Delegate when the work is long and multi-step and you want it out of this context, when two or more tasks are independent (run them together), when another vendor\'s model fits better, or when the work belongs in a directory you do not want to disturb here. Do NOT delegate a one-command check you can do yourself: a delegation costs a turn plus the other model\'s tokens.',
+    'Write every prompt as if the other agent knows nothing. It CANNOT see this conversation, your earlier turns, or any file you read — put the absolute paths, the constraints, the acceptance criteria and the exact deliverable in the prompt itself.',
+    'Discover first: agents_probe once tells you which identities are actually drivable and why an unavailable one is not. Then agents_run (one task) or agents_run_many (several independent tasks in ONE call — never N separate agents_run calls). Each returns a sessionId IMMEDIATELY and never waits for the task, because these tasks take minutes and a tool call does not.',
+    'Then wait, do not poll: agents_wait returns as soon as the sessions are terminal or its timeout elapses, and a timeout there is a normal result, not an error (call it again, or read the increment). Use agents_output only when you need the transcript — read incrementally and always pass the returned nextIndex back. agents_usage totals the tokens a batch has spent.',
+    'Stay in control: agents_cancel a run that is going the wrong way instead of letting it burn tokens, and agents_send to continue a finished conversation where the dialect supports resume.',
+    'You only ever see normalized events (text, tool_use, tool_result, status, error). The delegated agent\'s raw transcript never enters this context, so report what agents_output returns rather than guessing at the rest.',
   ]
   if (configuredIds.length > 0) {
     lines.push(`Identities named by this deployment's config: ${configuredIds.join(', ')}. Confirm them with agents_probe before the first run — being listed in config is not the same as being installed.`)

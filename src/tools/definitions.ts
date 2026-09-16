@@ -1,5 +1,5 @@
 /**
- * dsh-agents-bridge — the six model-facing tool definitions.
+ * dsh-agents-bridge — the nine model-facing tool definitions.
  *
  * This module is deliberately PURE: it touches no `ctx`, starts no process, and
  * holds no mutable state. `register.ts` owns the wiring, `index.ts` owns the
@@ -11,16 +11,24 @@
  *
  * The one hard design constraint lives in `agents_run`: its `execute` MUST
  * return as soon as the child is spawned. A tool call carries a cooperative
- * timeout budget while an agent CLI task is minutes long, so waiting here would
- * abort every real task. The model is told to poll `agents_output` instead —
- * see the same promise in `index.ts`'s system-prompt section.
+ * timeout budget while an agent CLI task is minutes long, so waiting there would
+ * abort every real task. Waiting is a SEPARATE tool (`agents_wait`) whose whole
+ * point is the bounded wait; `agents_run` itself still never awaits a session.
+ * See the same promise in `index.ts`'s system-prompt section.
+ *
+ * Error copy is a feature here, not an afterthought: every message that reaches
+ * the model has to name the offending parameter, the value it received and the
+ * next action, because a model that only learns "that failed" burns another turn
+ * guessing. `describeRunFailure` / `unknownSessionMessage` are the two places
+ * that guarantee it for the run and session paths.
  *
  * @module dsh-agents-bridge/tools/definitions
  */
 
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { AgentManager, AgentMessage, SessionSnapshot } from '../kernel/types.ts'
+import type { AgentManager, AgentMessage, AgentResult, SessionSnapshot } from '../kernel/types.ts'
+import { AgentRunRejectedError } from '../kernel/types.ts'
 
 /** Lifecycle states a session can be in, in the order a model should reason about them. */
 const RUN_STATUSES = ['running', 'completed', 'failed', 'cancelled', 'timeout'] as const
@@ -37,6 +45,45 @@ const TRANSPORT_MODES = ['spawn', 'connect'] as const
  * contract — the kernel validates every emitted message against it.
  */
 const MESSAGE_TYPES = ['text', 'thinking', 'tool_use', 'tool_result', 'status', 'log', 'error'] as const
+
+/**
+ * `agents_wait` bounds.
+ *
+ * A tool call carries a cooperative timeout budget while an agent run lasts
+ * minutes, so a wait may only ever be a *bounded* wait — long enough to absorb
+ * a normal task's tail, short enough that the caller still gets an answer
+ * inside its own budget. Values above the cap are clamped rather than rejected:
+ * the model asked for "wait as long as it takes", and the honest answer is
+ * "I waited the longest I am allowed to, here is where things stand".
+ */
+export const MAX_WAIT_TIMEOUT_MS = 60_000
+export const DEFAULT_WAIT_TIMEOUT_MS = 20_000
+
+/**
+ * How often `agents_wait` re-reads the manager's snapshots.
+ *
+ * Matched to the manager's own 100ms event-sync interval: polling faster would
+ * not observe anything the manager has not copied out of the driver yet, and
+ * `status()` is a pure in-memory read (no subprocess, no I/O), so this is a
+ * cheap loop either way.
+ */
+const WAIT_POLL_MS = 100
+
+/** Events one `agents_wait` read returns per session before deferring the rest. */
+const MAX_WAIT_EVENTS = 40
+
+/**
+ * Cap on one `agents_run_many` call.
+ *
+ * Sixteen is the point where a single call stops being a fan-out a human can
+ * read back and starts being a batch job — and the concurrent-session cap will
+ * refuse most of it anyway. Beyond this the answer is "split into batches",
+ * which is stated in the error rather than left to be discovered.
+ */
+export const MAX_PARALLEL_RUNS = 16
+
+/** How many known session ids an error message lists before eliding. */
+const MAX_LISTED_SESSIONS = 8
 
 /** One text block. Every `render` returns content in this shape. */
 function text(value: string): ContentBlock[] {
@@ -160,8 +207,200 @@ function renderProbe(
 }
 
 
+/* -------------------------------------------------------------------------- */
+/* Shared plumbing: error copy, cursors, event rendering                       */
+/* -------------------------------------------------------------------------- */
+
+/** Real-timer sleep. `agents_wait` is the only caller and it always bounds it. */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+
 /**
- * The six tools. `AgentManager` is closed over per-tool via a factory so the
+ * Accept the two spellings the model actually uses for "these sessions".
+ *
+ * A single id is the common case (`agents_run` → one session), a list is the
+ * fan-out case. Rejecting one spelling to force the other costs a turn for no
+ * benefit, so both are accepted and normalized here.
+ */
+function normalizeIds(value: string | readonly string[] | undefined): string[] {
+  if (value === undefined) return []
+  const raw = typeof value === 'string' ? [value] : value
+  const out: string[] = []
+  for (const entry of raw) {
+    if (typeof entry !== 'string') continue
+    const trimmed = entry.trim()
+    if (trimmed !== '' && !out.includes(trimmed)) out.push(trimmed)
+  }
+  return out
+}
+
+/** The ids this bridge currently knows, capped so an error stays readable. */
+function knownSessionIds(manager: AgentManager): string {
+  const ids = manager.list().map((session) => session.sessionId)
+  if (ids.length === 0) return 'no sessions yet'
+  const shown = ids.slice(0, MAX_LISTED_SESSIONS).join(', ')
+  return ids.length > MAX_LISTED_SESSIONS ? `${shown}, … (${ids.length} total)` : shown
+}
+
+/**
+ * The message for "that session id means nothing to me".
+ *
+ * Lists what DOES exist, because the realistic cause is a stale or mistyped id
+ * (the model copied it from an earlier turn, or the bridge restarted). Naming
+ * the known ids turns a dead end into a one-step fix.
+ */
+function unknownSessionMessage(manager: AgentManager, sessionId: string): string {
+  return (
+    `unknown session "${sessionId}". This bridge knows: ${knownSessionIds(manager)}. ` +
+    'Call agents_status to list them with their statuses, or agents_run to start a new session.'
+  )
+}
+
+/**
+ * Identity ids for an "unknown agent" refusal — best effort, never fatal.
+ *
+ * The frozen `AgentManager` ABI has no "list identities" method, so `probe()` is
+ * the only source, and it is the right one: it includes identities added by
+ * config. It is cached (60s TTL) and internally bounded (per-version timeout),
+ * and this runs only on the error path of an already-failed `run`, so the cost
+ * is paid at most once per mistake. If it fails, the kernel's own message
+ * already tells the model to call `agents_probe`.
+ */
+async function knownIdentities(manager: AgentManager): Promise<string | undefined> {
+  try {
+    const results = await manager.probe()
+    if (results.length === 0) return undefined
+    return results
+      .map((result) => (result.available ? result.id : `${result.id} (unavailable)`))
+      .join(', ')
+  } catch {
+    return undefined
+  }
+}
+
+/** What to do next when a start was refused and the kernel did not already say. */
+const RUN_FAILURE_TAIL =
+  'Nothing was started. Call agents_probe for a drivable identity, check the agents-bridge config for ' +
+  'cwd/agent policy and the concurrency cap, then retry.'
+
+const SEND_FAILURE_TAIL =
+  'Call agents_status to list the sessions this bridge knows about, or agents_run to start a fresh one.'
+
+/**
+ * Turn a kernel refusal into a message the model can act on.
+ *
+ * Policy refusals already carry the offending value and the allowed set (see
+ * `kernel/policy.ts`), so they are passed through untouched; what this adds is
+ * the missing step for the two cases the kernel cannot describe — an agent id
+ * that does not exist (only `probe` knows the list) and an identity that exists
+ * but is not drivable.
+ *
+ * The refusal is enriched IN PLACE rather than replaced. `AgentRunRejectedError`
+ * is the ABI v3 contract that makes a refusal machine-readable (`code`, `value`,
+ * `allowed`, `maxConcurrent`); re-wrapping it in a plain `Error` to reword the
+ * prose would quietly throw that away, and an embedder that classifies refusals
+ * by `code` would start seeing an untyped error.
+ */
+async function describeRunFailure(
+  manager: AgentManager,
+  err: unknown,
+  action: 'run' | 'send',
+): Promise<Error> {
+  if (err instanceof AgentRunRejectedError) {
+    if (err.code === 'unknown-agent') {
+      const known = await knownIdentities(manager)
+      if (known !== undefined) err.message = `${err.message}. Known identities: ${known}`
+    } else if (err.code === 'unsupported-agent') {
+      err.message = `${err.message}. Pick a drivable identity from agents_probe instead.`
+    }
+    // `agent-not-allowed`, `cwd-*` and `max-concurrent` already name the value,
+    // the allowed range and the way out.
+    return err
+  }
+  const message = err instanceof Error ? err.message : String(err)
+  // If the message already names one of our tools, the kernel already said what
+  // to do next and a second instruction would just be noise.
+  const tail = message.includes('agents_') ? '' : ` ${action === 'run' ? RUN_FAILURE_TAIL : SEND_FAILURE_TAIL}`
+  return new Error(`${message}${tail}`)
+}
+
+/**
+ * The terminal-result projection shared by `agents_output` and `agents_wait`.
+ *
+ * Deliberately identical in both tools: the model learns one shape for "how the
+ * run ended" and the two tools cannot drift into describing the same result
+ * differently.
+ */
+function projectResult(result: AgentResult) {
+  return {
+    status: result.status,
+    text: truncate(result.text, MAX_RENDERED_CHARS),
+    ...(result.error === undefined ? {} : { error: result.error }),
+    ...(result.exitCode === null ? {} : { exitCode: result.exitCode }),
+    durationMs: result.durationMs,
+    ...(result.backendSessionId === undefined ? {} : { backendSessionId: result.backendSessionId }),
+    ...(result.usage === undefined
+      ? {}
+      : {
+          inputTokens: result.usage.inputTokens,
+          outputTokens: result.usage.outputTokens,
+          // Disclosure, not a bucket: codex counts reasoning INSIDE
+          // output_tokens (see `AgentUsage.reasoningTokens` in the ABI).
+          ...(result.usage.reasoningTokens === undefined
+            ? {}
+            : { reasoningTokens: result.usage.reasoningTokens }),
+        }),
+  }
+}
+
+/** One projected event, as both `agents_output` and `agents_wait` emit it. */
+interface RenderedEvent {
+  readonly index?: number | undefined
+  readonly type?: string | undefined
+  readonly text?: string | undefined
+  readonly tool?: string | undefined
+}
+
+/**
+ * Render normalized events as one readable block per event.
+ *
+ * Consecutive `text`/`thinking` events are joined: some dialects emit one event
+ * per streamed delta, and a line per fragment is pure noise in the model's
+ * context. `tool_use`/`tool_result` keep their own line so a tool call is never
+ * mistaken for prose.
+ */
+function renderEventBlocks(messages: readonly RenderedEvent[]): string[] {
+  let textSeen = false
+  const blocks: string[] = []
+  for (const message of messages) {
+    const prefix = `#${message.index ?? 0} [${message.type ?? 'log'}]`
+    const isText = message.type === 'text' || message.type === 'thinking'
+    if (isText && textSeen && blocks.length > 0) {
+      const last = blocks.length - 1
+      blocks[last] = `${blocks[last] ?? ''}${message.text ?? ''}`
+      continue
+    }
+    switch (message.type) {
+      case 'tool_use':
+      case 'tool_result':
+        blocks.push(
+          `${prefix} ${message.tool ?? 'unknown'}${message.text === undefined ? '' : ` → ${message.text}`}`,
+        )
+        break
+      default:
+        blocks.push(`${prefix} ${message.text ?? ''}`)
+        break
+    }
+    if (isText) textSeen = true
+  }
+  return blocks
+}
+
+/**
+ * The nine tools. `AgentManager` is closed over per-tool via a factory so the
  * same definition table cannot accidentally capture a stale manager: the entry
  * passes the live one once, at registration time.
  */
@@ -235,10 +474,11 @@ export function createToolDefinitions(manager: AgentManager) {
   const run = defineTool({
     name: 'agents_run',
     description:
-      'Start an agent CLI task in the background on this host. Returns IMMEDIATELY with a sessionId — it never '
-      + 'waits for the task to finish (these tasks take minutes; a tool call does not). Poll events with '
-      + 'agents_output using the returned sessionId, and use agents_status for a cheap liveness check. The '
-      + 'session keeps running even if this conversation moves on.',
+      'Start ONE agent CLI task in the background on this host. Returns IMMEDIATELY with a sessionId — it never '
+      + 'waits for the task to finish (these tasks take minutes; a tool call does not). Then call agents_wait to '
+      + 'wait for it in one bounded call, or agents_output to read the transcript incrementally. Use agents_run_many '
+      + 'instead when several independent tasks should start together. The session keeps running even if this '
+      + 'conversation moves on.',
     parameters: {
       agent: {
         type: 'string',
@@ -287,8 +527,9 @@ export function createToolDefinitions(manager: AgentManager) {
         [
           `started ${value.agent} session ${value.sessionId} (status=${value.status})`,
           '',
-          `Next: agents_output { "sessionId": "${value.sessionId}", "sinceIndex": 0 } to pull events,`,
-          `or agents_status { "sessionId": "${value.sessionId}" } for a one-line liveness check.`,
+          `Next: agents_wait { "sessionIds": "${value.sessionId}", "timeoutMs": 20000 } to wait for it in ONE call`,
+          `(a timeout there is normal — call it again), or agents_output { "sessionId": "${value.sessionId}", "sinceIndex": 0 }`,
+          `to read the transcript, or agents_status { "sessionId": "${value.sessionId}" } for a one-line liveness check.`,
           'Do not re-run the task while it is running; keep the returned nextIndex and pass it back to read only new events.',
         ].join('\n'),
       ),
@@ -297,20 +538,215 @@ export function createToolDefinitions(manager: AgentManager) {
       // The kernel's `run()` resolves once the child is spawned and the session
       // is registered — it does NOT await `done`. Everything optional is spread
       // conditionally so an omitted knob is absent rather than `undefined`.
-      const snapshot = await manager.run({
-        agent: args.agent,
-        prompt: args.prompt,
-        ...(args.cwd === undefined ? {} : { cwd: args.cwd }),
-        ...(args.model === undefined ? {} : { model: args.model }),
-        ...(args.effort === undefined ? {} : { effort: args.effort }),
-        ...(args.timeoutMs === undefined ? {} : { timeoutMs: args.timeoutMs }),
-        ...(args.mode === undefined ? {} : { mode: args.mode }),
-      })
+      let snapshot: SessionSnapshot
+      try {
+        snapshot = await manager.run({
+          agent: args.agent,
+          prompt: args.prompt,
+          ...(args.cwd === undefined ? {} : { cwd: args.cwd }),
+          ...(args.model === undefined ? {} : { model: args.model }),
+          ...(args.effort === undefined ? {} : { effort: args.effort }),
+          ...(args.timeoutMs === undefined ? {} : { timeoutMs: args.timeoutMs }),
+          ...(args.mode === undefined ? {} : { mode: args.mode }),
+        })
+      } catch (err) {
+        throw await describeRunFailure(manager, err, 'run')
+      }
       return {
         sessionId: snapshot.sessionId,
         agent: snapshot.agentId,
         status: snapshot.status,
         startedAt: snapshot.startedAt,
+      }
+    },
+  })
+
+  /**
+   * `agents_run_many` — the parallel fan-out form of `agents_run`.
+   *
+   * Same validation, same policy, same fire-and-forget contract; the only new
+   * behaviour is that one call starts N sessions and one refused entry cannot
+   * take the other entries down with it. Entries are started sequentially
+   * (each `run()` returns as soon as its child is spawned) so the result array
+   * stays in the caller's order, but nothing waits for any child.
+   */
+  const runMany = defineTool({
+    name: 'agents_run_many',
+    description:
+      `Start up to ${MAX_PARALLEL_RUNS} agent sessions in ONE call — use this instead of issuing N agents_run calls for ` +
+      'independent tasks ("these 5 files, one agent each"). Returns IMMEDIATELY with one sessionId per entry; it never '
+      + 'waits for any of them. Each entry is started independently: an entry that is refused (unknown agent, cwd outside '
+      + 'the allowed roots, or the concurrent-session cap) comes back with its own error and does NOT abort the rest. '
+      + 'Wait for the batch with one agents_wait call.',
+    parameters: {
+      runs: {
+        type: 'array',
+        required: true,
+        description:
+          `One entry per session to start (1..${MAX_PARALLEL_RUNS}). Entries start concurrently; the result order matches this array.`,
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            agent: {
+              type: 'string',
+              required: true,
+              description: 'Agent identity from agents_probe.',
+            },
+            prompt: {
+              type: 'string',
+              required: true,
+              description: 'The full task for this entry; the delegated agent cannot see this conversation.',
+            },
+            cwd: { type: 'string', description: 'Working directory for this entry. Defaults to the bridge default.' },
+            model: { type: 'string', description: 'Model override where the dialect supports one.' },
+            effort: { type: 'string', description: 'Runtime-native reasoning effort where the dialect supports it.' },
+            timeoutMs: { type: 'integer', description: 'Hard wall-clock deadline in ms for this entry. 0 = none.' },
+          },
+        },
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          requested: { type: 'integer' },
+          started: { type: 'integer' },
+          failed: { type: 'integer' },
+          runs: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                index: { type: 'integer' },
+                agent: { type: 'string' },
+                started: { type: 'boolean' },
+                sessionId: { type: 'string' },
+                status: { type: 'string', enum: [...RUN_STATUSES] },
+                error: { type: 'string' },
+              },
+            },
+          },
+          hint: { type: 'string' },
+        },
+      },
+      render: (_args, value) => {
+        // `?? []` — see the note in the agents_status render below.
+        const runs = value.runs ?? []
+        const lines = runs.map((entry) => {
+          const head = `#${entry.index ?? 0} ${entry.agent ?? 'unknown'}`
+          return entry.started === true
+            ? `✓ ${head} → session ${entry.sessionId ?? '?'} (status=${entry.status ?? 'running'})`
+            : `✗ ${head} → ${entry.error ?? 'refused'}`
+        })
+        const started = runs.filter((entry) => entry.started === true)
+        const body = [
+          `requested ${value.requested ?? runs.length}, started ${value.started ?? started.length}, failed ${value.failed ?? 0}`,
+          '',
+          ...lines,
+        ]
+        if (started.length > 0) {
+          const ids = started.map((entry) => `"${entry.sessionId ?? ''}"`).join(', ')
+          body.push(
+            '',
+            `Next: agents_wait { "sessionIds": [${ids}], "timeoutMs": 20000 } to wait for the whole batch in one call`,
+            '(a timeout there is normal — it returns whatever is still running and you call it again), then',
+            'agents_output per session for the transcripts. Failed entries were not started: fix what the error names and re-send only those.',
+          )
+        } else {
+          body.push('', 'Nothing started. Fix what the errors name (agents_probe lists the identities this bridge can drive) and retry.')
+        }
+        return text(body.join('\n'))
+      },
+    },
+    execute: async (args) => {
+      const requested = args.runs
+      if (!Array.isArray(requested) || requested.length === 0) {
+        throw new Error(
+          'runs must contain at least one entry; for a single task call agents_run instead.',
+        )
+      }
+      if (requested.length > MAX_PARALLEL_RUNS) {
+        throw new Error(
+          `runs has ${requested.length} entries but one call starts at most ${MAX_PARALLEL_RUNS}. ` +
+            `Split it into batches of ${MAX_PARALLEL_RUNS} and call agents_run_many again for the next batch ` +
+            '(concurrent sessions are separately capped by maxConcurrent).',
+        )
+      }
+      const results: Array<{
+        index: number
+        agent: string
+        started: boolean
+        sessionId?: string
+        status?: (typeof RUN_STATUSES)[number]
+        error?: string
+      }> = []
+      for (const [index, entry] of requested.entries()) {
+        const agent = typeof entry.agent === 'string' ? entry.agent.trim() : ''
+        const prompt = typeof entry.prompt === 'string' ? entry.prompt.trim() : ''
+        if (agent === '') {
+          results.push({
+            index,
+            agent: '',
+            started: false,
+            error: `runs[${index}].agent is required and must be a non-empty identity id; call agents_probe for the ids this bridge can drive.`,
+          })
+          continue
+        }
+        if (prompt === '') {
+          results.push({
+            index,
+            agent,
+            started: false,
+            error:
+              `runs[${index}].prompt is required and must be non-empty; the delegated agent cannot see this ` +
+              'conversation, so the prompt has to contain the whole task (paths, constraints, acceptance criteria).',
+          })
+          continue
+        }
+        try {
+          const snapshot = await manager.run({
+            agent,
+            prompt,
+            ...(entry.cwd === undefined ? {} : { cwd: entry.cwd }),
+            ...(entry.model === undefined ? {} : { model: entry.model }),
+            ...(entry.effort === undefined ? {} : { effort: entry.effort }),
+            ...(entry.timeoutMs === undefined ? {} : { timeoutMs: entry.timeoutMs }),
+          })
+          results.push({
+            index,
+            agent: snapshot.agentId,
+            started: true,
+            sessionId: snapshot.sessionId,
+            status: snapshot.status,
+          })
+        } catch (err) {
+          // Per-entry isolation is the whole point: one refused entry (bad id,
+          // denied cwd, concurrency cap) must not roll back the others, and the
+          // index prefix is what makes a partially-started batch actionable.
+          const failure = await describeRunFailure(manager, err, 'run')
+          results.push({
+            index,
+            agent,
+            started: false,
+            error: `runs[${index}] (${agent}): ${failure.message}`,
+          })
+        }
+      }
+      const started = results.filter((entry) => entry.started).length
+      const hint = started === results.length
+        ? `All ${started} session(s) started. Wait for them with one agents_wait call.`
+        : started === 0
+          ? 'Nothing started — every entry was refused. Read each entry\'s error, fix it, and re-send.'
+          : `${started} of ${results.length} started. The failed entries were NOT started: fix what their errors name and re-send only those.`
+      return {
+        requested: requested.length,
+        started,
+        failed: results.length - started,
+        runs: results,
+        hint,
       }
     },
   })
@@ -378,6 +814,11 @@ export function createToolDefinitions(manager: AgentManager) {
       },
     },
     execute: async (args) => {
+      if (args.sessionId !== undefined && manager.status(args.sessionId) === undefined) {
+        // An empty list would read as "no such session" only to a human; the
+        // model needs to be told, and told what does exist.
+        throw new Error(unknownSessionMessage(manager, args.sessionId))
+      }
       const snapshots = args.sessionId === undefined
         ? manager.list()
         : [manager.status(args.sessionId)].filter((value): value is SessionSnapshot => value !== undefined)
@@ -410,13 +851,266 @@ export function createToolDefinitions(manager: AgentManager) {
     },
   })
 
+  /**
+   * `agents_wait` — the bounded wait.
+   *
+   * Exists because the alternative costs the caller a turn (and its tokens) per
+   * poll: a ten-minute task would otherwise take dozens of `agents_output`
+   * round-trips to notice it ended. It is a SEPARATE tool on purpose — the
+   * invariant that `agents_run` never awaits (design doc D5) is untouched.
+   *
+   * It never cancels, never fails on timeout, and never mutates a session: the
+   * only thing it can do is return later.
+   */
+  const wait = defineTool({
+    name: 'agents_wait',
+    description:
+      'Wait (bounded) until sessions reach a terminal state, instead of polling agents_output in a loop. Returns as '
+      + `soon as every named session is terminal, or — with until:"any" — as soon as one is; otherwise it returns when `
+      + `timeoutMs elapses (default ${DEFAULT_WAIT_TIMEOUT_MS}, capped at ${MAX_WAIT_TIMEOUT_MS}). A timeout is a NORMAL `
+      + 'result (timedOut=true), not an error: nothing was cancelled and the runs are still going, so call agents_wait '
+      + 'again or pull the increment with agents_output. It never waits longer than timeoutMs.',
+    parameters: {
+      sessionIds: {
+        oneOf: [
+          { type: 'string', description: 'A single session id.' },
+          { type: 'array', items: { type: 'string' }, description: 'Several session ids (a fan-out batch).' },
+        ],
+        required: true,
+        description: 'Session(s) to wait for, as returned by agents_run / agents_run_many.',
+      },
+      timeoutMs: {
+        type: 'integer',
+        description:
+          `Upper bound in milliseconds. Default ${DEFAULT_WAIT_TIMEOUT_MS}; values above ${MAX_WAIT_TIMEOUT_MS} are clamped to it.`,
+      },
+      until: {
+        type: 'string',
+        enum: ['all', 'any'],
+        description:
+          "Default 'all' = wait for every session. 'any' = return as soon as one is terminal; the rest keep running.",
+      },
+      sinceIndex: {
+        type: 'integer',
+        description:
+          'Also return new events from this index for each session. Omit to return no events (you still get each nextIndex).',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          waitedMs: { type: 'integer' },
+          timedOut: { type: 'boolean' },
+          until: { type: 'string', enum: ['all', 'any'] },
+          timeoutMs: { type: 'integer' },
+          sessions: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                sessionId: { type: 'string' },
+                agentId: { type: 'string' },
+                status: { type: 'string', enum: [...RUN_STATUSES] },
+                terminal: { type: 'boolean' },
+                waitedMs: { type: 'integer' },
+                nextIndex: { type: 'integer' },
+                result: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    status: { type: 'string', enum: [...RUN_STATUSES] },
+                    text: { type: 'string' },
+                    error: { type: 'string' },
+                    exitCode: { type: 'integer' },
+                    durationMs: { type: 'integer' },
+                    backendSessionId: { type: 'string' },
+                    inputTokens: { type: 'integer' },
+                    outputTokens: { type: 'integer' },
+                    // Disclosure, not a bucket to add up: codex counts reasoning
+                    // INSIDE output_tokens (see AgentUsage.reasoningTokens).
+                    reasoningTokens: { type: 'integer' },
+                  },
+                },
+                events: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      index: { type: 'integer' },
+                      type: { type: 'string', enum: [...MESSAGE_TYPES] },
+                      text: { type: 'string' },
+                      tool: { type: 'string' },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          hint: { type: 'string' },
+        },
+      },
+      render: (args, value) => {
+        // `?? []` — see the note in the agents_status render below.
+        const sessions = value.sessions ?? []
+        const timeoutMs = value.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS
+        const requested = args.timeoutMs
+        const clampNote =
+          requested !== undefined && requested > timeoutMs
+            ? ` (you asked for ${formatDuration(requested)}; capped at ${formatDuration(timeoutMs)})`
+            : ''
+        const stillRunning = sessions.filter((session) => session.terminal !== true).length
+        const header = value.timedOut === true
+          ? `waited ${formatDuration(value.waitedMs ?? 0)} — timed out with ${stillRunning} of ${sessions.length} session(s) still running${clampNote}`
+          : value.until === 'any'
+            ? `waited ${formatDuration(value.waitedMs ?? 0)} — a session reached a terminal state (until=any${clampNote})`
+            : `waited ${formatDuration(value.waitedMs ?? 0)} — every session is terminal (until=all${clampNote})`
+        const body = [header, '']
+        for (const session of sessions) {
+          body.push(
+            `• ${session.sessionId ?? '?'} agent=${session.agentId ?? '?'} status=${session.status ?? '?'} ` +
+              `terminal=${session.terminal === true} waited=${formatDuration(session.waitedMs ?? 0)} nextIndex=${session.nextIndex ?? 0}`,
+          )
+          const result = session.result
+          if (result !== undefined) {
+            const usage = result.inputTokens === undefined
+              ? ''
+              : ` tokens=${result.inputTokens}in/${result.outputTokens ?? 0}out`
+            body.push(`    result: ${result.status ?? '?'} duration=${formatDuration(result.durationMs ?? 0)}${usage}`)
+            if (result.error !== undefined) body.push(`    error: ${result.error}`)
+            if ((result.text ?? '').length > 0) body.push('    final text:', `    ${result.text ?? ''}`)
+          } else if (session.terminal !== true) {
+            body.push('    still running when this wait ended')
+          }
+          const events = session.events ?? []
+          if (events.length > 0) {
+            body.push(...renderEventBlocks(events).map((line) => `    ${line}`))
+          }
+        }
+        if (value.timedOut === true) {
+          const ids = sessions
+            .filter((session) => session.terminal !== true)
+            .map((session) => `"${session.sessionId ?? ''}"`)
+          body.push(
+            '',
+            'This is not an error and nothing was cancelled — the runs above are still working.',
+            `Next: agents_wait { "sessionIds": [${ids.join(', ')}], "timeoutMs": ${timeoutMs} } to keep waiting, or ` +
+              'agents_output per session (with the nextIndex above) to read what has happened so far, or agents_cancel if the direction is wrong.',
+          )
+        } else {
+          body.push(
+            '',
+            `Next: agents_output { "sessionId": "<id>", "sinceIndex": <nextIndex> } for the full tail of any session, then report the results.`,
+          )
+        }
+        return text(body.join('\n'))
+      },
+    },
+    execute: async (args) => {
+      const ids = normalizeIds(args.sessionIds)
+      if (ids.length === 0) {
+        throw new Error(
+          'sessionIds must name at least one session: pass the sessionId agents_run returned, or the list ' +
+            'agents_run_many returned. Call agents_status to see what is currently running.',
+        )
+      }
+      const requested = args.timeoutMs
+      if (requested !== undefined && (!Number.isFinite(requested) || requested <= 0)) {
+        throw new Error(
+          `timeoutMs must be a positive number of milliseconds (1..${MAX_WAIT_TIMEOUT_MS}); got ${String(requested)}. ` +
+            `Omit it to use the ${DEFAULT_WAIT_TIMEOUT_MS}ms default.`,
+        )
+      }
+      const timeoutMs = Math.min(Math.floor(requested ?? DEFAULT_WAIT_TIMEOUT_MS), MAX_WAIT_TIMEOUT_MS)
+      const until = args.until ?? 'all'
+      // Fail before waiting, not after: a typo would otherwise cost the whole
+      // timeout budget and then report the same thing.
+      for (const id of ids) {
+        if (manager.status(id) === undefined) throw new Error(unknownSessionMessage(manager, id))
+      }
+
+      const startedAt = Date.now()
+      const deadline = startedAt + timeoutMs
+      /** When each session was first OBSERVED terminal — the per-session wait. */
+      const terminalAt = new Map<string, number>()
+      const isTerminal = (id: string): boolean => manager.status(id)?.terminal === true
+      const satisfied = (): boolean =>
+        until === 'any' ? ids.some(isTerminal) : ids.every(isTerminal)
+
+      for (;;) {
+        for (const id of ids) {
+          if (!terminalAt.has(id) && isTerminal(id)) terminalAt.set(id, Date.now())
+        }
+        if (satisfied()) break
+        const remaining = deadline - Date.now()
+        if (remaining <= 0) break
+        // Bounded by `remaining`, so the wait can overshoot only by the time one
+        // `status()` read takes — never by a whole poll interval.
+        await delay(Math.min(WAIT_POLL_MS, remaining))
+      }
+      const endedAt = Date.now()
+
+      const sessions = ids.map((id) => {
+        const snapshot = manager.status(id)
+        // Unreachable: every id was checked above. Kept total so a session that
+        // vanished mid-wait (dispose) reports the truth instead of a crash.
+        if (snapshot === undefined) throw new Error(unknownSessionMessage(manager, id))
+        const events = args.sinceIndex === undefined
+          ? undefined
+          : manager.output(id, { sinceIndex: args.sinceIndex, limit: MAX_WAIT_EVENTS })
+        const result = snapshot.result
+        return {
+          sessionId: snapshot.sessionId,
+          agentId: snapshot.agentId,
+          status: snapshot.status,
+          terminal: snapshot.terminal,
+          waitedMs: Math.max(0, (terminalAt.get(id) ?? endedAt) - startedAt),
+          // Cursor semantics match agents_output: pass it back to read only what
+          // is new. With no sinceIndex this is "where the transcript stands now",
+          // which is what makes a later incremental read cheap.
+          nextIndex: events?.nextIndex ?? snapshot.messageCount,
+          ...(result === undefined ? {} : { result: projectResult(result) }),
+          ...(events === undefined
+            ? {}
+            : {
+                events: events.messages.map((message, offset) => ({
+                  index: (args.sinceIndex ?? 0) + offset,
+                  type: message.type,
+                  ...(message.content === undefined ? {} : { text: truncate(message.content, 4_000) }),
+                  ...(message.tool === undefined ? {} : { tool: message.tool }),
+                })),
+              }),
+        }
+      })
+      const timedOut = !satisfied()
+      const hint = timedOut
+        ? `Timed out after ${timeoutMs}ms with ${sessions.filter((session) => !session.terminal).length} session(s) still running. ` +
+          'This is a normal result: nothing was cancelled. Call agents_wait again to keep waiting, or agents_output for the increment.'
+        : until === 'any'
+          ? 'At least one session is terminal; the others are still running. Read their nextIndex values and call agents_wait again for the rest.'
+          : 'Every session is terminal. Read each result above, or agents_output with the nextIndex for the full tail.'
+      return {
+        waitedMs: Math.max(0, endedAt - startedAt),
+        timedOut,
+        until,
+        timeoutMs,
+        sessions,
+        hint,
+      }
+    },
+  })
+
   /** `agents_output` — the incremental event read. The model's only window in. */
   const output = defineTool({
     name: 'agents_output',
     description:
       'Read new events from a session since an index. Returns normalized messages plus nextIndex — pass that '
       + 'nextIndex back on the next call to receive only what is new (do not re-read from 0). Use limit to cap a '
-      + 'burst. Call repeatedly while status is running; when it is terminal, read the final result here.',
+      + 'burst. Prefer ONE agents_wait call over repeated reads while a session is still running: agents_output is '
+      + 'for reading, not for waiting. When the status is terminal, the final result is in this read.',
     parameters: {
       sessionId: {
         type: 'string',
@@ -480,32 +1174,9 @@ export function createToolDefinitions(manager: AgentManager) {
       render: (_args, value) => {
         // `?? []` — see the note in the agents_status render above.
         const messages = value.messages ?? []
-        // One readable line per event. A `[text]` payload may itself be
-        // multi-line: it is shown rather than clipped to its first line,
-        // because this render is the model's only window into the transcript.
-        // Consecutive `text`/`thinking` events are joined — some dialects emit
-        // one event per streamed delta and a line per fragment is pure noise.
-        let textSeen = false
-        const blocks: string[] = []
-        for (const message of messages) {
-          const prefix = `#${message.index} [${message.type}]`
-          const isText = message.type === 'text' || message.type === 'thinking'
-          if (isText && textSeen && blocks.length > 0) {
-            const last = blocks.length - 1
-            blocks[last] = `${blocks[last] ?? ''}${message.text ?? ''}`
-            continue
-          }
-          switch (message.type) {
-            case 'tool_use':
-            case 'tool_result':
-              blocks.push(`${prefix} ${message.tool ?? 'unknown'}${message.text === undefined ? '' : ` → ${message.text}`}`)
-              break
-            default:
-              blocks.push(`${prefix} ${message.text ?? ''}`)
-              break
-          }
-          if (isText) textSeen = true
-        }
+        // One readable line per event; see `renderEventBlocks` for why
+        // consecutive streamed text is joined.
+        const blocks = renderEventBlocks(messages)
         const header = `session ${value.sessionId} status=${value.status} events=${messages.length} nextIndex=${value.nextIndex}`
         const body: string[] = [header]
         if (blocks.length === 0) {
@@ -535,7 +1206,7 @@ export function createToolDefinitions(manager: AgentManager) {
         ...(args.limit === undefined ? {} : { limit: args.limit }),
       })
       if (read === undefined) {
-        throw new Error(`unknown session "${args.sessionId}" — list live sessions with agents_status`)
+        throw new Error(unknownSessionMessage(manager, args.sessionId))
       }
       const sinceIndex = args.sinceIndex ?? 0
       // Truncate before rendering: the render layer caps characters, and a
@@ -552,7 +1223,7 @@ export function createToolDefinitions(manager: AgentManager) {
       const snapshot = manager.status(args.sessionId)
       const result = snapshot?.result
       const hint = read.status === 'running'
-        ? `Still running. Call agents_output again with sinceIndex=${read.nextIndex} to read only new events.`
+        ? `Still running. Read only new events with sinceIndex=${read.nextIndex}, or call agents_wait to wait for the run in ONE bounded call instead of reading in a loop.`
         : `Session is ${read.status}. Read the final result above, then report it; no further events will arrive.`
       return {
         sessionId: read.sessionId,
@@ -560,26 +1231,207 @@ export function createToolDefinitions(manager: AgentManager) {
         nextIndex: read.nextIndex,
         terminal: snapshot?.terminal ?? read.status !== 'running',
         messages,
-        ...(result === undefined ? {} : {
-          result: {
-            status: result.status,
-            text: truncate(result.text, MAX_RENDERED_CHARS),
-            ...(result.error === undefined ? {} : { error: result.error }),
-            ...(result.exitCode === null ? {} : { exitCode: result.exitCode }),
-            durationMs: result.durationMs,
-            ...(result.backendSessionId === undefined ? {} : { backendSessionId: result.backendSessionId }),
-            ...(result.usage === undefined
-              ? {}
-              : {
-                  inputTokens: result.usage.inputTokens,
-                  outputTokens: result.usage.outputTokens,
-                  ...(result.usage.reasoningTokens === undefined
-                    ? {}
-                    : { reasoningTokens: result.usage.reasoningTokens }),
-                }),
-          },
-        }),
+        ...(result === undefined ? {} : { result: projectResult(result) }),
         hint,
+      }
+    },
+  })
+
+  /**
+   * `agents_usage` — the bill.
+   *
+   * Token spend is reported per session by the drivers and otherwise scattered
+   * across snapshots; nobody can answer "what did today's orchestration cost"
+   * from the other eight tools. This tool is the one place that adds it up, and
+   * the one place that has to be careful about HOW: `reasoningTokens` is a
+   * DISCLOSURE field, not a bucket (`AgentUsage` in the frozen ABI says codex
+   * counts it INSIDE `outputTokens`), so it is summed and shown separately and
+   * never added into `totalTokens` — doing so would double-count exactly the
+   * spend a person is trying to see.
+   */
+  const usage = defineTool({
+    name: 'agents_usage',
+    description:
+      'Total the token spend and wall-clock time of sessions — "what did this orchestration cost?". Returns one row '
+      + 'per session plus a summary. Defaults to every session this bridge knows about, finished ones included. '
+      + 'reasoningTokens is reported separately because engines that report it count it INSIDE outputTokens; it is '
+      + 'never added into totalTokens.',
+    parameters: {
+      sessionIds: {
+        oneOf: [
+          { type: 'string', description: 'A single session id.' },
+          { type: 'array', items: { type: 'string' }, description: 'Several session ids.' },
+        ],
+        description: 'Sessions to total. Omit for every session this bridge knows about.',
+      },
+      includeFinished: {
+        type: 'boolean',
+        description:
+          'Default true — finished sessions are included, so the total covers the whole batch. Pass false to total only what is still running. Ignored when sessionIds names sessions explicitly: an id you asked for is always totalled.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          sessions: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                sessionId: { type: 'string' },
+                agentId: { type: 'string' },
+                status: { type: 'string', enum: [...RUN_STATUSES] },
+                terminal: { type: 'boolean' },
+                durationMs: { type: 'integer' },
+                /** False when the engine reported no usage (still running, or the dialect has none). */
+                usageReported: { type: 'boolean' },
+                inputTokens: { type: 'integer' },
+                outputTokens: { type: 'integer' },
+                cacheReadTokens: { type: 'integer' },
+                cacheWriteTokens: { type: 'integer' },
+                /** Disclosure: already included in outputTokens. Never add it to totalTokens. */
+                reasoningTokens: { type: 'integer' },
+              },
+            },
+          },
+          summary: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              sessions: { type: 'integer' },
+              running: { type: 'integer' },
+              finished: { type: 'integer' },
+              inputTokens: { type: 'integer' },
+              outputTokens: { type: 'integer' },
+              cacheReadTokens: { type: 'integer' },
+              cacheWriteTokens: { type: 'integer' },
+              /** Sum of the four exclusive buckets. Excludes reasoningTokens. */
+              totalTokens: { type: 'integer' },
+              /** Disclosure only — NOT part of totalTokens. */
+              reasoningTokens: { type: 'integer' },
+              totalDurationMs: { type: 'integer' },
+            },
+          },
+          note: { type: 'string' },
+        },
+      },
+      render: (_args, value) => {
+        // `?? []` — see the note in the agents_status render above.
+        const sessions = value.sessions ?? []
+        const summary = value.summary
+        const count = (n: number | undefined): string => (n ?? 0).toLocaleString('en-US')
+        if (sessions.length === 0) {
+          return text(
+            'No sessions to total. Start one with agents_run (or agents_run_many), then call agents_usage again.',
+          )
+        }
+        const body = [
+          `Usage across ${summary?.sessions ?? sessions.length} session(s) — `
+            + `${summary?.finished ?? 0} finished, ${summary?.running ?? 0} still running.`,
+          '',
+          `  input        ${count(summary?.inputTokens)}`,
+          `  output       ${count(summary?.outputTokens)}`,
+          `  cache read   ${count(summary?.cacheReadTokens)}`,
+          `  cache write  ${count(summary?.cacheWriteTokens)}`,
+          `  total        ${count(summary?.totalTokens)} tokens  (input + output + cache read + cache write)`,
+          `  reasoning    ${count(summary?.reasoningTokens)} tokens  (disclosure only — already counted INSIDE outputTokens, so NOT added to the total)`,
+          // The SUM of per-session durations, not the wall-clock span of the
+          // batch: parallel sessions overlap, and reporting a span would make
+          // a 4-way fan-out look four times cheaper than it was.
+          `  run time     ${formatDuration(summary?.totalDurationMs ?? 0)} (sum of per-session durations; parallel sessions overlap)`,
+          '',
+        ]
+        for (const session of sessions) {
+          const tokens = session.usageReported === true
+            ? `${count(session.inputTokens)}in/${count(session.outputTokens)}out cache ${count(session.cacheReadTokens)}r/${count(session.cacheWriteTokens)}w`
+            : 'no usage reported yet (it arrives with the terminal result)'
+          body.push(
+            `• ${session.sessionId ?? '?'} ${session.agentId ?? '?'} ${session.status ?? '?'} `
+              + `${formatDuration(session.durationMs ?? 0)} — ${tokens}`,
+          )
+        }
+        body.push('', value.note ?? '')
+        return text(body.join('\n'))
+      },
+    },
+    execute: async (args) => {
+      const requested = normalizeIds(args.sessionIds)
+      const includeFinished = args.includeFinished !== false
+      if (requested.length > 0) {
+        for (const id of requested) {
+          if (manager.status(id) === undefined) throw new Error(unknownSessionMessage(manager, id))
+        }
+      }
+      const selected = requested.length > 0
+        ? requested
+        : manager
+            .list()
+            .filter((snapshot) => includeFinished || !snapshot.terminal)
+            .map((snapshot) => snapshot.sessionId)
+
+      let inputTokens = 0
+      let outputTokens = 0
+      let cacheReadTokens = 0
+      let cacheWriteTokens = 0
+      let reasoningTokens = 0
+      let totalDurationMs = 0
+      let running = 0
+      const now = Date.now()
+      const rows = selected.map((sessionId) => {
+        const snapshot = manager.status(sessionId)
+        // Unreachable for the requested case (checked above) and for the
+        // default case (`list()` produced the ids); kept total so a session
+        // disposed mid-call reports the truth instead of crashing.
+        if (snapshot === undefined) throw new Error(unknownSessionMessage(manager, sessionId))
+        const usageValue = snapshot.result?.usage
+        const durationMs =
+          snapshot.result?.durationMs ?? Math.max(0, (snapshot.endedAt ?? now) - snapshot.startedAt)
+        const row = {
+          sessionId: snapshot.sessionId,
+          agentId: snapshot.agentId,
+          status: snapshot.status,
+          terminal: snapshot.terminal,
+          durationMs,
+          usageReported: usageValue !== undefined,
+          inputTokens: usageValue?.inputTokens ?? 0,
+          outputTokens: usageValue?.outputTokens ?? 0,
+          cacheReadTokens: usageValue?.cacheReadTokens ?? 0,
+          cacheWriteTokens: usageValue?.cacheWriteTokens ?? 0,
+          reasoningTokens: usageValue?.reasoningTokens ?? 0,
+        }
+        inputTokens += row.inputTokens
+        outputTokens += row.outputTokens
+        cacheReadTokens += row.cacheReadTokens
+        cacheWriteTokens += row.cacheWriteTokens
+        // Summed for disclosure, deliberately NOT folded into the total: see
+        // the `AgentUsage.reasoningTokens` note in the frozen ABI.
+        reasoningTokens += row.reasoningTokens
+        totalDurationMs += durationMs
+        if (!snapshot.terminal) running += 1
+        return row
+      })
+      return {
+        sessions: rows,
+        summary: {
+          sessions: rows.length,
+          running,
+          finished: rows.length - running,
+          inputTokens,
+          outputTokens,
+          cacheReadTokens,
+          cacheWriteTokens,
+          totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
+          reasoningTokens,
+          totalDurationMs,
+        },
+        note:
+          'totalTokens adds the four exclusive buckets (input, output, cache read, cache write) only. ' +
+          'reasoningTokens is a disclosure field: engines that report it count it inside outputTokens, so adding it ' +
+          'again would double-count. Sessions with usageReported=false have not reported yet — the numbers land ' +
+          'with their terminal result.',
       }
     },
   })
@@ -620,11 +1472,16 @@ export function createToolDefinitions(manager: AgentManager) {
       ),
     },
     execute: async (args) => {
+      const before = manager.status(args.sessionId)
+      if (before === undefined) throw new Error(unknownSessionMessage(manager, args.sessionId))
       const requested = await manager.cancel(args.sessionId, args.reason)
       const snapshot = manager.status(args.sessionId)
-      const status = snapshot?.status ?? 'cancelled'
+      const status = snapshot?.status ?? before.status
       const note = !requested
-        ? 'Nothing to cancel: the session is unknown or already terminal.'
+        // `requested === false` has exactly two causes and they are both
+        // terminal, so this says which state it is already in rather than
+        // leaving the model to wonder whether the id was wrong.
+        ? `Nothing to cancel: session ${args.sessionId} is already ${before.status}, and a terminal session keeps its recorded outcome. Start new work with agents_run.`
         : status === 'running'
           // Three-phase cancel is asynchronous by design (SIGTERM → grace →
           // SIGKILL process group); the model must not assume it is done.
@@ -669,13 +1526,19 @@ export function createToolDefinitions(manager: AgentManager) {
         [
           `${value.resumed ? 'continued' : 'started a follow-up in'} ${value.sessionId} (status=${value.status}, messages=${value.messageCount})`,
           '',
-          `Next: agents_output { "sessionId": "${value.sessionId}", "sinceIndex": ${value.messageCount} } to read only the new turns` +
-          ' (or sinceIndex=0 to re-read the whole transcript).',
+          `Next: agents_wait { "sessionIds": "${value.sessionId}", "timeoutMs": 20000 } to wait for the follow-up in one call,`,
+          `or agents_output { "sessionId": "${value.sessionId}", "sinceIndex": ${value.messageCount} } to read only the new turns` +
+          ' (sinceIndex=0 re-reads the whole transcript).',
         ].join('\n'),
       ),
     },
     execute: async (args) => {
-      const snapshot = await manager.send(args.sessionId, args.prompt)
+      let snapshot: SessionSnapshot
+      try {
+        snapshot = await manager.send(args.sessionId, args.prompt)
+      } catch (err) {
+        throw await describeRunFailure(manager, err, 'send')
+      }
       return {
         sessionId: snapshot.sessionId,
         status: snapshot.status,
@@ -685,7 +1548,11 @@ export function createToolDefinitions(manager: AgentManager) {
     },
   })
 
-  return [probe, run, status, output, cancel, send] as const
+  // Registration order is the order the model reads the tools in: discover,
+  // start (one, then many), observe (status, wait, output, usage), interrupt,
+  // continue. `TOOL_NAMES` below must stay in this exact order — the host
+  // registers them in array order and tests assert on the resulting list.
+  return [probe, run, runMany, status, wait, output, usage, cancel, send] as const
 }
 
 /** The full definition table shape, for `register.ts` and tests. */
@@ -695,8 +1562,11 @@ export type ToolDefinitions = ReturnType<typeof createToolDefinitions>
 export const TOOL_NAMES = [
   'agents_probe',
   'agents_run',
+  'agents_run_many',
   'agents_status',
+  'agents_wait',
   'agents_output',
+  'agents_usage',
   'agents_cancel',
   'agents_send',
 ] as const

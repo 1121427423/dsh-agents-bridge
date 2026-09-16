@@ -29,7 +29,7 @@
  *    rather than `'claude'`; see tests/drivers/codebuddy-code.test.ts.
  *  - `codebuddy-code --acp` → the SAME binary as above, reached over the Agent
  *    Client Protocol instead of the stream-json dialect, and therefore a
- *    SEPARATE identity (`codebuddy-code-acp`, family `'acp'`, decision D24).
+ *    SEPARATE identity (`codebuddy-code-acp`, family `'acp'`, decision D27).
  *    Captured 2026-09-17 against 2.151.0: headerless NDJSON JSON-RPC on stdio
  *    (`initialize` → `protocolVersion`/`authMethods`/`agentCapabilities`,
  *    `session/new` → `sessionId`/`models`/`configOptions`, then a

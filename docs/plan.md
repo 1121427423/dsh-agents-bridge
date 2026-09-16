@@ -21,7 +21,7 @@
 | D13 | 驱动解析必须「白名单 + 静默忽略未知事件」 | codebuddy 实测发出 `system/status`、`file-history-snapshot` 等 claude 文档外事件 | ✅ 已验证 |
 | D14 | `session_id` 从 `system/init` 尽早捕获 | 实测 init 事件即带 session_id（对应 multica 的 early resume-pointer pinning） | ✅ 已验证 |
 | D15 | 冒烟命令用 `ctx.commands.register({name})`，名字 **不能含点号** | 实测本机 DSH 无 `ctx.command(...)`；命令名正则 `/^[a-z][a-z0-9_-]*$/u` 拒绝点号 → 命令名取 `agents-bridge-hello`。**dsh-plugin-studio 技能的 command-tool 配方对本版本 DSH 不适用** | ✅ 已修正 |
-| D16 | `commands` 不放进 `inject`，改惰性 `ctx.get` | 放进 inject 会让无命令注册表的宿主把整个插件判为 INACTIVE（6 个工具一起丢） | ✅ 已定 |
+| D16 | `commands` 不放进 `inject`，改惰性 `ctx.get` | 放进 inject 会让无命令注册表的宿主把整个插件判为 INACTIVE（整条工具面一起丢） | ✅ 已定 |
 | D17 | `exports['.']` 用字符串 `./lib/index.js` | DSH 插件合同校验器要求字符串形式；类型走顶层 `types` 字段，不影响 TS | ✅ 已修正 |
 | D18 | `src/integrate.ts` 作为 kernel↔drivers 的唯一适配层 | 两侧并行定下的形状不一致（行回调 vs stream、cancel vs terminate、SpawnExit vs ProcessExit）；单独适配比改任一冻结接口更安全 | ✅ 已实现 |
 | D19 | 模型目录从**服务端下发的缓存**读取，不搜 app 内置字符串 | 更正：`deepseek-v4.1-flash` 确实存在（0.03x、1M/默认300K、原生多模态），它在 `~/.workbuddy/cache/acc-product-config-v3.json` 里；我先前只搜 app.asar 内置串因而误判 | ✅ 已定位 |
@@ -65,7 +65,7 @@
 | 文件 | 职责 |
 |---|---|
 | `src/index.ts` | 导出 `inject = ['tools','systemPrompt']` + `apply(ctx, config)`；构造 manager；注册工具与 systemPrompt section；`ctx.effect()` 内注册并在 disposer 里 `dispose()` |
-| `src/tools/definitions.ts` | 6 个 `defineTool(...)`（含 `output.schema` + `render`） |
+| `src/tools/definitions.ts` | 9 个 `defineTool(...)`（含 `output.schema` + `render`；E 加了 `agents_wait` / `agents_run_many` / `agents_usage`） |
 | `src/tools/register.ts` | `ctx.tools.register(...)` 装配 + disposer 收集 |
 | `src/tools/smoke.ts` | 冒烟命令 `/agents-bridge.hello`（`ctx.command`） |
 | `README.md` | 安装/开发/验证说明 |
@@ -124,7 +124,12 @@ kernel 只保留共享机制（`<PREFIX>_PATH` 覆盖、解析、`<exe> --versio
   `copilot.tencent.com`，且 `terminal_reason` 在 2.151.0 里根本不存在 → claude 的
   结构化原因读取器无字段可读。**零 ABI 变更**。默认模型（不传 `--model`）是 `hy3`。
 
-**D24 — ACP driver（ABI v3，`ProtocolFamily += 'acp'`）。**
+**D27 — ACP driver（ABI v4，`ProtocolFamily += 'acp'`）。**
+
+> 编号说明：ACP 这一条原先被写成**与上面决策表里「P3 扫描」那一行相同的号**（重号），现按审查
+> 意见改为 **D27**（`D26` 是 P2 加固）；决策表里 P3 的两行**保持原号不动**。
+> ABI 版本号以 `src/kernel/types.ts` 的 CHANGELOG 为准：**v3 = P2 加固（D26）**、
+> **v4 = ACP driver（本条）**；本节正文原先写作 v3，一并更正。
 
 D1 把 ACP 推给 v2，理由原文是「WorkBuddy/AutoClaw 均不说 ACP」——那个理由对**这两个
 身份**成立，对「一条 driver entry 解锁多家 CLI」不成立：multica 里 hermes / kimi /
@@ -142,7 +147,7 @@ ACP（`docs/multica-reference.md` §4 原本把 `acp_*.go` 列为「v2 移植」
   `codebuddy-code-acp`，协议选择走新增的 `AgentDescriptor.protocolArgs`
   （`['--acp']`），**不硬编码在 driver 里** —— 「怎么选中这条协议」是身份数据，
   与「这条协议怎么说」是两件事，混在一起就等于把某个 CLI 的具体 flag 焊进 ACP 协议族。
-- **ABI v3 只做加法**：`ProtocolFamily += 'acp'`；新增可选字段
+- **ABI v4 只做加法**：`ProtocolFamily += 'acp'`；新增可选字段
   `AgentDescriptor.protocolArgs`、`AgentDescriptor.capabilities.clientTools`、
   `ProbeResult.authMethods`。唯一「破坏性」的是联合类型多了一个成员，而它对**声明式**
   消费方是增量的（每个既有描述符照样编译），两个 `switch` 是穷尽式写法、编译器会点名
@@ -197,12 +202,43 @@ codebuddy-code，12 家变 1 家）；② 自动批准一切权限（含 `allow_
 工作）；④ 用 `log` 兜住所有映射不上的 update（`status` 更有信息量，`log` 会把它降级成
 噪声）。
 
+**D26 — P2 加固（ABI v3）：策略拒绝必须是机器可读的，白名单必须是显式的。**
+
+`src/kernel/types.ts` 的 v3 段落地的是 P2 那一轮加固。加的字段全在 `ManagerOptions`
+（都是可选）：`allowedCwd` / `deniedCwd` / `allowedAgents` / `maxConcurrent`，
+加上运行时侧的 `graceMs`（取消时 SIGTERM → SIGKILL 的宽限期；它走插件 `Config` →
+`installDriverRuntime()`，**不在 `ManagerOptions` 上**，与上面四个宿主策略旋钮同属
+v3 那一批）。配套新增 `RunRejectionCode` 联合与 `AgentRunRejectedError` 类。
+
+- **为什么要有类型化的拒绝**：原来的拒绝是一条裸 `Error`，它唯一的契约是**消息文本**。
+  调用方（工具层、测试、未来的 embedder）想区分「agent 不存在」和「cwd 越界」，就只能
+  去匹配随时会被改写的散文 —— 那是把错误文案当成 API。改成 `AgentRunRejectedError`
+  之后，`code`（`unknown-agent` / `unsupported-agent` / `agent-not-allowed` /
+  `cwd-denied` / `cwd-not-allowed` / `cwd-unresolvable` / `max-concurrent`）是稳定的，
+  `value` / `allowed` / `maxConcurrent` / `running` 把「被拒的值」和「能接受的范围」
+  一起带出来，工具层才能在**不改内核**的前提下把错误渲染成「下一步改什么」。
+  `tests/kernel/manager-policy.test.ts` 与 `tests/plugin-config.test.ts` 断言的就是
+  `code` 而不是文案；工作流 E 的工具层因此选择**就地增强 message、保留同一个错误对象**，
+  而不是把它包成新的 `Error`（包了就等于把 v3 的机器可读性丢掉）。
+- **为什么是白名单**：`cwd` 与 agent 白名单是 `design.md` §10.4 点名的加固项
+  （「spawn 任意 CLI = 任意代码执行」的缓解）。两处比较都在 `realpath` 之后做，
+  所以 macOS 上 `/tmp` → `/private/tmp` 这种软链别名不能绕过；`maxConcurrent`
+  超限**同步拒绝、绝不排队**，因为排队会先烧掉调用方自己的超时预算再失败。
+- **尺度**：这套东西是「防模型手滑把 `cwd` 指到 `/`」，**不是沙箱**（§10.4 原话）。
+- **纯增量**：五个旋钮全部可选，`RunRejectionCode` / `AgentRunRejectedError` 是新增
+  导出。按老样子构造 `ManagerOptions` 的调用方行为一字不变，既有测试零改动通过。
+
+**被否决的替代方案（P2 加固）**：① 用 `error.message.includes('cwd')` 这类字符串匹配
+在工具层区分拒绝类型（文案一改就静默失效）；② 把白名单做成「拒绝时抛裸 `Error` +
+不同文案」（调用方没有稳定契约，测试只能锁散文）；③ 超并发时**排队**等一个槽位
+（会先耗尽工具调用自己的超时预算，最后失败得更难解释）。
+
 ## 阶段状态
 
 - [x] 仓库创建 + git init + 骨架（package.json / tsconfig / cordis.patch.yml / build.mjs / types.ts）
 - [x] **A · kernel 完成**：7 个模块 + 6 个测试文件，**50/50 单测通过**（修掉了 Clock 契约漂移：`Clock.now` 是方法，须经 `clock` 调用）
-- [x] **C · 工具面完成**：入口 + 6 个 defineTool + 冒烟命令 + README；`tsc` 零错误；`pnpm run build` → `lib/index.js`
-- [~] **B · drivers**：4 个方言 driver + argv 工具 + fixtures 已落盘，**B 仍在收敛 2 个测试失败**（`generic-argv` 的 argv 断言、`openclaw` 无输出时的错误文案）
+- [x] **C · 工具面完成**：入口 + 6 个 defineTool（E 之前；现为 9 个）+ 冒烟命令 + README；`tsc` 零错误；`pnpm run build` → `lib/index.js`
+- [x] **B · drivers**：4 个方言 driver + argv 工具 + fixtures；两个遗留断言（`generic-argv` 的 argv、`openclaw` 无输出时的错误文案）已由后续工作流收敛 —— 当前 `vitest run` 全绿（见「交付指标」）
 - [x] 集成：入口已接线 `installDriverRuntime()`；**端到端集成测试 5/5 通过**（真子进程 + 真 stream-json 解析 + 取消 + usage + resume 指针）
 - [x] 合同校验：`verify_plugin.py` **11/11 PASS**
 - [ ] 安装冒烟：装进 `desktop` profile → 重启 DSH → `/agents-bridge-hello` 与 `agents_probe` 可见（**待用户确认，因为需重启正在运行的会话**）
@@ -224,17 +260,21 @@ codebuddy-code，12 家变 1 家）；② 自动批准一切权限（含 `allow_
   - **端口指纹**：只探 `127.0.0.1` / `::1`（`localhost` 明确拒绝，避免走 resolver）；连接超时 ≤300ms、并发封顶、整轮墙钟预算；失败一律静默降级。**只有端口 + 响应签名同时命中才算 `confirmed`**，否则只是**疑似**，且**两者都不得影响 `available`**（`available` 仍只由"能不能真启动"决定）。默认期望表为**空**：本机没有已验证的 gateway 端口，猜一个等于往探测输出里塞假事实
   - **扫描真机实测**：29ms 扫完 `/Applications` 的 64 个 bundle，识别出 AutoClaw 的 gateway（`Resources/gateway/openclaw/openclaw.mjs` + bundle 内 `Resources/node/darwin-arm64/node`），并按内置优先规则正确遮蔽
 - [x] **P2 取消/续接/watchdog 打磨**：三段式取消（SIGTERM → grace → **进程组** SIGKILL）配孤儿证明测试（假 CLI fork 出孙进程 + 故意忽略 SIGTERM，cancel 后断言两个 pid 都 ESRCH）；watchdog 硬超时/idle 各自独立、终态 `timeout`、终态后定时器归零；`send` 对终态会话给可执行错误；`cwd`/agent 白名单（`realpath` 后比较）+ `maxConcurrent`（同步拒绝，不排队）；store 并发写者不再撞临时文件名（原 bug：per-instance 计数器 → 丢记录）。新增 81 个测试
-- [x] **D24 ACP driver 完成**：ABI v3（`ProtocolFamily += 'acp'` + 三个可选字段，纯加法）+ `src/drivers/acp.ts` + CLI 轨道新身份 `codebuddy-code-acp` + `tests/fixtures/fake-acp-cli.mjs`（DERIVED，见 `tests/fixtures/ACP-PROVENANCE.md`）+ 44 个 ACP 测试。**真实端到端**（`DSH_ACP_E2E=1`，`@tencent-ai/codebuddy-code` 2.151.0）：走完 `initialize` → `session/new`（拿到真实 `backendSessionId` `01a0abca-7768-79fd-bb1e-d44abfb0125d`）→ `session/prompt`，通知流被正确归一化成 `status`（`session info update`、`available commands update: 49 commands`/`60 commands`），终态是**鉴权失败**（退出码 0、stderr 空、`stopReason:"refusal"`、401 只在 `result._meta["codebuddy.ai/errorMessage"]` 里）——与 D23 同款最有价值证据，且证明 `refusal`→failed 的映射真的生效（否则会把死凭据报成「模型拒答」）。五个实测发现：帧格式是无头的 NDJSON；对端会发**没有 `id` 的请求**（`_codebuddy.ai/command`）；`refusal` 不是「模型拒答」而是失败态；**引擎是常驻服务、不主动关 stdin 就永不退出**（见 D24 正文）；客户端能力是 multica 没做过的**有意增量**。安全红线：`fs/*`、`terminal/*` 全部限制在 `opts.cwd` 内（含 realpath 反软链穿越），且默认关闭、需 env 显式开启
-- [x] **client half（监工 UI）落地**（工作流 A）：`src/client/**` + `src/host/api.ts` —— 宿主 HTTP 路由 `kind:"prefix"`、POST-only、复用 better-sidebar 的 `fence` 语义；`webServer` 用 `ctx.get` 惰性取而不进 `inject`（否则没有该服务的宿主会把整个插件判为 INACTIVE，D16），取不到只少 UI、6 个工具照常注册。client 侧按 slot 注册（`conversation.session.header.utilities` 常驻计数 + `sidebar.right.pane.tab` 完整面板，独立降级），增量读取回传 `nextIndex`，无会话时停轮询，中英双语 + 跟随宿主主题变量。`package.json` 加 `dsh.client` 与 `exports["./client"]`，`exports["."]` 保持字符串（D17）。新增 `lib/client.js` 产物与 `vitest.config.ts`（`tests/**` 锚定，避免 vitest 扫到兄弟 worktree——这个坑在合并期真实发生过）
-- [ ] P4 并行 fan-out（`agents_run_many` / `agents_wait` / `agents_usage`，待工作流 E）
+- [x] **D27 ACP driver 完成**：ABI v4（`ProtocolFamily += 'acp'` + 三个可选字段，纯加法）+ `src/drivers/acp.ts` + CLI 轨道新身份 `codebuddy-code-acp` + `tests/fixtures/fake-acp-cli.mjs`（DERIVED，见 `tests/fixtures/ACP-PROVENANCE.md`）+ 44 个 ACP 测试。**真实端到端**（`DSH_ACP_E2E=1`，`@tencent-ai/codebuddy-code` 2.151.0）：走完 `initialize` → `session/new`（拿到真实 `backendSessionId` `01a0abca-7768-79fd-bb1e-d44abfb0125d`）→ `session/prompt`，通知流被正确归一化成 `status`（`session info update`、`available commands update: 49 commands`/`60 commands`），终态是**鉴权失败**（退出码 0、stderr 空、`stopReason:"refusal"`、401 只在 `result._meta["codebuddy.ai/errorMessage"]` 里）——与 D23 同款最有价值证据，且证明 `refusal`→failed 的映射真的生效（否则会把死凭据报成「模型拒答」）。五个实测发现：帧格式是无头的 NDJSON；对端会发**没有 `id` 的请求**（`_codebuddy.ai/command`）；`refusal` 不是「模型拒答」而是失败态；**引擎是常驻服务、不主动关 stdin 就永不退出**（见 D27 正文）；客户端能力是 multica 没做过的**有意增量**。安全红线：`fs/*`、`terminal/*` 全部限制在 `opts.cwd` 内（含 realpath 反软链穿越），且默认关闭、需 env 显式开启
+- [x] **client half（监工 UI）落地**（工作流 A）：`src/client/**` + `src/host/api.ts` —— 宿主 HTTP 路由 `kind:"prefix"`、POST-only、复用 better-sidebar 的 `fence` 语义；`webServer` 用 `ctx.get` 惰性取而不进 `inject`（否则没有该服务的宿主会把整个插件判为 INACTIVE，D16），取不到只少 UI、工具面照常注册。client 侧按 slot 注册（`conversation.session.header.utilities` 常驻计数 + `sidebar.right.pane.tab` 完整面板，独立降级），增量读取回传 `nextIndex`，无会话时停轮询，中英双语 + 跟随宿主主题变量。`package.json` 加 `dsh.client` 与 `exports["./client"]`，`exports["."]` 保持字符串（D17）。新增 `lib/client.js` 产物与 `vitest.config.ts`（`tests/**` 锚定，避免 vitest 扫到兄弟 worktree——这个坑在合并期真实发生过）
+- [x] **P4 并行 fan-out（工作流 E）**：工具面 6 → 9。`agents_wait`（有界等待：全部 / 任一（`until:"any"`）终态或超时即返回；**超时是正常返回**，`timedOut: true`，什么都不取消；`timeoutMs` 缺省 20s、上限硬编码 60s、超了**钳位并在 render 里说明**）+ `agents_run_many`（一次起 ≤16 个；**单项被拒不影响其余**，错误带 `runs[i]` 前缀；超 `maxConcurrent` **不排队**、该项直接报错）+ `agents_usage`（逐会话 + 汇总；`reasoningTokens` 单列、**不计入 `totalTokens`**，因为它已被引擎算在 `output` 之内）。同一次交付还收了：**错误文案人因化**（`describeRunFailure` 就地增强 v3 的类型化拒绝、`unknownSessionMessage` 列出已知会话；`tests/tools/error-copy.test.ts` 11 个用例把「说了下一步」锁住）、**系统提示段重写**（何时委派 / prompt 必须自包含 / 先 `agents_wait` 再 `agents_output` 且回传 `nextIndex` / 并行用 `agents_run_many` / 方向错了 `agents_cancel` / 只看得到归一化事件）。**不变量 1 未被触碰**：`agents_run.execute()` 依旧立即返回（`tests/tools/wait.test.ts` 有用例锁住）。**证据**：`pnpm exec vitest run` → **691 passed / 1 skipped（40 个文件）**；`pnpm exec tsc --noEmit` → 0 错误；`pnpm run build` → `lib/index.js` 309.1 KB + `lib/client.js` 59.1 KB。（P4 的另外两件 —— ACP driver 与监工 UI —— 见上面两行，均已合并。）
 
 ## 交付指标（当前）
 
+> 下表所有数字来自工作流 E 合并后**本机真跑**：`pnpm exec vitest run` / `pnpm exec tsc --noEmit` / `pnpm run build`。
+
 | 指标 | 值 |
 |---|---|
-| TS 文件 | 81 个（src 41 / tests 37 / scripts 3） |
-| 测试 | **596 个全部通过（34 个文件）**（合并 B/A/C 后；P3 +62、client half +62、P2 +81） |
+| TS 文件 | 89 个（src 42 / tests 44 / scripts 3） |
+| 测试 | **691 个通过 + 1 skipped（40 个文件，`vitest run` 5.9s）** —— E 新增 46 个（`tests/tools/{wait,run-many,usage,error-copy}.test.ts` + 工具数断言同步） |
 | `tsc --noEmit` | 0 错误 |
-| 构建产物 | `lib/index.js` 227.8 KB + `lib/client.js` 59.1 KB |
-| 合同校验 | 11/11 PASS |
-| 端到端集成 | 5/5 PASS |
+| 构建产物 · `lib/index.js` | 309.1 KB（esbuild，`@deepseek-ai/*` 全部 external） |
+| 构建产物 · `lib/client.js` | 59.1 KB（web platform，`react` external） |
+| 工具面 | **9 个**（`agents_probe` / `run` / `run_many` / `status` / `wait` / `output` / `usage` / `cancel` / `send`） |
+| 合同校验 | 11/11 PASS（**上一轮**结论；`verify_plugin.py` 不在本仓，本轮未重跑。E 只加 `defineTool`、未动 `package.json` / `exports` / `cordis.patch.yml`，合同面未变） |
+| 端到端集成 | `tests/integration/pipeline.test.ts`（真子进程 + 真 stream-json 解析 + 取消 + usage + resume 指针）全绿 |

@@ -18,8 +18,8 @@ import path from 'node:path'
 import { createBackend } from '../../src/drivers/index.ts'
 import { installDriverRuntime } from '../../src/integrate.ts'
 import { createLogger } from '../../src/kernel/logger.ts'
-import { createAgentManager } from '../../src/kernel/manager.ts'
-import type { AgentDescriptor, AgentManager, ManagerOptions, SessionSnapshot } from '../../src/kernel/types.ts'
+import { createAgentManager, type ManagerCreateOptions } from '../../src/kernel/manager.ts'
+import type { AgentDescriptor, AgentManager, SessionSnapshot } from '../../src/kernel/types.ts'
 
 /** The node running this test doubles as the engine interpreter. */
 export const NODE = process.execPath
@@ -39,10 +39,15 @@ export const NODE = process.execPath
  * `graceMs` goes through `installDriverRuntime`, the same seam the plugin entry
  * uses — it is NOT a `ManagerOptions` field. Keeping one installation path means
  * a test cannot configure a grace window the production code would ignore.
+ *
+ * The options type is `ManagerCreateOptions` rather than `ManagerOptions` so a
+ * suite that calls `probe()` can pass `scan: false` and stay off the host's
+ * installed applications (the desktop track scans `/Applications` on a cold
+ * probe, which would make the suite depend on what the developer has installed).
  */
 export function makeManager(
   script: string,
-  overrides: Partial<ManagerOptions> = {},
+  overrides: Partial<ManagerCreateOptions> = {},
   commandEnv: Readonly<Record<string, string>> = {},
   graceMs?: number,
 ): AgentManager {
@@ -71,7 +76,7 @@ export class ManagerPool {
 
   create(
     script: string,
-    overrides: Partial<ManagerOptions> = {},
+    overrides: Partial<ManagerCreateOptions> = {},
     commandEnv: Readonly<Record<string, string>> = {},
     graceMs?: number,
   ): AgentManager {
