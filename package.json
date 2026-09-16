@@ -8,11 +8,13 @@
   "types": "lib/types/index.d.ts",
   "exports": {
     ".": "./lib/index.js",
+    "./client": "./lib/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
   "files": [
     "lib/index.js",
+    "lib/client.js",
     "lib/types/**/*.d.ts",
     "cordis.patch.yml",
     "README.md"
@@ -20,10 +22,19 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
     }
   },
   "scripts": {
-    "build": "node scripts/build.mjs",
+    "build": "node scripts/build.mjs && node scripts/build-client.mjs",
+    "build:host": "node scripts/build.mjs",
+    "build:client": "node scripts/build-client.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
