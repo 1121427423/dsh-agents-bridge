@@ -1,11 +1,12 @@
 /**
- * Identity registry: the built-in descriptor table plus `probe()`.
+ * Identity registry: the mechanism that resolves and probes identities.
  *
- * "Add a CLI" must stay a data change (design goal 3), so every host fact that
- * distinguishes one engine from another lives in this table: the executable,
- * the optional interpreter, fixed argv, the `<PREFIX>_PATH` / `<PREFIX>_MODEL`
- * override prefix, and — for engines that cannot be driven at all — an explicit
- * `unsupported` reason.
+ * The DATA moved out in ABI v2: the descriptor tables now live in the two track
+ * catalogs (`src/tracks/cli/catalog.ts`, `src/tracks/desktop/catalog.ts`) and
+ * the per-track launch rules in the track modules. This module stays the
+ * single mechanism both tracks share — resolve a `<PREFIX>_PATH` override, find
+ * the binary, hand the result to the track policy, and probe `<exe> --version`.
+ * It never branches on a specific agent id.
  *
  * `probe()` only ever runs `<exe> --version` (plus pure filesystem lookups).
  * Nothing here may trigger a login prompt, an onboarding window, or a nested
@@ -23,93 +24,31 @@ import path from 'node:path'
 import type {
   AgentDescriptor,
   AgentId,
+  AgentTrack,
   BridgeLogger,
   CommandSpec,
   ProbeResult,
 } from './types.ts'
 import { childLogger } from './logger.ts'
+import { BUILTIN_DESCRIPTORS, policyFor, type TrackPolicyOptions } from '../tracks/index.ts'
 
 /**
- * WorkBuddy ships the CodeBuddy CLI as a `#!/usr/bin/env node` script while
- * `node` is NOT on PATH on the target machine (verified: `env: node: No such
- * file or directory`). Hence the explicit interpreter — see design doc §4.
+ * Re-exported for embedders that already import this module: the descriptor
+ * DATA now lives in the two track catalogs (ABI v2), but the registry remains
+ * the natural place to read the table from.
  */
-const WORKBUDDY_CLI =
-  '/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy'
-const AUTOCLAW_ENGINE =
-  '/Applications/AutoClaw.app/Contents/Resources/gateway/openclaw/openclaw.mjs'
-/** Homebrew node: the interpreter both bundled engines need. */
-const BUNDLED_NODE = '/opt/homebrew/bin/node'
+export { BUILTIN_DESCRIPTORS }
 
+/** Probe cache TTL: probing is cheap but not free (one `--version` spawn each). */
 const DEFAULT_PROBE_TTL_MS = 60_000
 const DEFAULT_VERSION_TIMEOUT_MS = 3_000
 const MAX_VERSION_CHARS = 4096
 
-/**
- * The built-in identities. Order matters only for `probe()` output ordering.
- *
- * `generic` intentionally ships a placeholder executable: the caller points it
- * at a real CLI with `GENERIC_PATH` (the fallback path from multica's
- * `qwen.go`-style one-shot argv drivers). Resolving it to something that could
- * accidentally exist (`sh`) would make probe lie about availability.
- */
-export const BUILTIN_DESCRIPTORS: readonly AgentDescriptor[] = [
-  {
-    id: 'claude',
-    family: 'claude',
-    displayName: 'Claude Code',
-    command: { executable: 'claude' },
-    envPrefix: 'CLAUDE',
-    capabilities: { resume: true, model: true, effort: true, mcpConfig: true },
-  },
-  {
-    id: 'workbuddy',
-    family: 'codebuddy',
-    displayName: 'WorkBuddy (bundled CodeBuddy CLI)',
-    command: { executable: WORKBUDDY_CLI, interpreter: BUNDLED_NODE },
-    envPrefix: 'WORKBUDDY',
-    capabilities: { resume: true, model: true, effort: true, mcpConfig: true },
-  },
-  {
-    id: 'autoclaw',
-    family: 'openclaw',
-    displayName: 'AutoClaw (bundled OpenClaw engine)',
-    command: { executable: AUTOCLAW_ENGINE, interpreter: BUNDLED_NODE, argsPrefix: ['agent'] },
-    envPrefix: 'AUTOCLAW',
-    capabilities: { resume: true, model: true },
-  },
-  {
-    id: 'openclaw',
-    family: 'openclaw',
-    displayName: 'OpenClaw CLI (on PATH)',
-    command: { executable: 'openclaw', argsPrefix: ['agent'] },
-    envPrefix: 'OPENCLAW',
-    capabilities: { resume: true, model: true },
-  },
-  {
-    id: 'generic',
-    family: 'generic',
-    displayName: 'Generic agent CLI (set GENERIC_PATH)',
-    command: { executable: 'agent-cli' },
-    envPrefix: 'GENERIC',
-    capabilities: { model: true },
-  },
-  {
-    id: 'mimo',
-    family: 'generic',
-    displayName: 'MiMo (sealed desktop app)',
-    command: { executable: 'mimo' },
-    envPrefix: 'MIMO',
-    unsupported: {
-      reason:
-        'MiMo keeps its agent loop inside app.asar and exposes no CLI, ACP endpoint or daemon socket, so it cannot be driven by the bridge (design doc D8).',
-    },
-  },
-]
-
 /** One identity with every host-dependent value resolved. */
 export interface ResolvedIdentity {
   readonly descriptor: AgentDescriptor
+  /** The track that produced `command`. */
+  readonly track: AgentTrack
   /**
    * The `CommandSpec` a driver should launch. `executable` / `interpreter` are
    * absolute when they were found; otherwise the raw descriptor values are kept
@@ -148,8 +87,10 @@ export interface RegistryOptions {
   readonly versionTimeoutMs?: number
   /** Injectable version prober (defaults to a bounded `<exe> --version` spawn). */
   readonly probeVersion?: VersionProbe
-  /** Injectable executable resolver (defaults to PATH + filesystem lookup). */
-  readonly resolveExecutable?: (raw: string) => string | undefined
+  /** Injectable executable resolver (defaults to track searchPath + PATH). */
+  readonly resolveExecutable?: ExecutableResolver
+  /** Overrides how a track builds its CommandSpec (tests / settings). */
+  readonly trackPolicyOptions?: TrackPolicyOptions
 }
 
 export interface AgentRegistry {
@@ -174,6 +115,24 @@ function isExecutableFile(candidate: string): boolean {
   }
 }
 
+/**
+ * A file that will be handed to an interpreter only has to be READABLE.
+ *
+ * Verified failure this fixes: AutoClaw ships its engine as
+ * `.../gateway/openclaw/openclaw.mjs` with mode 644 and runs it as
+ * `node openclaw.mjs`, so an executable-bit test reported a healthy desktop
+ * engine as missing. The interpreter itself is still required to be executable.
+ */
+function isReadableFile(candidate: string): boolean {
+  try {
+    if (!fs.statSync(candidate).isFile()) return false
+    fs.accessSync(candidate, fs.constants.R_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** Expand a leading `~` without touching the rest of the path. */
 function expandHome(raw: string): string {
   if (raw === '~') return os.homedir()
@@ -181,23 +140,45 @@ function expandHome(raw: string): string {
   return raw
 }
 
-function makeResolver(env: Readonly<Record<string, string | undefined>>): (raw: string) => string | undefined {
+/**
+ * Resolver for one lookup. `extraDirs` is the track policy's search path and is
+ * consulted BEFORE the inherited PATH: a GUI-launched host routinely has a
+ * minimal PATH in which an installed engine is invisible (verified: `claude`
+ * was unresolvable while /usr/local/bin/claude existed).
+ */
+function makeResolver(
+  env: Readonly<Record<string, string | undefined>>,
+): ExecutableResolver {
   const searchPath = env['PATH'] ?? ''
-  return (raw: string): string | undefined => {
+  return (raw: string, extraDirs: readonly string[] = [], requireExecutable = true): string | undefined => {
+    const accept = requireExecutable ? isExecutableFile : isReadableFile
     const candidate = expandHome(raw)
     if (candidate === '' || candidate.includes(path.sep)) {
       const abs = path.resolve(candidate)
-      return isExecutableFile(abs) ? abs : undefined
+      return accept(abs) ? abs : undefined
     }
-    for (const dir of searchPath.split(path.delimiter)) {
+    for (const dir of [...extraDirs, ...searchPath.split(path.delimiter)]) {
       // An empty PATH entry means "current directory" by POSIX convention.
       const base = dir === '' ? '.' : expandHome(dir)
       const abs = path.resolve(base, candidate)
-      if (isExecutableFile(abs)) return abs
+      if (accept(abs)) return abs
     }
     return undefined
   }
 }
+
+/**
+ * Resolve a raw executable to an absolute path.
+ *
+ * `extraDirs` is the track policy's search path (consulted first, mirroring the
+ * login shell's user-dirs-first ordering). `requireExecutable: false` is for a
+ * file that will be run through an interpreter — see `isReadableFile`.
+ */
+export type ExecutableResolver = (
+  raw: string,
+  extraDirs?: readonly string[],
+  requireExecutable?: boolean,
+) => string | undefined
 
 /* ---------------------------------------------------------------- version */
 
@@ -306,6 +287,8 @@ export function createRegistry(options: RegistryOptions = {}): AgentRegistry {
   const ttlMs = options.probeCacheTtlMs ?? DEFAULT_PROBE_TTL_MS
   const versionTimeoutMs = options.versionTimeoutMs ?? DEFAULT_VERSION_TIMEOUT_MS
   const resolveExecutable = options.resolveExecutable ?? makeResolver(env)
+  const trackPolicyOptions: TrackPolicyOptions = options.trackPolicyOptions ?? {}
+  const policyCache = new Map<AgentTrack, ReturnType<typeof policyFor>>()
   const probeVersion = options.probeVersion ?? defaultVersionProbe
   const descriptors = mergeDescriptors(options.overrides, options.extraDescriptors)
   const byId = new Map<AgentId, AgentDescriptor>(descriptors.map((d) => [d.id, d]))
@@ -317,8 +300,9 @@ export function createRegistry(options: RegistryOptions = {}): AgentRegistry {
     const descriptor = byId.get(id)
     if (!descriptor) {
       return {
-        descriptor: { id, family: 'generic', displayName: id, command: { executable: id } },
+        descriptor: { id, track: 'cli', family: 'generic', displayName: id, command: { executable: id } },
         command: { executable: id },
+        track: 'cli',
         env: collectEnv(undefined, env),
         reason: `unknown agent id "${id}"`,
       }
@@ -335,10 +319,21 @@ export function createRegistry(options: RegistryOptions = {}): AgentRegistry {
     const rawInterpreter =
       overrideInterpreter ?? (prefix && env[`${prefix}_INTERPRETER`] !== undefined ? undefined : descriptor.command.interpreter)
 
-    const executablePath = resolveExecutable(rawExecutable)
-    const interpreterPath = rawInterpreter ? resolveExecutable(rawInterpreter) : undefined
+    // The track policy owns the search path, so the lookup happens before the
+    // policy runs: first with the policy's dirs, then (for a descriptor that
+    // pins its own) with the descriptor's extra dirs.
+    let policy = policyCache.get(descriptor.track)
+    if (policy === undefined) {
+      policy = policyFor(descriptor.track, trackPolicyOptions)
+      policyCache.set(descriptor.track, policy)
+    }
+    const extraDirs = [...(descriptor.command.searchPath ?? []), ...policy.searchPath]
+    // With an interpreter the target is a SCRIPT: readable is enough, and the
+    // interpreter is the thing that must be executable.
+    const executablePath = resolveExecutable(rawExecutable, extraDirs, rawInterpreter === undefined)
+    const interpreterPath = rawInterpreter ? resolveExecutable(rawInterpreter, extraDirs, true) : undefined
 
-    const command: CommandSpec = {
+    const fallbackCommand: CommandSpec = {
       executable: executablePath ?? rawExecutable,
       ...(rawInterpreter !== undefined ? { interpreter: interpreterPath ?? rawInterpreter } : {}),
       ...(descriptor.command.argsPrefix ? { argsPrefix: descriptor.command.argsPrefix } : {}),
@@ -347,8 +342,9 @@ export function createRegistry(options: RegistryOptions = {}): AgentRegistry {
 
     const base: ResolvedIdentity = {
       descriptor,
-      command,
+      command: fallbackCommand,
       env: collectEnv(descriptor, env),
+      track: descriptor.track,
       ...(executablePath !== undefined ? { executablePath } : {}),
       ...(interpreterPath !== undefined ? { interpreterPath } : {}),
       ...(overrideModel !== undefined ? { model: overrideModel } : {}),
@@ -357,13 +353,19 @@ export function createRegistry(options: RegistryOptions = {}): AgentRegistry {
     if (descriptor.unsupported) {
       return { ...base, reason: descriptor.unsupported.reason }
     }
-    if (!executablePath) {
-      return { ...base, reason: notFoundReason('executable', rawExecutable, prefix) }
-    }
-    if (rawInterpreter && !interpreterPath) {
-      return { ...base, reason: notFoundReason('interpreter', rawInterpreter, prefix) }
-    }
-    return base
+    // The policy decides: it may repair a node shim (CLI track) or refuse
+    // outright (desktop track). Unresolved paths still reach it, because the
+    // policy produces the user-facing reason.
+    const outcome = policy.launch({
+      descriptor,
+      ...(executablePath !== undefined ? { executablePath } : {}),
+      ...(interpreterPath !== undefined ? { interpreterPath } : {}),
+      env,
+      rawExecutable,
+      ...(rawInterpreter !== undefined ? { rawInterpreter } : {}),
+    })
+    if ('reason' in outcome) return { ...base, reason: outcome.reason }
+    return { ...base, command: outcome.command }
   }
 
   async function probeOne(descriptor: AgentDescriptor): Promise<ProbeResult> {
@@ -371,7 +373,9 @@ export function createRegistry(options: RegistryOptions = {}): AgentRegistry {
     const identity = {
       id: descriptor.id,
       displayName: descriptor.displayName,
+      track: descriptor.track,
       family: descriptor.family,
+      ...(descriptor.notes !== undefined ? { notes: descriptor.notes } : {}),
     }
     const capabilities = descriptor.capabilities
     if (resolved.reason !== undefined) {

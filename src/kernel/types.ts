@@ -11,6 +11,16 @@
  * instead. Ported in spirit from multica `server/pkg/agent/agent.go`
  * (`Backend.Execute → *Session`, unified `Message` stream, `TokenUsage`).
  *
+ * ── ABI CHANGELOG ─────────────────────────────────────────────────────────
+ *  v1  initial contracts (workstreams A/B/C).
+ *  v2  + `AgentTrack` and the REQUIRED `AgentDescriptor.track`: the CLI track
+ *      and the desktop track are two different implementations of "establish
+ *      and launch an engine", and the split is explicit data, never inferred
+ *      from the protocol family (openclaw exists on both tracks). Additive
+ *      otherwise: `CommandSpec.searchPath`, `ProbeResult.track` / `.health` /
+ *      `.models`, `ProtocolFamily` += 'codex'. Only `track` is breaking, and
+ *      the compiler flags every descriptor that lacks it.
+ *
  * @module dsh-agents-bridge/kernel/types
  */
 
@@ -22,7 +32,25 @@ export type AgentId = string
  * identities may share one family (multica's "identity fork" concept: WorkBuddy
  * ships a CodeBuddy binary, both speak the claude stream-json dialect).
  */
-export type ProtocolFamily = 'claude' | 'codebuddy' | 'openclaw' | 'generic'
+export type ProtocolFamily = 'claude' | 'codebuddy' | 'codex' | 'openclaw' | 'generic'
+
+/**
+ * Integration track: HOW the bridge obtains a launchable engine. This is a
+ * separate axis from `ProtocolFamily` (the wire dialect), and the two tracks
+ * are implemented independently — a fix or a policy in one must never leak
+ * into the other (design decision D21).
+ *
+ *  - `cli`     — a standalone binary the user installed themselves, resolved
+ *                through PATH plus an explicit `CommandSpec.searchPath`
+ *                (verified: a GUI-launched DSH inherits a minimal PATH, so a
+ *                bare `claude` resolves to nothing while `/usr/local/bin/claude`
+ *                exists). Auth belongs to that CLI's own config; the bridge
+ *                reads status but never holds or forwards a credential.
+ *  - `desktop` — an engine owned by a desktop app: launched from an absolute
+ *                path inside the bundle, reusing the app's login/session,
+ *                sometimes behind a per-app profile. Never PATH-resolved.
+ */
+export type AgentTrack = 'cli' | 'desktop'
 
 /** How the bridge reaches an engine. v1 implements `spawn`; `connect` is reserved. */
 export type TransportMode = 'spawn' | 'connect'
@@ -45,11 +73,25 @@ export interface CommandSpec {
   readonly argsPrefix?: readonly string[]
   /** Extra environment variables for the child process. */
   readonly env?: Readonly<Record<string, string>>
+  /**
+   * `cli` track only: extra directories searched for a bare `executable`,
+   * in order, BEFORE the inherited PATH. Exists because version-manager and
+   * per-user installs (`~/.nvm/.../bin`, `~/.local/bin`, `/usr/local/bin`) are
+   * routinely absent from the PATH of a GUI-launched host process, which would
+   * otherwise make `probe` report an installed engine as unavailable.
+   */
+  readonly searchPath?: readonly string[]
 }
 
 /** One agent CLI known to the bridge. */
 export interface AgentDescriptor {
   readonly id: AgentId
+  /**
+   * Integration track (ABI v2). REQUIRED so that "which half implements this"
+   * is always explicit: an engine is never silently treated as a CLI because
+   * nobody filled the field in.
+   */
+  readonly track: AgentTrack
   readonly family: ProtocolFamily
   readonly displayName: string
   readonly command: CommandSpec
@@ -75,12 +117,40 @@ export interface AgentDescriptor {
    * of the bridge silently omitting it.
    */
   readonly unsupported?: { readonly reason: string }
+  /**
+   * Host-verified caveat worth surfacing to the model and the user, e.g. "on
+   * this machine `claude` resolves to a reverse-engineered fork". Travels into
+   * `ProbeResult.notes`; never affects launch behaviour.
+   */
+  readonly notes?: string
+}
+
+/**
+ * Health of the two things that actually decide whether a run can work:
+ * the launch (binary/interpreter found) and the credential (the engine's own
+ * upstream auth is usable). `credential: 'unknown'` is the honest answer
+ * whenever checking would cost a network round trip — probing is called from a
+ * model-facing tool and must stay cheap.
+ */
+export interface AgentHealth {
+  readonly launch: 'ok' | 'missing' | 'unsupported'
+  /**
+   * `not-applicable` = the engine authenticates some other way (e.g. a desktop
+   * app's reused login). `invalid` = a credential exists but the upstream
+   * rejected it in a real run; `unknown` = present but unverified.
+   */
+  readonly credential: 'ok' | 'missing' | 'invalid' | 'unknown' | 'not-applicable'
+  /** One line of evidence for the model/human, e.g. the upstream error text. */
+  readonly detail?: string
+  /** Config file the status was derived from, when there is one. */
+  readonly configPath?: string
 }
 
 /** Result of probing one identity on the host. */
 export interface ProbeResult {
   readonly id: AgentId
   readonly displayName: string
+  readonly track: AgentTrack
   readonly family: ProtocolFamily
   readonly available: boolean
   /** Resolved absolute path when found. */
@@ -90,6 +160,18 @@ export interface ProbeResult {
   /** Why it is unavailable / not drivable (human-readable). */
   readonly reason?: string
   readonly capabilities?: AgentDescriptor['capabilities']
+  /** Launch + credential status (ABI v2). */
+  readonly health?: AgentHealth
+  /**
+   * Model ids the engine will accept, when a per-engine catalog is readable
+   * locally (decision D20). Best-effort: absent means "not discovered", which
+   * is NOT the same as "the engine has no models".
+   */
+  readonly models?: readonly string[]
+  /** Where `models` came from, for the model to explain itself. */
+  readonly modelsSource?: string
+  /** Verbatim caveat from the descriptor (see `AgentDescriptor.notes`). */
+  readonly notes?: string
 }
 
 /** Per-run options. Mirrors the useful subset of multica's `ExecOptions`. */

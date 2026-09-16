@@ -20,6 +20,19 @@ function fakeExecutable(name: string): string {
   return file
 }
 
+/**
+ * A registry whose CLI track has NO extra search path.
+ *
+ * Without this the suite is host-dependent in a very real way: the CLI track
+ * searches `~/.local/bin`, `/usr/local/bin`, `/opt/homebrew/bin` and the nvm bin
+ * dir, so on a machine where `claude`/`codex` are installed a "PATH is empty ⇒
+ * not found" assertion silently becomes false. The track's own search behaviour
+ * is covered explicitly in tests/tracks/cli.test.ts instead.
+ */
+function createHermeticRegistry(options: Parameters<typeof createRegistry>[0] = {}) {
+  return createRegistry({ ...options, trackPolicyOptions: { searchPath: [] } })
+}
+
 describe('built-in descriptor table', () => {
   it('ships the v1 identities with their launch facts', () => {
     const ids = BUILTIN_DESCRIPTORS.map((d) => d.id)
@@ -27,11 +40,25 @@ describe('built-in descriptor table', () => {
       expect(ids).toContain(required)
     }
 
-    const registry = createRegistry({ env: { PATH: '' } })
+    const registry = createHermeticRegistry({ env: { PATH: '' } })
     const claude = registry.get('claude')
     expect(claude?.family).toBe('claude')
     expect(claude?.command.executable).toBe('claude')
     expect(claude?.envPrefix).toBe('CLAUDE')
+
+    // ABI v2: the track is explicit data, and it is NOT the protocol family
+    // (openclaw exists on both tracks).
+    expect(claude?.track).toBe('cli')
+    expect(BUILTIN_DESCRIPTORS.find((d) => d.id === 'codex')?.track).toBe('cli')
+    expect(BUILTIN_DESCRIPTORS.find((d) => d.id === 'codex')?.family).toBe('codex')
+    expect(BUILTIN_DESCRIPTORS.find((d) => d.id === 'autoclaw')?.track).toBe('desktop')
+    expect(BUILTIN_DESCRIPTORS.find((d) => d.id === 'openclaw')?.track).toBe('cli')
+    expect(new Set(BUILTIN_DESCRIPTORS.map((d) => d.track))).toEqual(new Set(['cli', 'desktop']))
+    for (const descriptor of BUILTIN_DESCRIPTORS) {
+      // Every identity must declare a track; an inferred default is the bug
+      // this field exists to prevent.
+      expect(['cli', 'desktop']).toContain(descriptor.track)
+    }
 
     const workbuddy = registry.get('workbuddy')
     expect(workbuddy?.family).toBe('codebuddy')
@@ -58,7 +85,7 @@ describe('built-in descriptor table', () => {
 
   it('applies overrides without dropping untouched descriptor fields', () => {
     const cli = fakeExecutable('override-cli')
-    const registry = createRegistry({
+    const registry = createHermeticRegistry({
       env: { PATH: '' },
       overrides: { claude: { displayName: 'Claude (patched)', command: { executable: cli } } },
     })
@@ -68,11 +95,15 @@ describe('built-in descriptor table', () => {
   })
 
   it('merges runtime-discovered identities', () => {
-    const registry = createRegistry({
+    const registry = createHermeticRegistry({
       env: { PATH: tmpRoot },
       extraDescriptors: [
         {
           id: 'house-agent',
+          // ABI v2: an extra identity must declare its track. Omitting it is a
+          // loud failure by design — the bridge never guesses which half of the
+          // implementation should launch something.
+          track: 'cli',
           family: 'generic',
           displayName: 'House agent',
           command: { executable: fakeExecutable('house-agent') },
@@ -89,7 +120,7 @@ describe('resolve()', () => {
   it('resolves a bare name through PATH', () => {
     const claude = fakeExecutable('claude-on-path')
     const dir = path.dirname(claude)
-    const registry = createRegistry({
+    const registry = createHermeticRegistry({
       env: { PATH: dir },
       overrides: { claude: { command: { executable: path.basename(claude) } } },
     })
@@ -102,7 +133,7 @@ describe('resolve()', () => {
   it('honours <PREFIX>_PATH / _INTERPRETER / _MODEL', () => {
     const cli = fakeExecutable('codebuddy-cli')
     const node = fakeExecutable('node-interpreter')
-    const registry = createRegistry({
+    const registry = createHermeticRegistry({
       env: {
         PATH: '',
         WORKBUDDY_PATH: cli,
@@ -120,7 +151,7 @@ describe('resolve()', () => {
 
   it('can drop an interpreter with an explicit empty override', () => {
     const cli = fakeExecutable('native-cli')
-    const registry = createRegistry({
+    const registry = createHermeticRegistry({
       env: { PATH: '', WORKBUDDY_PATH: cli, WORKBUDDY_INTERPRETER: '' },
     })
     const resolved = registry.resolve('workbuddy')
@@ -130,7 +161,7 @@ describe('resolve()', () => {
 
   it('reports a missing interpreter instead of pretending to be launchable', () => {
     const cli = fakeExecutable('codebuddy-cli-2')
-    const registry = createRegistry({
+    const registry = createHermeticRegistry({
       env: { PATH: '', WORKBUDDY_PATH: cli, WORKBUDDY_INTERPRETER: path.join(tmpRoot, 'no-such-node') },
     })
     const resolved = registry.resolve('workbuddy')
@@ -139,14 +170,14 @@ describe('resolve()', () => {
   })
 
   it('reports a missing executable with the override hint', () => {
-    const registry = createRegistry({ env: { PATH: '' } })
+    const registry = createHermeticRegistry({ env: { PATH: '' } })
     const resolved = registry.resolve('claude')
     expect(resolved.reason).toContain('executable not found or not executable: claude')
     expect(resolved.reason).toContain('CLAUDE_PATH')
   })
 
   it('reports unsupported identities without trying to resolve them', () => {
-    const registry = createRegistry({ env: { PATH: tmpRoot } })
+    const registry = createHermeticRegistry({ env: { PATH: tmpRoot } })
     const resolved = registry.resolve('mimo')
     expect(resolved.reason).toBe(registry.get('mimo')?.unsupported?.reason)
     expect(resolved.reason).toContain('asar')
@@ -158,7 +189,7 @@ describe('probe()', () => {
     const cli = fakeExecutable('probe-codebuddy')
     const node = fakeExecutable('probe-node')
     const calls: string[][] = []
-    const registry = createRegistry({
+    const registry = createHermeticRegistry({
       env: { PATH: '', WORKBUDDY_PATH: cli, WORKBUDDY_INTERPRETER: node },
       probeVersion: async ({ argv }) => {
         calls.push([...argv])
@@ -184,7 +215,7 @@ describe('probe()', () => {
 
   it('keeps an unknown version from failing the probe', async () => {
     const cli = fakeExecutable('probe-cli-flaky')
-    const registry = createRegistry({
+    const registry = createHermeticRegistry({
       env: { PATH: '', GENERIC_PATH: cli },
       probeVersion: async () => {
         throw new Error('probe exploded')
@@ -200,7 +231,7 @@ describe('probe()', () => {
     const cli = fakeExecutable('probe-cli-cache')
     let clock = 0
     let probeCalls = 0
-    const registry = createRegistry({
+    const registry = createHermeticRegistry({
       env: { PATH: '', GENERIC_PATH: cli },
       now: () => clock,
       probeVersion: async () => {
@@ -227,7 +258,7 @@ describe('probe()', () => {
   it('invalidates the cache on demand', async () => {
     const cli = fakeExecutable('probe-cli-invalidate')
     let probeCalls = 0
-    const registry = createRegistry({
+    const registry = createHermeticRegistry({
       env: { PATH: '', GENERIC_PATH: cli },
       probeVersion: async () => {
         probeCalls += 1

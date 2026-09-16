@@ -188,11 +188,28 @@ export function createToolDefinitions(manager: AgentManager) {
           properties: {
             id: { type: 'string' },
             displayName: { type: 'string' },
-            family: { type: 'string', enum: ['claude', 'codebuddy', 'openclaw', 'generic'] },
+            track: { type: 'string', enum: ['cli', 'desktop'] },
+            family: { type: 'string', enum: ['claude', 'codebuddy', 'codex', 'openclaw', 'generic'] },
             available: { type: 'boolean' },
             executable: { type: 'string' },
             version: { type: 'string' },
             reason: { type: 'string' },
+            notes: { type: 'string' },
+            health: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                launch: { type: 'string', enum: ['ok', 'missing', 'unsupported'] },
+                credential: {
+                  type: 'string',
+                  enum: ['ok', 'missing', 'invalid', 'unknown', 'not-applicable'],
+                },
+                detail: { type: 'string' },
+                configPath: { type: 'string' },
+              },
+            },
+            models: { type: 'array', items: { type: 'string' } },
+            modelsSource: { type: 'string' },
           },
         },
       },
@@ -202,7 +219,12 @@ export function createToolDefinitions(manager: AgentManager) {
       const results = await manager.probe(args.refresh === undefined ? {} : { refresh: args.refresh })
       // Spread into mutable JSON arrays: the kernel returns `readonly` views,
       // and `output.schema` materialization must see plain lossless JSON.
-      return results.map(result => ({ ...result }))
+      return results.map(({ models, ...rest }) => ({
+        ...rest,
+        // `ProbeResult.models` is a readonly view; materialization needs a
+        // plain mutable array to satisfy the schema type.
+        ...(models === undefined ? {} : { models: [...models] }),
+      }))
     },
   })
 
