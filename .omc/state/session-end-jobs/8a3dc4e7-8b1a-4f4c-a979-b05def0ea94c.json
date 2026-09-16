@@ -1,0 +1,321 @@
+{
+  "version": 1,
+  "jobId": "557a9bcb-8499-4aed-9af9-4f04af9cc6a8",
+  "sessionId": "8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c",
+  "scopeKey": "34bb80ade73909f63bb565d38a32d28de00795e8f711dbdf00f8b27ffe167ef4",
+  "revision": 41,
+  "createdAt": "2026-09-16T15:30:35.382Z",
+  "updatedAt": "2026-09-16T15:30:36.525Z",
+  "producerGraceExpiresAt": "2026-09-16T15:31:05.383Z",
+  "bestEffortDeadlineAt": "2026-09-16T15:31:56.383Z",
+  "producers": {
+    "core": {
+      "state": "sealed",
+      "intentKey": "160261b5123e43a1584ce0d68ed72e087b21bfcdfe2491f4594a455fce3df6a8",
+      "payloadDigest": "160261b5123e43a1584ce0d68ed72e087b21bfcdfe2491f4594a455fce3df6a8",
+      "sealedAt": "2026-09-16T15:30:35.444Z",
+      "sealedBy": "foreground"
+    },
+    "wiki": {
+      "state": "no-op",
+      "sealedAt": "2026-09-16T15:30:35.382Z",
+      "sealedBy": "wiki-producer"
+    }
+  },
+  "actions": {
+    "foreground-cleanup": {
+      "class": "required",
+      "phase": "deferred-required",
+      "status": "completed",
+      "attempts": 0,
+      "idempotencyKey": "febf6dba2f2536433960a07f7cedce72e946b43ced0896570df80f017b8914d2",
+      "payload": {
+        "transcriptPath": "/Users/king/.claude/projects/-Users-king-BigModel-LLM-tools-dsh-plugins-dsh-agents-bridge/8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c.jsonl",
+        "cwd": "/Users/king/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge",
+        "reason": "other",
+        "input": {
+          "session_id": "8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c",
+          "transcript_path": "/Users/king/.claude/projects/-Users-king-BigModel-LLM-tools-dsh-plugins-dsh-agents-bridge/8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c.jsonl",
+          "cwd": "/Users/king/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "metrics": {
+          "session_id": "8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c",
+          "ended_at": "2026-09-16T15:30:35.380Z",
+          "reason": "other",
+          "agents_spawned": 0,
+          "agents_completed": 0,
+          "modes_used": []
+        },
+        "initialTeamNames": [],
+        "openClawEnabled": false,
+        "openClawRouting": {},
+        "foregroundResult": {
+          "removedTransientFiles": 1,
+          "completedAt": "2026-09-16T15:30:35.443Z"
+        }
+      },
+      "budgetMs": 9000,
+      "completedAt": "2026-09-16T15:30:35.444Z",
+      "lastOutcomeCode": "completed"
+    },
+    "wiki-capture": {
+      "class": "required",
+      "phase": "deferred-required",
+      "status": "completed",
+      "attempts": 0,
+      "idempotencyKey": "1719cd1ef5b51e0269b78c4cb8c9308c9c1f7b82fd1c067fc034c060f23863f5",
+      "payload": {},
+      "budgetMs": 9000,
+      "completedAt": "2026-09-16T15:30:35.382Z"
+    },
+    "team-cleanup": {
+      "class": "required",
+      "phase": "deferred-required",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "cee6ac31df545408e1e822247ac249b3f8182a98a5fe8e448ae3b251e55bdee1",
+      "payload": {
+        "transcriptPath": "/Users/king/.claude/projects/-Users-king-BigModel-LLM-tools-dsh-plugins-dsh-agents-bridge/8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c.jsonl",
+        "cwd": "/Users/king/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge",
+        "reason": "other",
+        "input": {
+          "session_id": "8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c",
+          "transcript_path": "/Users/king/.claude/projects/-Users-king-BigModel-LLM-tools-dsh-plugins-dsh-agents-bridge/8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c.jsonl",
+          "cwd": "/Users/king/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "metrics": {
+          "session_id": "8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c",
+          "ended_at": "2026-09-16T15:30:35.380Z",
+          "reason": "other",
+          "agents_spawned": 0,
+          "agents_completed": 0,
+          "modes_used": []
+        },
+        "initialTeamNames": [],
+        "openClawEnabled": false,
+        "openClawRouting": {}
+      },
+      "budgetMs": 9000,
+      "claimedAt": "2026-09-16T15:30:35.506Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "d435870c-8988-4290-8b33-a64dd4d44e1c",
+        "phase": "terminal",
+        "deadlineAt": "2026-09-16T15:30:45.468Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-09-16T15:30:35.656Z"
+    },
+    "python-cleanup": {
+      "class": "required",
+      "phase": "deferred-required",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "1f1370c4ac056606059d517e2f106b602d8cbcb04587b3fcc5f3b9f89e649cd0",
+      "payload": {
+        "transcriptPath": "/Users/king/.claude/projects/-Users-king-BigModel-LLM-tools-dsh-plugins-dsh-agents-bridge/8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c.jsonl",
+        "cwd": "/Users/king/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge",
+        "reason": "other",
+        "input": {
+          "session_id": "8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c",
+          "transcript_path": "/Users/king/.claude/projects/-Users-king-BigModel-LLM-tools-dsh-plugins-dsh-agents-bridge/8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c.jsonl",
+          "cwd": "/Users/king/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "metrics": {
+          "session_id": "8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c",
+          "ended_at": "2026-09-16T15:30:35.380Z",
+          "reason": "other",
+          "agents_spawned": 0,
+          "agents_completed": 0,
+          "modes_used": []
+        },
+        "initialTeamNames": [],
+        "openClawEnabled": false,
+        "openClawRouting": {}
+      },
+      "budgetMs": 9000,
+      "claimedAt": "2026-09-16T15:30:35.674Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "044bc909-eec1-4948-827d-26d2758a845d",
+        "phase": "terminal",
+        "deadlineAt": "2026-09-16T15:30:45.468Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-09-16T15:30:35.832Z"
+    },
+    "reply-cleanup": {
+      "class": "required",
+      "phase": "deferred-required",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "0b3a8b47c28b26d56aca004d4f572b96c118f16819c0d35162418816f9a5420a",
+      "payload": {
+        "transcriptPath": "/Users/king/.claude/projects/-Users-king-BigModel-LLM-tools-dsh-plugins-dsh-agents-bridge/8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c.jsonl",
+        "cwd": "/Users/king/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge",
+        "reason": "other",
+        "input": {
+          "session_id": "8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c",
+          "transcript_path": "/Users/king/.claude/projects/-Users-king-BigModel-LLM-tools-dsh-plugins-dsh-agents-bridge/8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c.jsonl",
+          "cwd": "/Users/king/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "metrics": {
+          "session_id": "8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c",
+          "ended_at": "2026-09-16T15:30:35.380Z",
+          "reason": "other",
+          "agents_spawned": 0,
+          "agents_completed": 0,
+          "modes_used": []
+        },
+        "initialTeamNames": [],
+        "openClawEnabled": false,
+        "openClawRouting": {}
+      },
+      "budgetMs": 9000,
+      "claimedAt": "2026-09-16T15:30:35.857Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "068b9792-938b-49b2-bc9c-ae4bf412afb0",
+        "phase": "terminal",
+        "deadlineAt": "2026-09-16T15:30:45.468Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-09-16T15:30:36.003Z"
+    },
+    "callback": {
+      "class": "best-effort",
+      "phase": "deferred-best-effort",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "d068ede2655bf89e0c0950e087d0603d7dcf45538e94f20a654d08c6f4841895",
+      "payload": {
+        "transcriptPath": "/Users/king/.claude/projects/-Users-king-BigModel-LLM-tools-dsh-plugins-dsh-agents-bridge/8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c.jsonl",
+        "cwd": "/Users/king/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge",
+        "reason": "other",
+        "input": {
+          "session_id": "8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c",
+          "transcript_path": "/Users/king/.claude/projects/-Users-king-BigModel-LLM-tools-dsh-plugins-dsh-agents-bridge/8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c.jsonl",
+          "cwd": "/Users/king/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "metrics": {
+          "session_id": "8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c",
+          "ended_at": "2026-09-16T15:30:35.380Z",
+          "reason": "other",
+          "agents_spawned": 0,
+          "agents_completed": 0,
+          "modes_used": []
+        },
+        "initialTeamNames": [],
+        "openClawEnabled": false,
+        "openClawRouting": {}
+      },
+      "budgetMs": 2000,
+      "claimedAt": "2026-09-16T15:30:36.021Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "67bd3fbf-9988-466e-ae15-6602069dcab3",
+        "phase": "terminal",
+        "deadlineAt": "2026-09-16T15:30:45.468Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-09-16T15:30:36.165Z"
+    },
+    "notification": {
+      "class": "best-effort",
+      "phase": "deferred-best-effort",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "89c0438ff63097ce04beb60efb87292ff68a7af350a0ee331f3de9dbf42d62fc",
+      "payload": {
+        "transcriptPath": "/Users/king/.claude/projects/-Users-king-BigModel-LLM-tools-dsh-plugins-dsh-agents-bridge/8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c.jsonl",
+        "cwd": "/Users/king/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge",
+        "reason": "other",
+        "input": {
+          "session_id": "8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c",
+          "transcript_path": "/Users/king/.claude/projects/-Users-king-BigModel-LLM-tools-dsh-plugins-dsh-agents-bridge/8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c.jsonl",
+          "cwd": "/Users/king/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "metrics": {
+          "session_id": "8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c",
+          "ended_at": "2026-09-16T15:30:35.380Z",
+          "reason": "other",
+          "agents_spawned": 0,
+          "agents_completed": 0,
+          "modes_used": []
+        },
+        "initialTeamNames": [],
+        "openClawEnabled": false,
+        "openClawRouting": {}
+      },
+      "budgetMs": 2000,
+      "claimedAt": "2026-09-16T15:30:36.184Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "8055adbe-d54d-4d0b-b46f-03ac0fb4ef3d",
+        "phase": "terminal",
+        "deadlineAt": "2026-09-16T15:30:45.468Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-09-16T15:30:36.329Z"
+    },
+    "openclaw": {
+      "class": "best-effort",
+      "phase": "deferred-best-effort",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "31fe8f6e1cf204e27006de511df257326fdd98655122ca437013e8779ffc735b",
+      "payload": {
+        "transcriptPath": "/Users/king/.claude/projects/-Users-king-BigModel-LLM-tools-dsh-plugins-dsh-agents-bridge/8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c.jsonl",
+        "cwd": "/Users/king/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge",
+        "reason": "other",
+        "input": {
+          "session_id": "8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c",
+          "transcript_path": "/Users/king/.claude/projects/-Users-king-BigModel-LLM-tools-dsh-plugins-dsh-agents-bridge/8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c.jsonl",
+          "cwd": "/Users/king/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "metrics": {
+          "session_id": "8a3dc4e7-8b1a-4f4c-a979-b05def0ea94c",
+          "ended_at": "2026-09-16T15:30:35.380Z",
+          "reason": "other",
+          "agents_spawned": 0,
+          "agents_completed": 0,
+          "modes_used": []
+        },
+        "initialTeamNames": [],
+        "openClawEnabled": false,
+        "openClawRouting": {}
+      },
+      "budgetMs": 2000,
+      "claimedAt": "2026-09-16T15:30:36.345Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "32e065b2-2680-4883-8f7e-c6eff95e41c2",
+        "phase": "terminal",
+        "deadlineAt": "2026-09-16T15:30:45.468Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-09-16T15:30:36.489Z"
+    }
+  },
+  "owner": null,
+  "phase": "complete",
+  "completion": {
+    "completedAt": "2026-09-16T15:30:36.506Z",
+    "terminalDigest": "d32b7d98f22dede54672a01e7650950ccc1bfa3be64241e3ac7579726b9091e8",
+    "terminalRevision": 40
+  }
+}

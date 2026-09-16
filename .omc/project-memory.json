@@ -1,0 +1,133 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1789572503912,
+  "projectRoot": "/Users/king/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge",
+  "techStack": {
+    "languages": [
+      {
+        "name": "JavaScript/TypeScript",
+        "version": ">=20",
+        "confidence": "high",
+        "markers": [
+          "package.json"
+        ]
+      },
+      {
+        "name": "TypeScript",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "tsconfig.json"
+        ]
+      }
+    ],
+    "frameworks": [
+      {
+        "name": "esbuild",
+        "version": "0.28.2",
+        "category": "build"
+      },
+      {
+        "name": "vitest",
+        "version": "2.1.0",
+        "category": "testing"
+      }
+    ],
+    "packageManager": "npm",
+    "runtime": "Node.js 20"
+  },
+  "build": {
+    "buildCommand": "npm run build",
+    "testCommand": "npm test",
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {
+      "build": "node scripts/build.mjs",
+      "typecheck": "tsc --noEmit",
+      "test": "vitest run"
+    }
+  },
+  "conventions": {
+    "namingStyle": "camelCase/PascalCase",
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs",
+      "lib",
+      "scripts",
+      "src",
+      "tests"
+    ],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 7,
+      "lastAccessed": 1789572503895,
+      "keyFiles": [
+        "design-tracks.md",
+        "design.md",
+        "driver-pitfalls.md",
+        "findings-engines.md",
+        "install.md"
+      ]
+    },
+    "lib": {
+      "path": "lib",
+      "purpose": "Library code",
+      "fileCount": 1,
+      "lastAccessed": 1789572503895,
+      "keyFiles": [
+        "index.js"
+      ]
+    },
+    "scripts": {
+      "path": "scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 2,
+      "lastAccessed": 1789572503897,
+      "keyFiles": [
+        "acceptance.ts",
+        "build.mjs"
+      ]
+    },
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 2,
+      "lastAccessed": 1789572503899,
+      "keyFiles": [
+        "index.ts",
+        "integrate.ts"
+      ]
+    },
+    "tests": {
+      "path": "tests",
+      "purpose": "Test files",
+      "fileCount": 0,
+      "lastAccessed": 1789572503899,
+      "keyFiles": []
+    },
+    "tests/fixtures": {
+      "path": "tests/fixtures",
+      "purpose": "Test fixtures",
+      "fileCount": 8,
+      "lastAccessed": 1789572503901,
+      "keyFiles": [
+        "claude-basic.ndjson",
+        "claude-context-exhausted.ndjson",
+        "claude-control-request.ndjson"
+      ]
+    }
+  },
+  "hotPaths": [],
+  "userDirectives": []
+}

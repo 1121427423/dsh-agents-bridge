@@ -459,6 +459,15 @@ export class ClaudeStreamParser {
   readonly #seenUsageIds = new Set<string>()
   #fallbackModel: string | undefined
   #stdinClosed = false
+  /**
+   * Last `status` text emitted, used to collapse repeats. The dialect can emit a
+   * burst of `system` frames per turn (a REAL capture of a single trivial prompt
+   * on this machine produced 7x hook_started, 7x hook_response, 1x hook_progress
+   * and 1x init before the first assistant token), and one status message per
+   * frame buried the transcript under 18 identical "running" events that the
+   * model then paid for on every `agents_output` poll.
+   */
+  #lastStatusText: string | undefined
 
   constructor(
     dialect: StreamJsonDialect,
@@ -506,7 +515,31 @@ export class ClaudeStreamParser {
         if (sessionId !== undefined && sessionId !== '') this.#state.sessionId = sessionId
         // The ABI's AgentMessage carries no session id, so the streamed status
         // is just "still running"; the backend session id lands on the result.
-        this.#sink.emit(event(this.#now, 'status', { content: 'running' }))
+        //
+        // Emitted ONCE, and only for the frame that actually carries news
+        // (`subtype: 'init'` names the model and the permission mode). All the
+        // other system frames are hook lifecycle noise: forwarding one status
+        // message each floods the model's incremental reads with dead events.
+        const subtype = asString(parsed['subtype']) ?? ''
+        // Only frames that carry news are forwarded: `init` (the dialect names
+        // model + permission mode) and `status` (CodeBuddy's own progress frame,
+        // undocumented but real — see docs/driver-pitfalls.md). Hook lifecycle
+        // frames are dropped, and repeated identical text is collapsed.
+        if (subtype === 'init' || subtype === 'status') {
+          const model = asString(parsed['model'])
+          const permissionMode = asString(parsed['permissionMode'])
+          const reported = asString(parsed['status'])
+          const facts = [
+            model !== undefined && model !== '' ? `model=${model}` : '',
+            permissionMode !== undefined && permissionMode !== '' ? `permissionMode=${permissionMode}` : '',
+            reported !== undefined && reported !== '' ? `status=${reported}` : '',
+          ].filter((part) => part !== '')
+          const text = facts.length > 0 ? `running (${facts.join(', ')})` : 'running'
+          if (text !== this.#lastStatusText) {
+            this.#lastStatusText = text
+            this.#sink.emit(event(this.#now, 'status', { content: text }))
+          }
+        }
         break
       }
       case 'result':
