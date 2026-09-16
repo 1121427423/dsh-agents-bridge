@@ -222,6 +222,24 @@ describe('credentialStatusFor: identity plans', () => {
     expect(credentialStatusFor('not-an-engine').detail).toContain('not-an-engine')
   })
 
+  it('answers unknown for the CodeBuddy CLI, and reads no file to do it', () => {
+    // Verified: ~/.codebuddy holds no api-key or token file (settings.json
+    // declares `enabledPlugins` only) and the account state lives in the CLI's
+    // own store, so the bridge has no credential file to classify. `unknown` is
+    // the honest answer — NOT `missing` (which would claim it looked and found
+    // none) and NOT `not-applicable` (no desktop login is reused here).
+    const fragment = credentialStatusFor('codebuddy-code', {
+      home: HOME,
+      contents: { [at('.codebuddy', 'settings.json')]: JSON.stringify({ enabledPlugins: {} }) },
+      readFile: throwingReader(new Error('the reader must not be called')),
+    })
+    expect(fragment.credential).toBe('unknown')
+    expect(fragment.configPath).toBeUndefined()
+    expect(fragment.detail).toContain('no api-key or token file')
+    expect(fragment.detail).toContain('~/.codebuddy')
+    expect(fragment.detail.split('\n')).toHaveLength(1)
+  })
+
   it('reports an absent file as missing, with the path it looked at', () => {
     const fragment = credentialStatusFor('codex', { home: HOME, readFile: throwingReader(notFound(CODEX_PATH)) })
     expect(fragment.credential).toBe('missing')
@@ -256,7 +274,17 @@ describe('credentialStatusFor: identity plans', () => {
   })
 
   it('never throws, whatever the reader throws', () => {
-    for (const id of ['claude', 'codex', 'openclaw', 'workbuddy', 'autoclaw', 'mimo', 'generic', 'nope']) {
+    for (const id of [
+      'claude',
+      'codex',
+      'codebuddy-code',
+      'openclaw',
+      'workbuddy',
+      'autoclaw',
+      'mimo',
+      'generic',
+      'nope',
+    ]) {
       for (const error of [null, undefined, 'a string', 42, new Error('reader exploded')]) {
         const fragment = credentialStatusFor(id, { home: HOME, readFile: throwingReader(error) })
         expect(typeof fragment.credential).toBe('string')
@@ -279,7 +307,7 @@ describe('credentialStatusFor: identity plans', () => {
       [CODEX_PATH]: JSON.stringify({ OPENAI_API_KEY: FAKE_KEY, tokens: { access_token: FAKE_JWT } }),
       [OPENCLAW_PATH]: JSON.stringify({ apiKey: FAKE_KEY, models: { providers: { zai: { apiKey: FAKE_JWT } } } }),
     }
-    for (const id of ['claude', 'codex', 'openclaw', 'workbuddy', 'autoclaw', 'mimo', 'generic']) {
+    for (const id of ['claude', 'codex', 'codebuddy-code', 'openclaw', 'workbuddy', 'autoclaw', 'mimo', 'generic']) {
       const serialized = JSON.stringify(credentialStatusFor(id, { home: HOME, contents }))
       expect(serialized).not.toContain(FAKE_KEY)
       expect(serialized).not.toContain(FAKE_JWT)

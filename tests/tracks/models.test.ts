@@ -8,6 +8,8 @@
  *     context-variant marker (`deepseek-v4-flash[1m]`);
  *   - `~/.codex/config.toml` → `model_catalog_json` → `{ models: [{ slug }] }`,
  *     else the single `model = "..."` line;
+ *   - `~/.codebuddy/models.json` → `{ models: [{ id }] }`, an EMPTY user cache
+ *     on the target machine (so "not discovered", never an empty catalog);
  *   - `~/.workbuddy/cache/acc-product-config-v3.json` → `{ models: [{ id, credits }] }`;
  *   - `~/.openclaw-autoclaw/openclaw.json` → `models.providers.<p>.models[].id`.
  *
@@ -24,6 +26,7 @@ import { credentialStatusFor } from '../../src/tracks/health.ts'
 import {
   CLAUDE_MODEL_FIELDS,
   claudeModelIdsFromSettings,
+  codebuddyCodeModelsFromConfig,
   codexCatalogModelIds,
   collectModelIds,
   creditSummary,
@@ -43,6 +46,7 @@ const at = (...parts: string[]): string => path.join(HOME, ...parts)
 const CLAUDE_PATH = at('.claude', 'settings.json')
 const CODEX_CONFIG = at('.codex', 'config.toml')
 const CODEX_CATALOG = at('.codex', 'models.json')
+const CODEBUDDY_CODE_PATH = at('.codebuddy', 'models.json')
 const WORKBUDDY_PATH = at('.workbuddy', 'cache', 'acc-product-config-v3.json')
 const AUTOCLAW_PATH = at('.openclaw-autoclaw', 'openclaw.json')
 const OPENCLAW_PATH = at('.openclaw', 'openclaw.json')
@@ -417,6 +421,76 @@ describe('autoclaw: openclaw.json models.providers', () => {
   })
 })
 
+describe('codebuddy-code: ~/.codebuddy/models.json is a cache, not a catalog', () => {
+  it('reads models[].id if the cache is ever populated', () => {
+    const discovery = modelsFor('codebuddy-code', {
+      home: HOME,
+      contents: { [CODEBUDDY_CODE_PATH]: JSON.stringify({ models: [{ id: 'fast-model' }, { id: 'deep-model' }] }) },
+    })
+    expect(discovery.discovered).toBe(true)
+    if (!discovery.discovered) return
+    expect(discovery.models).toEqual(['fast-model', 'deep-model'])
+    expect(discovery.source).toBe('~/.codebuddy/models.json models (2 ids)')
+  })
+
+  it('reports the empty cache this host actually has as NOT discovered', () => {
+    // The real file is 19 bytes of `{"models": []}` while the CLI advertises 18
+    // selectable ids in its own --help. `{ discovered: true, models: [] }` would
+    // tell the model this engine accepts no model at all — false, and stronger
+    // than the evidence — so the field is omitted entirely.
+    const discovery = modelsFor('codebuddy-code', {
+      home: HOME,
+      contents: { [CODEBUDDY_CODE_PATH]: '{\n  "models": []\n}\n' },
+    })
+    expect(discovery.discovered).toBe(false)
+    if (discovery.discovered) return
+    expect(discovery.reason).toContain('~/.codebuddy/models.json')
+    expect(discovery.reason).toContain('empty "models" array')
+    expect(modelFieldsFor(discovery)).toEqual({})
+    expect('models' in modelFieldsFor(discovery)).toBe(false)
+  })
+
+  it('never invents the ids the CLI advertises in --help', () => {
+    const discovery = modelsFor('codebuddy-code', {
+      home: HOME,
+      contents: { [CODEBUDDY_CODE_PATH]: JSON.stringify({ models: [] }) },
+    })
+    const serialized = JSON.stringify(discovery)
+    for (const advertised of ['fast-model', 'deep-model', 'glm-5.3', 'kimi-k3', 'minimax-m3']) {
+      expect(serialized).not.toContain(advertised)
+    }
+  })
+
+  it('reports an absent, malformed or shapeless cache as not discovered, naming the file', () => {
+    const absent = modelsFor('codebuddy-code', {
+      home: HOME,
+      readFile: throwingReader(notFound(CODEBUDDY_CODE_PATH)),
+    })
+    expect(absent.discovered).toBe(false)
+    if (!absent.discovered) expect(absent.reason).toBe('not discovered: ~/.codebuddy/models.json not found')
+
+    const malformed = modelsFor('codebuddy-code', { home: HOME, contents: { [CODEBUDDY_CODE_PATH]: '{ oops' } })
+    expect(malformed.discovered).toBe(false)
+    if (!malformed.discovered) {
+      expect(malformed.reason).toContain('not valid JSON')
+      // The parse error quotes its input; the reader must not.
+      expect(malformed.reason).not.toContain('oops')
+    }
+
+    const shapeless = codebuddyCodeModelsFromConfig(JSON.stringify({ version: 1 }))
+    expect(shapeless.ok).toBe(false)
+    if (!shapeless.ok) expect(shapeless.reason).toBe('no "models" array')
+  })
+
+  it('drops non-string and duplicate ids without inventing any', () => {
+    const parsed = codebuddyCodeModelsFromConfig(
+      JSON.stringify({ models: [{ id: 'a' }, { id: 'a' }, {}, { id: 42 }, { id: '' }] }),
+    )
+    expect(parsed.ok).toBe(true)
+    if (parsed.ok) expect(parsed.ids).toEqual(['a'])
+  })
+})
+
 describe('engines with no local catalog', () => {
   it('reports openclaw as not discovered, never as an empty list', () => {
     // This host's ~/.openclaw/openclaw.json really does hold mcpServers only.
@@ -483,7 +557,17 @@ describe('id normalising and robustness', () => {
   })
 
   it('never throws, whatever the reader throws', () => {
-    for (const id of ['claude', 'codex', 'workbuddy', 'autoclaw', 'openclaw', 'mimo', 'generic', 'nope']) {
+    for (const id of [
+      'claude',
+      'codex',
+      'codebuddy-code',
+      'workbuddy',
+      'autoclaw',
+      'openclaw',
+      'mimo',
+      'generic',
+      'nope',
+    ]) {
       for (const error of [null, undefined, 'a string', 42, new Error('reader exploded')]) {
         const discovery = modelsFor(id, { home: HOME, readFile: throwingReader(error) })
         if (discovery.discovered) {

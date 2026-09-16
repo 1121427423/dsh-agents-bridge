@@ -17,7 +17,14 @@ import path from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 
 import { createRegistry } from '../../src/kernel/registry.ts'
-import { CLI_SEARCH_PATH, createCliPolicy, findNode, readShebang, wantsNode } from '../../src/tracks/index.ts'
+import {
+  BUILTIN_DESCRIPTORS,
+  CLI_SEARCH_PATH,
+  createCliPolicy,
+  findNode,
+  readShebang,
+  wantsNode,
+} from '../../src/tracks/index.ts'
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-bridge-cli-track-'))
 
@@ -130,6 +137,25 @@ describe('cli track policy', () => {
     expect('reason' in outcome).toBe(true)
     if (!('reason' in outcome)) return
     expect(outcome.reason).toContain('interpreter not found or not executable')
+  })
+
+  it('repairs the codebuddy-code shim, which is a `#!/usr/bin/env node` script', () => {
+    // The identity is Tencent's standalone CLI, installed by npm as a shim that
+    // re-exports @tencent-ai/codebuddy-code/bin/codebuddy. Without this repair a
+    // host with no `node` on the child PATH dies with
+    // `env: node: No such file or directory` before printing a single frame.
+    const policy = createCliPolicy({ searchPath: [tmpRoot], resolveNode: () => '/fake/node' })
+    const shim = writeFile('codebuddy-code-shim/codebuddy-code', '#!/usr/bin/env node\n')
+    const outcome = policy.launch({
+      descriptor: builtinDescriptor('codebuddy-code'),
+      executablePath: shim,
+      env: { PATH: '/nonexistent' },
+      rawExecutable: 'codebuddy-code',
+    })
+    expect('command' in outcome).toBe(true)
+    if (!('command' in outcome)) return
+    expect(outcome.command.executable).toBe(shim)
+    expect(outcome.command.interpreter).toBe('/fake/node')
   })
 })
 
@@ -245,6 +271,56 @@ describe('cli track search path', () => {
     expect(findNode([path.join(root, '<v>', 'bin').replace('<v>', '*')])).toBe(v24)
   })
 })
+
+describe('the codebuddy-code identity on the CLI track', () => {
+  it('resolves the bare name through the track search path without repairing anything', () => {
+    const bin = path.join(tmpRoot, 'codebuddy-bin')
+    fs.mkdirSync(bin, { recursive: true })
+    const shim = writeFile('codebuddy-bin/codebuddy-code', '#!/usr/bin/env node\n')
+    // `node` IS reachable here, so the shim needs no repair — the repair fires
+    // only when the child PATH cannot supply one (asserted in the test above).
+    writeFile('codebuddy-bin/node', '#!/bin/sh\n')
+
+    const registry = createRegistry({
+      env: { PATH: bin },
+      trackPolicyOptions: { searchPath: [bin] },
+      probeVersion: async () => '2.151.0',
+    })
+    const resolved = registry.resolve('codebuddy-code')
+    expect(resolved.reason).toBeUndefined()
+    expect(resolved.executablePath).toBe(shim)
+    expect(resolved.command.interpreter).toBeUndefined()
+    expect(resolved.descriptor.envPrefix).toBe('CODEBUDDY')
+  })
+
+  it('honours the documented CODEBUDDY_PATH / CODEBUDDY_INTERPRETER escape hatches', () => {
+    const script = writeFile('override/codebuddy-elsewhere', '#!/usr/bin/env node\n')
+    const node = writeFile('override/node', '#!/bin/sh\n')
+    const resolved = createRegistry({
+      env: { PATH: '', CODEBUDDY_PATH: script, CODEBUDDY_INTERPRETER: node },
+      trackPolicyOptions: { searchPath: [] },
+    }).resolve('codebuddy-code')
+
+    expect(resolved.reason).toBeUndefined()
+    expect(resolved.executablePath).toBe(script)
+    expect(resolved.interpreterPath).toBe(node)
+    expect(resolved.command.interpreter).toBe(node)
+  })
+
+  it('ships an installed identity whose shebang the CLI track is expected to repair', () => {
+    // Data, not behaviour: the identity is registered and points at the npm
+    // shim name, so a host that installed it can find it at all.
+    const descriptor = builtinDescriptor('codebuddy-code')
+    expect(descriptor.command.executable).toBe('codebuddy-code')
+    expect(descriptor.family).toBe('codebuddy')
+  })
+})
+
+function builtinDescriptor(id: string) {
+  const found = BUILTIN_DESCRIPTORS.find((descriptor) => descriptor.id === id)
+  if (found === undefined) throw new Error(`no built-in descriptor for ${id}`)
+  return found
+}
 
 function descriptorFor(id: string) {
   return {

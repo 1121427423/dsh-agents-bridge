@@ -18,6 +18,15 @@
  *    `--model`), so the `claude` protocol family drives it.
  *  - The official `@anthropic-ai/claude-code` package is NOT installed: its
  *    nvm shim is a dangling symlink. Do not assume official binaries.
+ *  - `codebuddy-code` → ~/.nvm/.../bin/codebuddy-code (a `#!/usr/bin/env node`
+ *    shim, hence the CLI track's shim repair) → `@tencent-ai/codebuddy-code`
+ *    2.151.0, Tencent's standalone CodeBuddy Code CLI. It speaks the SAME
+ *    stream-json dialect as the CodeBuddy binary WorkBuddy bundles — a real
+ *    `-p --output-format stream-json` capture emitted exactly the frame types
+ *    `tests/fixtures/codebuddy-capture.ndjson` carries (`system/init`,
+ *    `system/status`, `file-history-snapshot`, `assistant`, `result`) with the
+ *    same `apiKeySource: copilot.tencent.com`. Hence `family: 'codebuddy'`
+ *    rather than `'claude'`; see tests/drivers/codebuddy-code.test.ts.
  *
  * @module dsh-agents-bridge/tracks/cli/catalog
  */
@@ -44,7 +53,10 @@ export const CLI_TRACK_DESCRIPTORS: readonly AgentDescriptor[] = [
     displayName: 'Codex CLI (codex exec)',
     command: { executable: 'codex' },
     envPrefix: 'CODEX',
-    capabilities: { resume: true, model: true, effort: true, mcpConfig: true },
+    // Deliberately NO `mcpConfig`: codex has no `--mcp-config <file>` flag (its
+    // servers are `-c mcp_servers.<name>.…` pairs or its own config.toml), so
+    // advertising the capability would promise something no driver can honour.
+    capabilities: { resume: true, model: true, effort: true },
     notes:
       'Headless contract: `codex exec --json [PROMPT]`. Emits JSONL (`thread.started` / `item.completed` / `turn.started` / `turn.completed` / `error`). Auth and provider config come from ~/.codex/{auth.json,config.toml}; the bridge passes them through untouched.',
   },
@@ -70,10 +82,15 @@ export const CLI_TRACK_DESCRIPTORS: readonly AgentDescriptor[] = [
     notes:
       'Placeholder executable on purpose: resolving it to something that could accidentally exist (`sh`) would make probe lie about availability. Point it at a real CLI with GENERIC_PATH.',
   },
-  // DEFERRED (user-ordered last): `codebuddy-code` — @tencent-ai/codebuddy-code
-  // 2.151.0 is installed at ~/.nvm/.../bin/{codebuddy,codebuddy-code,cbc}. Its
-  // dialect is UNVERIFIED: it ships its own dist-server, so it may speak the
-  // claude stream-json dialect (like WorkBuddy's bundled CodeBuddy) or its own.
-  // Add the descriptor only after capturing a real headless run — see
-  // docs/plan.md D23.
+  {
+    id: 'codebuddy-code',
+    track: 'cli',
+    family: 'codebuddy',
+    displayName: 'Tencent CodeBuddy Code CLI (codebuddy-code)',
+    command: { executable: 'codebuddy-code' },
+    envPrefix: 'CODEBUDDY',
+    capabilities: { resume: true, model: true, effort: true, mcpConfig: true },
+    notes:
+      'Headless contract verified 2026-09-16 (@tencent-ai/codebuddy-code 2.151.0): `codebuddy-code -p --output-format stream-json --input-format stream-json --verbose --permission-mode bypassPermissions --disallowedTools AskUserQuestion EnterPlanMode ExitPlanMode`, prompt as one stream-json line on stdin; the frames are the CodeBuddy/claude dialect (system/init, system/status, file-history-snapshot, assistant, result). NOT verified: a completed turn — this host is not signed in, so the run ends result{is_error:true} with "Authentication required. Please use /login command", and the model ids its --help advertises are documentation only (see docs/design-tracks.md).',
+  },
 ]

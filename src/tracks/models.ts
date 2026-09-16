@@ -10,6 +10,8 @@
  *   | claude    | `~/.claude/settings.json` → `env.*_MODEL`                                 |
  *   | codex     | `~/.codex/config.toml` → `model_catalog_json` → that JSON's `models[].slug`, |
  *   |           | falling back to the single `model = "..."` line                           |
+ *   | codebuddy-code | `~/.codebuddy/models.json` → `models[].id` — a user-level cache that is  |
+ *   |           | EMPTY on the target machine, so the honest answer is "not discovered"    |
  *   | workbuddy | `~/.workbuddy/cache/acc-product-config-v3.json` → `models[].id`            |
  *   | autoclaw  | `~/.openclaw-autoclaw/openclaw.json` → `models.providers.<p>.models[].id`  |
  *   | openclaw  | none (the CLI resolves models from its profile at run time)               |
@@ -20,6 +22,12 @@
  * discovered-but-empty catalog is `{ discovered: true, models: [] }` and is a
  * different statement. `modelFieldsFor()` keeps the two apart in `ProbeResult`
  * by omitting `models` entirely in the first case.
+ *
+ * One deliberate exception, for a source that is a user CACHE rather than a
+ * catalog: codebuddy-code's `~/.codebuddy/models.json` is empty on this host
+ * while the engine's own `--help` advertises 18 ids, so an empty array is
+ * reported as "not discovered" WITH its reason — `models: []` there would tell
+ * the model the engine accepts no model at all.
  *
  * Two host facts are load-bearing and documented where they are handled:
  *
@@ -320,6 +328,34 @@ export function openclawModelsFromConfig(contents: string): CatalogParse {
   return { ok: true, ids: collectModelIds(ids), providers: names }
 }
 
+/**
+ * `~/.codebuddy/models.json` → `models[].id`.
+ *
+ * NOT a product catalog, and that is the whole point. On the target machine the
+ * file is 19 bytes of `{"models": []}`, written by the CLI itself, and the
+ * engine still advertises 18 selectable ids in its own `--help` and resolves
+ * more from the account. An empty array here therefore means "nothing
+ * discoverable", never "this engine accepts no model": reporting
+ * `{ discovered: true, models: [] }` would make `ProbeResult.models` say
+ * something false and stronger than the evidence. Same precedent as claude's
+ * "no `*_MODEL` field under env" — a source that is present but says nothing is
+ * a discovery failure, not an empty catalog.
+ */
+export function codebuddyCodeModelsFromConfig(contents: string): CatalogParse {
+  const parsed = parseJsonObject(contents)
+  if (!parsed.ok) return { ok: false, reason: parsed.detail }
+  const models = asArray(parsed.value['models'])
+  if (models === undefined) return { ok: false, reason: 'no "models" array' }
+  const ids = collectModelIds(models.map((entry) => asRecord(entry)?.['id']))
+  if (ids.length === 0) {
+    return {
+      ok: false,
+      reason: 'empty "models" array: a user-level cache, not the ids the CLI accepts (it advertises those in --help)',
+    }
+  }
+  return { ok: true, ids }
+}
+
 /* ------------------------------------------------------------ orchestration */
 
 function notDiscovered(reason: string): ModelNotDiscovered {
@@ -401,12 +437,22 @@ function codexFallback(
   return discoveredIds(ids, `${display} model (${idCount(ids.length)}${provider}${note})`)
 }
 
-/** workbuddy: the app's own product-config cache. */
-function workbuddyModels(home: string, options: ModelReaderOptions): ModelDiscovery {
+/**
+ * workbuddy / workbuddy-ai: the app's own product-config cache.
+ *
+ * The two WorkBuddy desktop builds ship a byte-identical CLI and differ only in
+ * `cli/product.json` `dataFolderName`, so the SAME parser reads a different home:
+ * `.workbuddy` for the domestic build, `.workbuddy-ai` for the international one.
+ * The catalogs really are different (51 domestic ids vs 22 international ids,
+ * with `deepseek-v4.1-flash-sg`, `gpt-6-astra` and `gemini-3.5-flash` only in the
+ * international build), so this is two readers sharing one parser — not one
+ * reader with two names.
+ */
+function workbuddyModels(home: string, options: ModelReaderOptions, folder = '.workbuddy'): ModelDiscovery {
   const absolute =
     options.path !== undefined
       ? expandHome(options.path, home)
-      : path.join(home, '.workbuddy', 'cache', 'acc-product-config-v3.json')
+      : path.join(home, folder, 'cache', 'acc-product-config-v3.json')
   const display = homeRelative(absolute, home)
   const read = readHostFile(absolute, options)
   if (!read.ok) return notDiscovered(`${display} ${read.detail}`)
@@ -455,6 +501,23 @@ function openclawShapedModels(
 }
 
 /**
+ * codebuddy-code: `~/.codebuddy/models.json`, read as a cache rather than as a
+ * catalog. See `codebuddyCodeModelsFromConfig` for why an empty array is
+ * reported as "not discovered" instead of "declares none".
+ */
+function codebuddyCodeModels(home: string, options: ModelReaderOptions): ModelDiscovery {
+  const absolute =
+    options.path !== undefined ? expandHome(options.path, home) : path.join(home, '.codebuddy', 'models.json')
+  const display = homeRelative(absolute, home)
+  const read = readHostFile(absolute, options)
+  if (!read.ok) return notDiscovered(`${display} ${read.detail}`)
+
+  const parsed = codebuddyCodeModelsFromConfig(read.contents)
+  if (!parsed.ok) return notDiscovered(`${display}: ${parsed.reason}`)
+  return discoveredIds(parsed.ids, `${display} models (${idCount(parsed.ids.length)})`)
+}
+
+/**
  * Model discovery for one identity. The single place an agent id maps to a
  * catalog file — the registry stays id-agnostic and just asks.
  */
@@ -465,8 +528,12 @@ export function modelsFor(agentId: AgentId, options: ModelReaderOptions = {}): M
       return claudeModels(home, options)
     case 'codex':
       return codexModels(home, options)
+    case 'codebuddy-code':
+      return codebuddyCodeModels(home, options)
     case 'workbuddy':
       return workbuddyModels(home, options)
+    case 'workbuddy-ai':
+      return workbuddyModels(home, options, '.workbuddy-ai')
     case 'autoclaw':
       return autoclawModels(home, options)
     case 'openclaw':

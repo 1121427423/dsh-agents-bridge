@@ -314,6 +314,19 @@ const CREDENTIAL_PLANS: Readonly<Record<AgentId, CredentialPlan>> = {
     file: (home) => path.join(home, '.codex', 'auth.json'),
     parse: credentialFromCodexAuth,
   },
+  // Verified on the target machine: `~/.codebuddy` holds NO readable credential
+  // file at all. `settings.json` declares `enabledPlugins` and nothing else, and
+  // the account state lives in the CLI's own store (opaque `local_storage/*.info`
+  // entries the bridge will not open). Its auth is therefore the CLI's own
+  // account login, not a credential the bridge can classify — `unknown`, which
+  // is NOT `missing` and NOT `not-applicable` (a desktop login is not reused
+  // here: an unsigned-in headless run answers "Authentication required. Please
+  // use /login command"). No file is read, so no value can leak.
+  'codebuddy-code': {
+    kind: 'unsourced',
+    detail:
+      'the CodeBuddy CLI keeps its own account login: ~/.codebuddy holds no api-key or token file (settings.json declares enabledPlugins only), so there is no credential file for the bridge to read',
+  },
   openclaw: {
     kind: 'file',
     file: (home) => path.join(home, '.openclaw', 'openclaw.json'),
@@ -323,6 +336,11 @@ const CREDENTIAL_PLANS: Readonly<Record<AgentId, CredentialPlan>> = {
     kind: 'delegated',
     detail:
       'auth is the WorkBuddy desktop login (reused via copilot.tencent.com); no token file exists and none is read',
+  },
+  'workbuddy-ai': {
+    kind: 'delegated',
+    detail:
+      'auth is the WorkBuddy AI (international) desktop login, reused via www.workbuddy.ai; no token file exists and none is read',
   },
   autoclaw: {
     kind: 'delegated',

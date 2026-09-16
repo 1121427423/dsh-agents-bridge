@@ -30,7 +30,7 @@ driven through the app's profile. Same dialect, different implementation.
 src/tracks/
   types.ts             TrackPolicy, LaunchInput, notFoundReason
   index.ts             BUILTIN_DESCRIPTORS = cli ++ desktop; policyFor(track)
-  cli/catalog.ts       claude, codex, openclaw, generic  (+ codebuddy-code: deferred)
+  cli/catalog.ts       claude, codex, codebuddy-code, openclaw, generic
   cli/index.ts         CLI policy: searchPath, node-shim repair, permission rule
   desktop/catalog.ts   workbuddy, autoclaw, mimo (unsupported)
   desktop/index.ts     Desktop policy: absolute only, refuse instead of guess
@@ -113,16 +113,63 @@ answer "does a credential appear to exist", and nothing else.
 - **D22** — `codex` protocol driver (`codex exec --json` JSONL). Family added to
   the ABI (`ProtocolFamily` += `'codex'`); driver not yet written.
 - **D23** — `codebuddy-code` (`@tencent-ai/codebuddy-code` 2.151.0, installed at
-  `~/.nvm/.../bin/codebuddy-code`). Deliberately last: its headless dialect is
-  unverified, and it ships its own `dist-server`, so it may or may not speak the
-  claude stream-json dialect. No descriptor until a real capture exists.
+  `~/.nvm/.../bin/codebuddy-code` as a `#!/usr/bin/env node` shim):
+  **verified and integrated** 2026-09-16. A real headless run of exactly the
+  bridge's invocation
+
+      codebuddy-code -p --output-format stream-json --input-format stream-json \
+        --verbose --permission-mode bypassPermissions \
+        --disallowedTools AskUserQuestion EnterPlanMode ExitPlanMode   # prompt: one stream-json line on stdin
+
+  is accepted (exit 0) and answers in the same dialect WorkBuddy's bundled
+  CodeBuddy speaks: the same five top-level frame types, in the same order
+  (`system/init`, `system/status`, `file-history-snapshot`, `assistant`,
+  `result`), the same `apiKeySource: copilot.tencent.com`, plus a **duplicated**
+  `system/init`. The identity therefore rides `family: 'codebuddy'` — the
+  CodeBuddy dialect, which itself reuses the claude stream-json engine — and NOT
+  `'claude'`: this engine's bundle contains no `terminal_reason` string at all
+  (so claude's structured-reason reader has nothing to read), and the CodeBuddy
+  argv deltas are the measured ones for this fork (three denylisted interactive
+  tools, never `--strict-mcp-config`). Capture checked in as
+  `tests/fixtures/codebuddy-code-auth-required.ndjson` — cwd, session ids, uuids
+  and timestamps sanitized, no frame type removed.
+
+  What was NOT verified: **a completed turn**. This host is not signed in, so
+  every run ends `result{subtype:"error_during_execution", is_error:true,
+  errors:["Authentication required. Please use /login command to sign in to your
+  account"]}` with an empty stderr tail. Two honest consequences:
+
+  1. credential = `unknown`. `~/.codebuddy` holds no api-key or token file
+     (`settings.json` declares `enabledPlugins` only; the account state lives in
+     the CLI's own store), so the bridge has nothing to classify. Not `missing`
+     (that would claim it looked and found none) and not `not-applicable` (no
+     desktop login is reused here).
+  2. models = not discovered. `~/.codebuddy/models.json` is 19 bytes of
+     `{"models": []}` — a user cache, not a catalog. The 18 ids its `--help`
+     advertises (`default-model`, `fast-model`, `balanced-model`, `primary-model`,
+     `deep-model`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`,
+     `gpt-5.4`, `gpt-5.3-codex`, `gemini-3.5-flash`, `glm-5.3`, `glm-5.2`,
+     `kimi-k3`, `kimi-k2.6`, `minimax-m3`) are documentation (here and in the
+     descriptor's `notes`), never reported as discovered. Its DEFAULT model when
+     no `--model` is passed is `hy3`, which is not on that list — the same `hy*`
+     naming the WorkBuddy capture used (`hy4-preview`).
+
+  One known gap, reported and deliberately NOT changed: an error `result` frame
+  carries no `result` field, and the engine's message lives in `errors[]`, which
+  the shared stream-json engine does not read. The terminal error therefore
+  reads `codebuddy returned an error result without details`, while the
+  transcript still carries the engine's own words as a `text` event. The
+  smallest fix — fall back to `errors[0]` when `result` is absent — changes the
+  `claude` family too, so it belongs in its own change with its own tests.
+  `--acp` remains unexercised: that is a P4 concern, not this identity's.
 - Health/model discovery readers: **done** (`src/tracks/health.ts`,
   `src/tracks/models.ts`, shared primitives in `src/tracks/host-files.ts`), wired
   into `probe()`. Real-machine output: claude `ok` / 6 ids from
   `~/.claude/settings.json`, codex `ok` / 2 ids from `~/.codex/models.json`,
   workbuddy `not-applicable` / 51 ids, autoclaw `not-applicable` / 6 ids
   (`models.providers.zai`), openclaw CLI `missing` / not discovered, generic
-  `unknown`, mimo `not-applicable`.
+  `unknown`, mimo `not-applicable`, codebuddy-code CLI `ok` / `unknown` / not
+  discovered (`~/.codebuddy/models.json` is an empty cache — see D23).
 
 ## 6. Two leak vectors closed while implementing §4
 
