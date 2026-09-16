@@ -97,4 +97,31 @@ answer "does a credential appear to exist", and nothing else.
   `~/.nvm/.../bin/codebuddy-code`). Deliberately last: its headless dialect is
   unverified, and it ships its own `dist-server`, so it may or may not speak the
   claude stream-json dialect. No descriptor until a real capture exists.
-- Health/model discovery readers (`src/tracks/health.ts`, `models.ts`) — pending.
+- Health/model discovery readers: **done** (`src/tracks/health.ts`,
+  `src/tracks/models.ts`, shared primitives in `src/tracks/host-files.ts`), wired
+  into `probe()`. Real-machine output: claude `ok` / 6 ids from
+  `~/.claude/settings.json`, codex `ok` / 2 ids from `~/.codex/models.json`,
+  workbuddy `not-applicable` / 51 ids, autoclaw `not-applicable` / 6 ids
+  (`models.providers.zai`), openclaw CLI `missing` / not discovered, generic
+  `unknown`, mimo `not-applicable`.
+
+## 6. Two leak vectors closed while implementing §4
+
+1. **V8 parse errors quote the input.** `JSON.parse` on a truncated
+   `auth.json` throws `Unexpected token 'o', "not json"…`, which would put the
+   first bytes of a key into a probe detail. `parseJsonObject()` builds its
+   detail from the error's *position* only, and a test asserts the input text
+   never appears in the reason.
+2. **AutoClaw's config carries a live JWT.** `~/.openclaw-autoclaw/openclaw.json`
+   stores a bearer token under
+   `models.providers.zai.models[].headers['X-Authorization']` (plus a
+   provider-level `apiKey`). The credential reader is therefore a strict
+   allow-list of field NAMES at the top level and under
+   `models.providers.<p>.*` — never a recursive scan — and the model reader reads
+   only `models[].id`. `base_url` is deliberately not read either (a URL can
+   carry userinfo). Tests assert a fixture JWT reaches neither the credential
+   fragment nor the model list.
+
+Every returned detail passes one choke point (`fragment()`) that collapses it to
+a single line and runs `redactSecrets()`; model ids are excluded from redaction
+because a legitimate id can exceed 32 characters.

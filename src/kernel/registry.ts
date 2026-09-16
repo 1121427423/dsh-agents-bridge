@@ -31,6 +31,8 @@ import type {
 } from './types.ts'
 import { childLogger } from './logger.ts'
 import { BUILTIN_DESCRIPTORS, policyFor, type TrackPolicyOptions } from '../tracks/index.ts'
+import { credentialStatusFor, type CredentialReaderOptions } from '../tracks/health.ts'
+import { modelFieldsFor, modelsFor, type ModelReaderOptions } from '../tracks/models.ts'
 
 /**
  * Re-exported for embedders that already import this module: the descriptor
@@ -91,6 +93,12 @@ export interface RegistryOptions {
   readonly resolveExecutable?: ExecutableResolver
   /** Overrides how a track builds its CommandSpec (tests / settings). */
   readonly trackPolicyOptions?: TrackPolicyOptions
+  /**
+   * Where the credential/model readers look for each engine's own config files.
+   * Defaults to the real home directory; tests pass `contents`/`home` so probe
+   * output is host-independent. Readers never see a credential VALUE leave.
+   */
+  readonly hostOptions?: CredentialReaderOptions & ModelReaderOptions
 }
 
 export interface AgentRegistry {
@@ -288,6 +296,7 @@ export function createRegistry(options: RegistryOptions = {}): AgentRegistry {
   const versionTimeoutMs = options.versionTimeoutMs ?? DEFAULT_VERSION_TIMEOUT_MS
   const resolveExecutable = options.resolveExecutable ?? makeResolver(env)
   const trackPolicyOptions: TrackPolicyOptions = options.trackPolicyOptions ?? {}
+  const hostOptions: CredentialReaderOptions & ModelReaderOptions = options.hostOptions ?? {}
   const policyCache = new Map<AgentTrack, ReturnType<typeof policyFor>>()
   const probeVersion = options.probeVersion ?? defaultVersionProbe
   const descriptors = mergeDescriptors(options.overrides, options.extraDescriptors)
@@ -378,6 +387,10 @@ export function createRegistry(options: RegistryOptions = {}): AgentRegistry {
       ...(descriptor.notes !== undefined ? { notes: descriptor.notes } : {}),
     }
     const capabilities = descriptor.capabilities
+    // Model discovery is independent of launchability: an engine whose binary is
+    // missing still has a readable catalog, and the model benefits from knowing
+    // which ids exist before deciding whether to fix the install.
+    const discovery = modelsFor(descriptor.id, hostOptions)
     if (resolved.reason !== undefined) {
       return {
         ...identity,
@@ -385,6 +398,11 @@ export function createRegistry(options: RegistryOptions = {}): AgentRegistry {
         ...(resolved.executablePath !== undefined ? { executable: resolved.executablePath } : {}),
         available: false,
         reason: resolved.reason,
+        health: {
+          launch: descriptor.unsupported === undefined ? 'missing' : 'unsupported',
+          ...credentialStatusFor(descriptor.id, hostOptions),
+        },
+        ...modelFieldsFor(discovery),
       }
     }
     const argv = [...(resolved.interpreterPath ? [resolved.interpreterPath] : []), resolved.executablePath ?? '', '--version']
@@ -401,6 +419,8 @@ export function createRegistry(options: RegistryOptions = {}): AgentRegistry {
       available: true,
       ...(resolved.executablePath !== undefined ? { executable: resolved.executablePath } : {}),
       ...(version !== undefined ? { version } : {}),
+      health: { launch: 'ok', ...credentialStatusFor(descriptor.id, hostOptions) },
+      ...modelFieldsFor(discovery),
     }
   }
 

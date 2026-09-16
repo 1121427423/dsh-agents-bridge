@@ -184,6 +184,66 @@ describe('resolve()', () => {
   })
 })
 
+describe('probe() reports launch + credential health + model discovery', () => {
+  it('reads credential status and models from the engine\'s own config file', async () => {
+    const settings = JSON.stringify({
+      env: { OPENAI_API_KEY: 'sk-live-0123456789abcdef', CLAUDE_CODE_USE_OPENAI: '1', OPEN_MODEL: 'deepseek-v4-flash[1m]' },
+    })
+    const registry = createHermeticRegistry({
+      // A real (fake) binary, so the launch half of the health is exercised too:
+      // credential status and model discovery are reported independently of it.
+      env: { PATH: '', CLAUDE_PATH: fakeExecutable('probe-claude-health') },
+      probeVersion: async () => '2.8.4',
+      hostOptions: { home: '/home/test', contents: { '/home/test/.claude/settings.json': settings } },
+    })
+    const claude = (await registry.probe()).find((r) => r.id === 'claude')
+    expect(claude?.health?.launch).toBe('ok')
+    expect(claude?.health?.credential).toBe('ok')
+    expect(claude?.models).toEqual(['deepseek-v4-flash'])
+    expect(claude?.modelsSource).toContain('.claude/settings.json')
+    // The status is presence-only by contract, and it says so.
+    expect(claude?.health?.detail).toContain('presence only')
+  })
+
+  it('never lets a credential value reach probe output', async () => {
+    const key = 'sk-ant-REALSECRETVALUE0123456789'
+    const registry = createHermeticRegistry({
+      env: { PATH: '' },
+      probeVersion: async () => '1.0.0',
+      hostOptions: {
+        home: '/home/test',
+        contents: { '/home/test/.claude/settings.json': JSON.stringify({ env: { OPENAI_API_KEY: key } }) },
+      },
+    })
+    const serialized = JSON.stringify(await registry.probe())
+    expect(serialized).not.toContain(key)
+    expect(serialized).not.toContain('REALSECRETVALUE')
+  })
+
+  it('keeps model discovery even when the binary is missing, and never claims "no models"', async () => {
+    const config = JSON.stringify({
+      models: { providers: { zai: { models: [{ id: 'zaicoding_glm-5.3' }, { id: 'zai_auto' }] } } },
+    })
+    const registry = createHermeticRegistry({
+      env: { PATH: '', AUTOCLAW_PATH: '/nope/openclaw.mjs' },
+      hostOptions: { home: '/home/test', contents: { '/home/test/.openclaw-autoclaw/openclaw.json': config } },
+    })
+    const autoclaw = (await registry.probe()).find((r) => r.id === 'autoclaw')
+    expect(autoclaw?.available).toBe(false)
+    // Desktop login: the bridge must not look for a token file at all.
+    expect(autoclaw?.health?.credential).toBe('not-applicable')
+    expect(autoclaw?.models).toEqual(['zaicoding_glm-5.3', 'zai_auto'])
+  })
+
+  it('omits models entirely when nothing was discovered (absent is not none)', async () => {
+    const registry = createHermeticRegistry({ env: { PATH: '' }, hostOptions: { home: '/home/test', contents: {} } })
+    const generic = (await registry.probe()).find((r) => r.id === 'generic')
+    expect(generic?.models).toBeUndefined()
+    expect(generic?.modelsSource).toBeUndefined()
+    expect(generic?.health?.credential).toBe('unknown')
+  })
+})
+
 describe('probe()', () => {
   it('probes <exe> --version (through the interpreter) and reports availability', async () => {
     const cli = fakeExecutable('probe-codebuddy')

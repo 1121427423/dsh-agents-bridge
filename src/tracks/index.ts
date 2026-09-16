@@ -23,6 +23,12 @@ export { createDesktopPolicy } from './desktop/index.ts'
 export { CLI_TRACK_DESCRIPTORS } from './cli/catalog.ts'
 export { DESKTOP_TRACK_DESCRIPTORS } from './desktop/catalog.ts'
 export type { CredentialSource, LaunchInput, ModelCatalogSource, TrackPolicy } from './types.ts'
+// Health + model discovery (D20). Both are pure readers over local config files:
+// no network call, and no credential VALUE ever leaves them.
+export { credentialStatusFor, healthFor, looksLikePlaceholder } from './health.ts'
+export type { CredentialHealth, CredentialReaderOptions } from './health.ts'
+export { creditSummary, modelFieldsFor, modelsFor, stripContextMarker } from './models.ts'
+export type { ModelDiscovery, ModelFound, ModelNotDiscovered, ModelReaderOptions } from './models.ts'
 
 /** Every built-in identity, CLI track first (probe order). */
 export const BUILTIN_DESCRIPTORS: readonly AgentDescriptor[] = [
