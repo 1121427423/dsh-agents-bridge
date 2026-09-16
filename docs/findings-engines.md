@@ -178,3 +178,70 @@ node "<app>/cli/bin/codebuddy" -p --output-format stream-json \
 - 有了模型目录，`agents_run` 的 `model` 参数才有可校验的取值域；`big/fast/vision` 这类别名映射也能落到真实 id 与倍率上（按 `credits` 选性价比，按 `supportsImages` 决定能不能读图）。
 - 注意 `onlyReasoning: true` 的模型要配 `--effort`（`supportedEfforts`）；v4.1-flash 只接受 `high`/`xhigh`。
 
+---
+
+## 7. AutoClaw（openclaw）的模型发现与 v4.1-flash 实测
+
+### 7.1 ⚠️ 命名陷阱：显示名 ≠ 模型 id
+
+AutoClaw 的模型目录在 profile 配置的 `models.providers.<provider>.models[]` 里，每条有 `id` / `name` / `headers`：
+
+```jsonc
+// ~/.openclaw-autoclaw/openclaw.json
+{
+  "id": "tdpsk_deepseek-v4-flash-202605",   // ← 真正要传给 --model 的值
+  "name": "Deepseek-V4.1-Flash",            // ← UI 上显示的名字
+  "contextWindow": 1048576,
+  "maxTokens": 393216,
+  "headers": { "X-Request-Model": "tdpsk_deepseek-v4-flash-202605", ... }
+}
+```
+
+**UI 里选「Deepseek-V4.1-Flash」，实际发出的 id 是 `tdpsk_deepseek-v4-flash-202605`。** 与 WorkBuddy 的 `deepseek-v4.1-flash` 不是同一个字符串——同一家模型在两个客户端里的 id 命名不同，插件做别名映射时必须分别登记。
+
+### 7.2 provider 与凭证形态
+
+```jsonc
+"models": { "providers": { "zai": {
+  "baseUrl": "https://autoglm-api.autoglm.ai/autoclaw-proxy/proxy/autoclaw",
+  "apiKey": "autoclaw-internal-proxy",
+  "api": "openai-completions",          // OpenAI 兼容协议
+  "timeoutSeconds": 1200
+}}}
+```
+
+- 真实凭证是**每个模型自带的 header**（`X-Authorization: Bearer <JWT>`，含 `user_id` / `exp`），随客户端刷新。
+- 因此 `--local` 不需要 shell 里另有 API key —— 配置里已具备。实测 stderr 里的 HTTP trace 可自证：
+  `POST https://autoglm-api.autoglm.ai/autoclaw-proxy/proxy/autoclaw/chat/completions status=200 provider=zai model.id=tdpsk_deepseek-v4-flash-202605`
+
+### 7.3 模型发现命令（探活用哪个）
+
+| 命令 | 实测结果 |
+|---|---|
+| `openclaw --profile autoclaw models list` | ✅ 秒级返回，列出 `<provider>/<modelId>` + 模态 + 上下文窗，可直接作为模型目录来源 |
+| `openclaw --profile autoclaw models status` | ❌ **60s 超时**（探测 provider 健康状况会真的去连）→ **探活绝不能用它** |
+| `openclaw --profile autoclaw agents list` | ✅ 列出 agent 及其默认模型（main / auto-coder / auto-designer…） |
+
+### 7.4 实跑 v4.1-flash（真活 + 机器验证）
+
+```bash
+node "<app>/gateway/openclaw/openclaw.mjs" --profile autoclaw agent --local --json \
+  --session-id "$(uuidgen)" --timeout 240 \
+  --model zai/tdpsk_deepseek-v4-flash-202605 --message "<任务>"
+```
+
+- 结果：exit 0，**12.9s**，`meta.agentMeta.model = tdpsk_deepseek-v4-flash-202605`，`meta.executionTrace.attempts[0].model` 同样是它。
+- 产物：`~/.openclaw-autoclaw/workspace/fizzbuzz.py`（182 字节）→ 独立复跑输出与汇报**一致**。
+- 汇报原文在 `payloads[0].text`：「已创建并运行 fizzbuzz.py：stdout 依次输出 1、2、Fizz、4、Buzz…」
+
+### 7.5 输出形态（对 driver 的意义）
+
+openclaw 的 `--json` **不是** NDJSON 事件流，而是一个 **pretty-printed 单 JSON**：`{ "payloads": [{ "text": … }], "meta": { durationMs, agentMeta, executionTrace, systemPromptReport, contextBudgetStatus } }`。
+
+→ 对应 `docs/driver-pitfalls.md` 第 10 条：必须**整缓冲解析**，且「解析出完整结果 + stdout 静默」即为协议边界。`meta` 还顺带给出 `sessionId` / `durationMs` / 每次尝试的模型，可直接用于 `AgentResult`。
+
+### 7.6 文件工具边界
+
+`tools.fs.workspaceOnly: true` → 它的读写被限制在自己的 workspace（`~/.openclaw-autoclaw/workspace`，按 agent 还有 `agents/<id>/workspace`）。**给它的 cwd 参数不改变这个边界**，任务产物会落在 workspace 里。`tools.exec.security: full` + `ask: off` 意味着命令执行默认放行。
+
+
