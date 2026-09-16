@@ -3,3 +3,6 @@ lib/
 coverage/
 *.tsbuildinfo
 .DS_Store
+.worktrees/
+.wb-harness/
+vendor/
