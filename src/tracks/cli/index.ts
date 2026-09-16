@@ -179,6 +179,13 @@ export function createCliPolicy(deps: CliPolicyDeps = {}): TrackPolicy {
         ...(interpreter !== undefined ? { interpreter } : {}),
         ...(descriptor.command.argsPrefix !== undefined ? { argsPrefix: descriptor.command.argsPrefix } : {}),
         ...(descriptor.command.env !== undefined ? { env: descriptor.command.env } : {}),
+        // The wire protocol is launch data, so it must survive the track: the
+        // same binary is two identities (`codebuddy-code` speaks both the
+        // codebuddy stream-json dialect and ACP) and dropping this would make
+        // the ACP identity silently run the wrong protocol.
+        ...(descriptor.command.protocolArgs !== undefined
+          ? { protocolArgs: descriptor.command.protocolArgs }
+          : {}),
       }
       // `detail` is not part of CommandSpec; it travels back through the
       // resolved identity's `reason`-free channel via the logger by the caller.

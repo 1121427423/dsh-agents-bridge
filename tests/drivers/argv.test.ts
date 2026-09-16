@@ -22,7 +22,7 @@ import {
   type SpawnSpec,
   type SpawnedProcess,
 } from '../../src/drivers/argv.ts'
-import { createBackend } from '../../src/drivers/index.ts'
+import { createBackend, DRIVER_FAMILIES } from '../../src/drivers/index.ts'
 import type { AgentMessage, DriverDeps } from '../../src/kernel/types.ts'
 
 const BLOCKED: BlockedArgs = {
@@ -226,14 +226,20 @@ describe('createBackend', () => {
   }
 
   it('builds a backend for every advertised family', () => {
-    for (const family of ['claude', 'codebuddy', 'codex', 'openclaw', 'generic'] as const) {
+    // Iterates the ADVERTISED list rather than a copy of it, so a family added
+    // to `DRIVER_FAMILIES` without a `createBackend` case fails here instead of
+    // shipping an entry the compiler cannot see.
+    for (const family of DRIVER_FAMILIES) {
+      expect(createBackend(family, deps).family).toBe(family)
+    }
+    for (const family of ['claude', 'codebuddy', 'codex', 'openclaw', 'acp', 'generic'] as const) {
       expect(createBackend(family, deps).family).toBe(family)
     }
   })
 
   it('rejects an unknown family with a readable error', () => {
     expect(() => createBackend('no-such-dialect' as never, deps)).toThrowError(
-      /unknown protocol family "no-such-dialect".*Known families: claude, codebuddy, codex, openclaw, generic/s,
+      /unknown protocol family "no-such-dialect".*Known families: claude, codebuddy, codex, openclaw, acp, generic/s,
     )
   })
 })

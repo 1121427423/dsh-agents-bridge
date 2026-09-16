@@ -53,18 +53,23 @@ import { createCodebuddyBackend } from './codebuddy.ts'
 import { createCodexBackend } from './codex.ts'
 import { createGenericBackend } from './generic-argv.ts'
 import { createOpenclawBackend } from './openclaw.ts'
+import { createAcpBackend } from './acp.ts'
 
 /**
  * The dialects implemented in v1, in the order the model-facing tool should
  * present them. Every entry maps to exactly one driver module; several agent
  * identities may share one family (multica's "identity fork": WorkBuddy ships a
  * CodeBuddy binary, both speak the claude stream-json dialect).
+ *
+ * `acp` is the v3 addition (decision D24): one entry unlocks every CLI that
+ * speaks the Agent Client Protocol, regardless of which vendor ships it.
  */
 export const DRIVER_FAMILIES: readonly ProtocolFamily[] = [
   'claude',
   'codebuddy',
   'codex',
   'openclaw',
+  'acp',
   'generic',
 ]
 
@@ -89,6 +94,8 @@ export function createBackend(family: ProtocolFamily, deps: DriverDeps): AgentBa
       return createCodexBackend(deps)
     case 'openclaw':
       return createOpenclawBackend(deps)
+    case 'acp':
+      return createAcpBackend(deps)
     case 'generic':
       return createGenericBackend(deps)
     default:
@@ -121,6 +128,8 @@ export function createBackendWithRuntime(
       return createCodexBackend(deps, runtime)
     case 'openclaw':
       return createOpenclawBackend(deps, runtime)
+    case 'acp':
+      return createAcpBackend(deps, runtime)
     case 'generic':
       return createGenericBackend(deps, runtime)
     default:

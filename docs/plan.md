@@ -124,6 +124,79 @@ kernel 只保留共享机制（`<PREFIX>_PATH` 覆盖、解析、`<exe> --versio
   `copilot.tencent.com`，且 `terminal_reason` 在 2.151.0 里根本不存在 → claude 的
   结构化原因读取器无字段可读。**零 ABI 变更**。默认模型（不传 `--model`）是 `hy3`。
 
+**D24 — ACP driver（ABI v3，`ProtocolFamily += 'acp'`）。**
+
+D1 把 ACP 推给 v2，理由原文是「WorkBuddy/AutoClaw 均不说 ACP」——那个理由对**这两个
+身份**成立，对「一条 driver entry 解锁多家 CLI」不成立：multica 里 hermes / kimi /
+kiro / qoder / trae / grok / qwenpaw / dim / zeroclaw / mcode / reasonix 共 12 家说
+ACP（`docs/multica-reference.md` §4 原本把 `acp_*.go` 列为「v2 移植」）。今天每接一家
+要写一个方言 driver，有了 ACP driver 接一家 = 加一条描述符。**并且本机就有了第一个
+可验证的真实对端**：`codebuddy-code --acp`（`--help` 原文 "…using ndJsonStream"），
+所以这次不必只依赖移植笔记，能抓真实字节。
+
+- **帧格式是 `ndJsonStream`，不是 LSP 的 `Content-Length` 头。** 一行一个 JSON-RPC
+  对象。实测抓包确认（见「阶段状态」里的证据行），multica `hermes.go` 的
+  `newAgentStreamScanner` 也是逐行读。
+- **同一个二进制、两个身份。** `codebuddy-code` 已在 CLI catalog 里有一条**非 ACP**
+  身份（`family:'codebuddy'`，D23）。ACP 那条是**不同身份**：id 取
+  `codebuddy-code-acp`，协议选择走新增的 `AgentDescriptor.protocolArgs`
+  （`['--acp']`），**不硬编码在 driver 里** —— 「怎么选中这条协议」是身份数据，
+  与「这条协议怎么说」是两件事，混在一起就等于把某个 CLI 的具体 flag 焊进 ACP 协议族。
+- **ABI v3 只做加法**：`ProtocolFamily += 'acp'`；新增可选字段
+  `AgentDescriptor.protocolArgs`、`AgentDescriptor.capabilities.clientTools`、
+  `ProbeResult.authMethods`。唯一「破坏性」的是联合类型多了一个成员，而它对**声明式**
+  消费方是增量的（每个既有描述符照样编译），两个 `switch` 是穷尽式写法、编译器会点名
+  —— 这正是我们要的提示方式，不是静默 fallback 到 `generic`。
+- **安全红线：客户端侧能力必须落在 `opts.cwd` 之内。** ACP 的对端会反过来调我们
+  （`fs/read_text_file` / `fs/write_text_file` / `terminal/create|output|wait_for_exit|
+  kill|release`），这等于让被驱动的 agent 读写本机文件、起进程。策略：路径先
+  `path.resolve(cwd, p)`，再对**最深的已存在祖先**做 `realpath`（否则一个
+  `/tmp/link -> /etc` 的软链就能把所有检查绕过去），越界即以 JSON-RPC 错误拒绝并带上
+  越界的路径与允许的根；`terminal/create` 的 `cwd` 同规则、默认取 `opts.cwd`。
+  且这些能力**默认关闭**，由 `DSH_AGENTS_BRIDGE_ACP_FS` / `_ACP_TERMINAL` 显式开启，
+  `initialize` 里只广播真正开启的位 —— 不能一边广播能力一边拒绝。
+- **`session/request_permission` 照 multica 的语义，不照 claude 族。** claude 那边是
+  「保持 stdin 打开自动批准 `control_request`」，ACP 这边是「从对端**真正给过的**
+  optionId 里选一个」：先已知的会话级批准 id（`allow_session`/`approve_for_session`），
+  再 `kind:"allow_once"`，再退到对端给过的 `reject_once`（只否掉这一个动作），
+  **绝不自动选 `allow_always`** —— ACP v1 里 allow_always 会「记住选择」，在 Hermes 上
+  落到运行时属主的磁盘 allowlist，比任务活得久。一个都选不了就回 `-32603` 协议错误，
+  既不伪造没给过的 id，也不回 `cancelled`（那会被别的 ACP 后端读成整轮取消）。
+- **归一化不新增 `AgentMessageType`**：`agent_message_chunk`→`text`、
+  `agent_thought_chunk`→`thinking`、`tool_call`→`tool_use`、
+  `tool_call_update`(completed/failed)→`tool_result`、
+  `config_option_update`/`available_commands_update`/`session_info_update`→`status`、
+  真正不认识的→`log`。usage 走 `AgentUsage` 四桶互斥（`reasoningTokens` 是披露项、
+  不是桶，见 types.ts 注释），移植 `acp_usage.go` 的**逐桶取最大值**合并
+  （`usage_update` 通知与终态 prompt 结果两条计量路径）。
+- **终态判定**：`end_turn`→completed；`cancelled`→cancelled；`refusal`/
+  `max_tokens`/`max_turn_requests`→failed；取消信号→cancelled；`timeoutMs`→timeout；
+  起不来 / 无终态帧的非零退出→failed。**「refusal 也算 failed」有实测依据**：本机
+  codebuddy-code 未登录时正是以**退出码 0** 回 `stopReason:"refusal"`，真正的错误
+  （401 Authentication required）只藏在 `result._meta["codebuddy.ai/errorMessage"]`
+  里，照 stopReason 字面读会把它报成一次正常的「模型拒答」。
+- **对端会发没有 `id` 的请求。** 实测 `_codebuddy.ai/command` 帧就是 `method` 有、
+  `id` 没有 —— JSON-RPC 不允许，但真实存在。所以读侧规则是「有 `id` 才回，没 `id`
+  当通知丢弃」，否则我们会回一帧 `id:null` 的响应去污染对端状态机。
+- **ACP 引擎是常驻服务，收工必须由我们主动关 stdin。** 这是实现期才暴露的坑：
+  `session/prompt` 应答之后引擎**不会自己退出**（它是个 server），所以任何形如
+  「等 `child.exited` 再定终态」的写法都会**永久挂住**——第一次跑测试时 23 个用例
+  全部超时 20s，就是这个原因。multica 的写法一致（`hermes.go:717` 注释「Close stdin
+  first so Hermes can observe EOF and exit cleanly」，随后 `hermesReaderDrainGrace`
+  兜底强杀）。落地为 `AcpClient.shutdown(graceMs)`：先 `flushWrites()`，再 `stdin.end()`，
+  在 `ACP_SHUTDOWN_GRACE_MS`（2s）内等退出，超时就 `terminate()` 整组。
+- **客户端侧能力是 multica 没做过的增量，必须标注。** multica 的 `hermesClient` 对
+  `fs/*` 一律回 `-32601 method not found`（`hermes_test.go:966` 就是这个断言），也就是
+  它**从不广播** `clientCapabilities.fs`。本 driver 按任务要求**真的实现**了
+  `fs/read_text_file` / `fs/write_text_file` / `terminal/*`，因此这里是**有意的分歧**，
+  不是移植偏差：能力默认关闭（env 开启），开启了才广播，广播了就一定服务。
+
+**被否决的替代方案**：① 把 `--acp` 写死在 driver 里（等于 ACP 协议族只能驱动
+codebuddy-code，12 家变 1 家）；② 自动批准一切权限（含 `allow_always`）（把一个越界
+的持久授权留给用户去收拾）；③ 无条件广播 terminal 能力（广播了就没人问我们为什么不
+工作）；④ 用 `log` 兜住所有映射不上的 update（`status` 更有信息量，`log` 会把它降级成
+噪声）。
+
 ## 阶段状态
 
 - [x] 仓库创建 + git init + 骨架（package.json / tsconfig / cordis.patch.yml / build.mjs / types.ts）
@@ -151,7 +224,9 @@ kernel 只保留共享机制（`<PREFIX>_PATH` 覆盖、解析、`<exe> --versio
   - **端口指纹**：只探 `127.0.0.1` / `::1`（`localhost` 明确拒绝，避免走 resolver）；连接超时 ≤300ms、并发封顶、整轮墙钟预算；失败一律静默降级。**只有端口 + 响应签名同时命中才算 `confirmed`**，否则只是**疑似**，且**两者都不得影响 `available`**（`available` 仍只由"能不能真启动"决定）。默认期望表为**空**：本机没有已验证的 gateway 端口，猜一个等于往探测输出里塞假事实
   - **扫描真机实测**：29ms 扫完 `/Applications` 的 64 个 bundle，识别出 AutoClaw 的 gateway（`Resources/gateway/openclaw/openclaw.mjs` + bundle 内 `Resources/node/darwin-arm64/node`），并按内置优先规则正确遮蔽
 - [x] **P2 取消/续接/watchdog 打磨**：三段式取消（SIGTERM → grace → **进程组** SIGKILL）配孤儿证明测试（假 CLI fork 出孙进程 + 故意忽略 SIGTERM，cancel 后断言两个 pid 都 ESRCH）；watchdog 硬超时/idle 各自独立、终态 `timeout`、终态后定时器归零；`send` 对终态会话给可执行错误；`cwd`/agent 白名单（`realpath` 后比较）+ `maxConcurrent`（同步拒绝，不排队）；store 并发写者不再撞临时文件名（原 bug：per-instance 计数器 → 丢记录）。新增 81 个测试
-- [ ] P4 ACP driver / 监工 UI / 并行 fan-out
+- [x] **D24 ACP driver 完成**：ABI v3（`ProtocolFamily += 'acp'` + 三个可选字段，纯加法）+ `src/drivers/acp.ts` + CLI 轨道新身份 `codebuddy-code-acp` + `tests/fixtures/fake-acp-cli.mjs`（DERIVED，见 `tests/fixtures/ACP-PROVENANCE.md`）+ 44 个 ACP 测试。**真实端到端**（`DSH_ACP_E2E=1`，`@tencent-ai/codebuddy-code` 2.151.0）：走完 `initialize` → `session/new`（拿到真实 `backendSessionId` `01a0abca-7768-79fd-bb1e-d44abfb0125d`）→ `session/prompt`，通知流被正确归一化成 `status`（`session info update`、`available commands update: 49 commands`/`60 commands`），终态是**鉴权失败**（退出码 0、stderr 空、`stopReason:"refusal"`、401 只在 `result._meta["codebuddy.ai/errorMessage"]` 里）——与 D23 同款最有价值证据，且证明 `refusal`→failed 的映射真的生效（否则会把死凭据报成「模型拒答」）。五个实测发现：帧格式是无头的 NDJSON；对端会发**没有 `id` 的请求**（`_codebuddy.ai/command`）；`refusal` 不是「模型拒答」而是失败态；**引擎是常驻服务、不主动关 stdin 就永不退出**（见 D24 正文）；客户端能力是 multica 没做过的**有意增量**。安全红线：`fs/*`、`terminal/*` 全部限制在 `opts.cwd` 内（含 realpath 反软链穿越），且默认关闭、需 env 显式开启
+- [x] **client half（监工 UI）落地**（工作流 A）：`src/client/**` + `src/host/api.ts` —— 宿主 HTTP 路由 `kind:"prefix"`、POST-only、复用 better-sidebar 的 `fence` 语义；`webServer` 用 `ctx.get` 惰性取而不进 `inject`（否则没有该服务的宿主会把整个插件判为 INACTIVE，D16），取不到只少 UI、6 个工具照常注册。client 侧按 slot 注册（`conversation.session.header.utilities` 常驻计数 + `sidebar.right.pane.tab` 完整面板，独立降级），增量读取回传 `nextIndex`，无会话时停轮询，中英双语 + 跟随宿主主题变量。`package.json` 加 `dsh.client` 与 `exports["./client"]`，`exports["."]` 保持字符串（D17）。新增 `lib/client.js` 产物与 `vitest.config.ts`（`tests/**` 锚定，避免 vitest 扫到兄弟 worktree——这个坑在合并期真实发生过）
+- [ ] P4 并行 fan-out（`agents_run_many` / `agents_wait` / `agents_usage`，待工作流 E）
 
 ## 交付指标（当前）
 

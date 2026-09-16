@@ -20,7 +20,7 @@
 - 不做看板/issue/任务队列（multica 的 server+daemon 外壳）——DSH 主 agent 就是调度器。
 - 不做 GUI 监工页（P4 再说）。v1 为 `bundle` 形态、纯 Node half。
 - 不做 `connect` 模式（拨已运行实例：openclaw gateway、WorkBuddy sidecar）。契约留字段，实现留空。
-- 不做 ACP driver（v2；见 §3 协议决策）。
+- 不做 ACP driver（v2；见 §3 协议决策）。**→ 已兑现：D24（`docs/plan.md`）落地 ACP driver（ABI v3）。**
 
 ---
 
@@ -143,7 +143,7 @@ src/drivers/index.ts    ← family → driver 表
 | **P1** | kernel + 4 driver + 6 工具 | **WorkBuddy 与 AutoClaw 各跑通一次真实任务**，事件流可见 |
 | P2 | 会话存储 + resume + watchdog | 取消能杀掉整棵进程树；`send` 能续接 |
 | P3 | probe 泛化（app bundle 扫描 + 端口指纹）、上下文注入 | 新桌面 app 可自动发现 |
-| P4 | ACP driver / 监工 UI / 并行 fan-out 对比 | 12 家 ACP CLI 一条 entry 解锁 |
+| P4 | ACP driver / 监工 UI / 并行 fan-out 对比 | 12 家 ACP CLI 一条 entry 解锁（**ACP driver 已完成：D24**） |
 
 ## 10. 风险与开放问题
 

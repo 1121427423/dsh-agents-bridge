@@ -30,6 +30,31 @@
  *      Nothing here is required, so an embedder that constructs `ManagerOptions`
  *      exactly as before keeps today's behaviour.
  *
+ *  v4  + `ProtocolFamily` += 'acp' (decision D24): one ACP driver serves the
+ *      12+ CLIs that speak the Agent Client Protocol, so adding one of those is
+ *      a descriptor, not a dialect. Purely additive — no existing field changes
+ *      meaning, and every v2 descriptor still compiles unchanged. Three new
+ *      OPTIONAL fields come with it:
+ *        - `CommandSpec.protocolArgs`: the argv tokens that select the wire
+ *          protocol (`['--acp']`). Needed because the SAME binary is two
+ *          identities (`codebuddy-code` speaks both the codebuddy stream-json
+ *          dialect and ACP), and "which protocol did this identity select" is
+ *          launch data — hard-coding the flag inside the ACP driver would bind a
+ *          protocol family to one vendor's spelling.
+ *        - `AgentDescriptor.capabilities.clientTools`: whether the engine asks
+ *          the CLIENT to serve `fs/*` and `terminal/*`. ACP lets the agent call
+ *          back into us to read/write files and run processes, so this is an
+ *          authority question worth stating in data rather than discovering at
+ *          runtime.
+ *        - `ProbeResult.authMethods`: the `authMethods` ids an ACP engine
+ *          advertises in its `initialize` result. "Which login does this
+ *          engine accept" is not expressible with `AgentHealth` alone.
+ *      The union widening is the only non-additive part, and it is the
+ *      desirable one: the two `switch (family)` sites are exhaustive, so the
+ *      compiler names every place that must serve the new family instead of
+ *      letting a missing case fall through to `generic` and launch the wrong
+ *      CLI with the wrong flags.
+ *
  * @module dsh-agents-bridge/kernel/types
  */
 
@@ -40,8 +65,13 @@ export type AgentId = string
  * Protocol family: the wire dialect a driver knows how to speak. Several agent
  * identities may share one family (multica's "identity fork" concept: WorkBuddy
  * ships a CodeBuddy binary, both speak the claude stream-json dialect).
+ *
+ * `'acp'` (ABI v3, D24) is the Agent Client Protocol — JSON-RPC 2.0 framed as
+ * NDJSON over the child's stdin/stdout. It is the one family here that is a
+ * cross-vendor standard rather than a vendor dialect, which is why it is the
+ * family that unlocks the most identities per line of driver code.
  */
-export type ProtocolFamily = 'claude' | 'codebuddy' | 'codex' | 'openclaw' | 'generic'
+export type ProtocolFamily = 'claude' | 'codebuddy' | 'codex' | 'openclaw' | 'acp' | 'generic'
 
 /**
  * Integration track: HOW the bridge obtains a launchable engine. This is a
@@ -80,6 +110,20 @@ export interface CommandSpec {
   readonly interpreter?: string
   /** Fixed argv inserted before per-run arguments (e.g. `['agent']`, `['--profile','p']`). */
   readonly argsPrefix?: readonly string[]
+  /**
+   * Argv tokens that select this identity's WIRE PROTOCOL (`['--acp']`),
+   * inserted after `argsPrefix` and before the driver's own per-run args
+   * (ABI v3).
+   *
+   * Exists because one binary can expose two protocols: `codebuddy-code` speaks
+   * the codebuddy stream-json dialect by default and ACP when given `--acp`, so
+   * the bridge registers it as two identities over one binary. Putting the token
+   * here keeps the ACP driver vendor-neutral — a second ACP identity
+   * (`hermes acp`, `kimi --acp`) declares its own spelling instead of the driver
+   * guessing one and thereby only ever driving the first vendor it was written
+   * for.
+   */
+  readonly protocolArgs?: readonly string[]
   /** Extra environment variables for the child process. */
   readonly env?: Readonly<Record<string, string>>
   /**
@@ -119,6 +163,14 @@ export interface AgentDescriptor {
     readonly model?: boolean
     readonly effort?: boolean
     readonly mcpConfig?: boolean
+    /**
+     * ABI v3: the engine issues `fs/*` and `terminal/*` requests back to the
+     * bridge (the ACP client). False/absent means the bridge advertises no such
+     * capability and the engine keeps its own tools. This is an AUTHORITY
+     * statement, not a feature list: enabling it lets the driven agent read and
+     * write files and start processes through us.
+     */
+    readonly clientTools?: boolean
   }
   /**
    * Present when the identity is known but NOT drivable (e.g. a sealed desktop
@@ -179,6 +231,18 @@ export interface ProbeResult {
   readonly models?: readonly string[]
   /** Where `models` came from, for the model to explain itself. */
   readonly modelsSource?: string
+  /**
+   * ACP only (ABI v3): the auth method ids the engine advertised in its
+   * `initialize` result (e.g. `iOA`, `external`, `internal`, `selfhosted` for
+   * CodeBuddy Code). A non-empty list means the engine expects an
+   * `authenticate` step before `session/new` will do anything useful; an
+   * absent field means the engine needs no explicit auth.
+   *
+   * It is reported rather than acted on because choosing a login flow is the
+   * user's decision — the bridge may only pick one when
+   * `DSH_AGENTS_BRIDGE_ACP_AUTH_METHOD` names it explicitly.
+   */
+  readonly authMethods?: readonly string[]
   /** Verbatim caveat from the descriptor (see `AgentDescriptor.notes`). */
   readonly notes?: string
 }
