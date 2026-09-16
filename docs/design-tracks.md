@@ -73,7 +73,26 @@ All observed on the target machine, 2026-09-16. Each one has a test.
    `@anthropic-ai/claude-code` shim is a dangling symlink. The descriptor carries
    a `notes` field that travels into probe output, because "installed = yes" is
    not the same as "this is the thing you think it is".
-6. **Neither CLI can currently complete a run.** `claude` (OpenAI-compat mode,
+6. **Two WorkBuddy builds ship ONE byte-identical launcher.** `WorkBuddy.app` and
+   `WorkBuddy AI.app` (5.5.2, `com.workbuddy.workbuddy-ai`) contain the same
+   `cli/bin/codebuddy` (sha256 `f8b141c3…`). The difference is the
+   `cli/product.json` beside it, which the launcher reads:
+
+   | bundle | `applicationName` | `dataFolderName` | `apiKeySource` |
+   |---|---|---|---|
+   | `/Applications/WorkBuddy.app` | `WorkBuddy` | `.workbuddy` | `copilot.tencent.com` |
+   | `/Applications/WorkBuddy AI.app` | `workbuddy-ai` | `.workbuddy-ai` | `www.workbuddy.ai` |
+
+   So the config home follows from **which bundle was executed** — no env var, no
+   profile flag, nothing to plumb. The identity really is the bundle path, which
+   is what the desktop track already models, and the two catalogs are genuinely
+   different (22 international ids incl. `deepseek-v4.1-flash-sg`, `gpt-6-astra`,
+   `gemini-3.5-flash` vs 51 domestic ids). A real headless run of the
+   international build returns `401 Unauthorized` with result subtype
+   `error_during_execution`: the desktop login must be established in that app
+   before the CLI can use it, exactly like the two CLI engines in §3.5.
+
+7. **Neither CLI can currently complete a run.** `claude` (OpenAI-compat mode,
    `OPENAI_BASE_URL=https://opencode.ai/zen/go/v1`) gets
    `401 Invalid API key`; `codex` is pointed at the local gateway
    `http://127.0.0.1:8080` which answers

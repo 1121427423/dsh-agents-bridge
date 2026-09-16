@@ -132,6 +132,8 @@ kernel 只保留共享机制（`<PREFIX>_PATH` 覆盖、解析、`<exe> --versio
 - [ ] **D22 codex driver**（子代理实现中：`codex exec --json`）
 - [x] **probe health / 模型发现（D20）**：`src/tracks/{health,models,host-files}.ts` + 60 个测试，已接进 `probe()`；真机输出 claude ok/6、codex ok/2、workbuddy n-a/51、autoclaw n-a/6、openclaw missing/未发现；关闭两个泄露面（V8 解析错误会回显输入、autoclaw 配置里存着 JWT）
 - [ ] **D23 codebuddy-code**（最后做，先抓包验证方言）
+- [x] **桌面轨道新增 WorkBuddy AI（国际版）身份**：`workbuddy-ai`，与国内版是**两个 bundle、两个身份**（同一份字节相同的 launcher，靠各自 `product.json` 的 `dataFolderName` 选 `~/.workbuddy-ai` / `~/.workbuddy`）；`tests/tracks/desktop.test.ts` 11 个测试（含宿主相关断言：两份 product.json 的 dataFolderName 必须不同、launcher 字节相同）
+- [ ] 待两个子代理收工后补 `workbuddy-ai` 的 health（`not-applicable`）与 models（`~/.workbuddy-ai/cache/acc-product-config-v3.json`，22 个 id）行——**同一文件同一时刻只允许一个写者**
 - [ ] P2 取消/续接/watchdog 打磨
 - [ ] P3 probe 泛化（app bundle 扫描 + 端口指纹）
 - [ ] P4 ACP driver / 监工 UI / 并行 fan-out

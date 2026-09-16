@@ -24,9 +24,29 @@
 import type { AgentDescriptor } from '../../kernel/types.ts'
 import type { LaunchInput, TrackPolicy } from '../types.ts'
 
-/** WorkBuddy's CLI is a node script with no node beside it. */
+/**
+ * WorkBuddy's CLI is a node script with no node beside it.
+ *
+ * There are TWO WorkBuddy desktop apps and they ship the SAME launcher: the two
+ * `cli/bin/codebuddy` files are byte-identical (sha256 f8b141c3…, verified). What
+ * differs is the `cli/product.json` sitting beside each one, which names the
+ * product — and, crucially, `dataFolderName`:
+ *
+ *   WorkBuddy.app     applicationName=WorkBuddy     dataFolderName=.workbuddy
+ *   WorkBuddy AI.app  applicationName=workbuddy-ai  dataFolderName=.workbuddy-ai
+ *
+ * The launcher reads that file, so `~/.workbuddy` vs `~/.workbuddy-ai` follows
+ * from WHICH BUNDLE was executed — no env var, no --config flag, nothing for the
+ * bridge to plumb. The identity genuinely is the bundle path, which is exactly
+ * what the desktop track models. (The two catalogs really are different: the
+ * international build exposes 22 models incl. `deepseek-v4.1-flash-sg`,
+ * `gpt-6-astra`, `gemini-3.5-flash`, while the domestic one exposes 51.)
+ */
 const WORKBUDDY_CLI =
   '/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy'
+/** The international build (com.workbuddy.workbuddy-ai, 5.5.2 on this host). */
+const WORKBUDDY_AI_CLI =
+  '/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy'
 const AUTOCLAW_ENGINE = '/Applications/AutoClaw.app/Contents/Resources/gateway/openclaw/openclaw.mjs'
 /** Homebrew node: the interpreter the bundled engines need. */
 const BUNDLED_NODE = '/opt/homebrew/bin/node'
@@ -43,6 +63,17 @@ export const DESKTOP_TRACK_DESCRIPTORS: readonly AgentDescriptor[] = [
     capabilities: { resume: true, model: true, effort: true, mcpConfig: true },
     notes:
       'Headless contract: `codebuddy -p --output-format stream-json --model <id> --permission-mode bypassPermissions`. Auth is the desktop login reused via copilot.tencent.com; no key is needed and none must be supplied.',
+  },
+  {
+    id: 'workbuddy-ai',
+    track: 'desktop',
+    family: 'codebuddy',
+    displayName: 'WorkBuddy AI (international, bundled CodeBuddy CLI)',
+    command: { executable: WORKBUDDY_AI_CLI, interpreter: BUNDLED_NODE },
+    envPrefix: 'WORKBUDDY_AI',
+    capabilities: { resume: true, model: true, effort: true, mcpConfig: true },
+    notes:
+      'Headless contract (verified 2.137.1): `codebuddy -p --output-format stream-json --model <id> --permission-mode bypassPermissions`. Separate identity from workbuddy, not a locale flag: it reads its own home ~/.workbuddy-ai (chosen by its bundle product.json) and authenticates as `www.workbuddy.ai` rather than `copilot.tencent.com`. A real run on 2026-09-16 returned `401 Unauthorized` with result subtype `error_during_execution`, i.e. the desktop login is not (yet) usable from the CLI — establish the app login first.',
   },
   {
     id: 'autoclaw',
