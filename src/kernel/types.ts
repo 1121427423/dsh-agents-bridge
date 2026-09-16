@@ -108,7 +108,16 @@ export interface CommandSpec {
   readonly executable: string
   /** Optional interpreter prepended to argv (e.g. an app-bundled node binary). */
   readonly interpreter?: string
-  /** Fixed argv inserted before per-run arguments (e.g. `['agent']`, `['--profile','p']`). */
+  /**
+   * Fixed argv inserted before per-run arguments (e.g. `['--profile','autoclaw']`,
+   * `['mise','exec','--']`).
+   *
+   * It must NOT carry a token the driver already emits — notably the openclaw
+   * subcommand `agent` and codex's `exec`. The final vector is a plain
+   * concatenation, so a duplicate here reaches the CLI verbatim
+   * (`openclaw agent agent …` → "Too many arguments for this command.").
+   * See `tests/integration/argv-shape.test.ts`.
+   */
   readonly argsPrefix?: readonly string[]
   /**
    * Argv tokens that select this identity's WIRE PROTOCOL (`['--acp']`),

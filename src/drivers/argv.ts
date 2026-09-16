@@ -285,11 +285,17 @@ export function filterCustomArgs(
 }
 
 /**
- * `CommandSpec.argsPrefix` is the launch prefix (`mise exec --`, `openclaw`),
+ * `CommandSpec.argsPrefix` is the launch prefix (`mise exec --`, `--profile autoclaw`),
  * and it competes for the same protocol flags as custom args — so it is
  * filtered too. Positional tokens are never dropped: in a prefix a bare
  * `acp`/`serve` names the command, it does not re-issue a subcommand
  * (multica `filterLaunchPrefix`).
+ *
+ * That last rule is why this filter cannot save a prefix that repeats a
+ * DRIVER-OWNED subcommand: `agent` is positional, so it passes straight
+ * through and the final argv becomes `openclaw agent agent …`. Keeping the
+ * subcommand out of `argsPrefix` is the descriptor's job, and
+ * `tests/integration/argv-shape.test.ts` is the guard.
  */
 export function filterLaunchPrefix(
   prefix: readonly string[] | undefined,

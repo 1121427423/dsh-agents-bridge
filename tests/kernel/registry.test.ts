@@ -83,12 +83,16 @@ describe('built-in descriptor table', () => {
       '/Applications/AutoClaw.app/Contents/Resources/gateway/openclaw/openclaw.mjs',
     )
     expect(autoclaw?.command.interpreter).toBe('/opt/homebrew/bin/node')
-    expect(autoclaw?.command.argsPrefix).toEqual(['agent'])
+    // The profile prefix the descriptor owns; `agent` is NOT here because the
+    // openclaw driver already emits it (see tests/integration/argv-shape.test.ts).
+    expect(autoclaw?.command.argsPrefix).toEqual(['--profile', 'autoclaw'])
 
     const openclaw = registry.get('openclaw')
     expect(openclaw?.family).toBe('openclaw')
     expect(openclaw?.command.executable).toBe('openclaw')
-    expect(openclaw?.command.argsPrefix).toEqual(['agent'])
+    // No prefix at all: the driver supplies the `agent` subcommand, and the CLI
+    // track has no profile to select.
+    expect(openclaw?.command.argsPrefix).toBeUndefined()
 
     expect(registry.get('generic')?.family).toBe('generic')
   })

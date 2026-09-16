@@ -111,7 +111,7 @@ Fix: openclaw doctor --fix
 | 未知事件类型必须静默忽略 | claude.ts 与 codebuddy.ts 共用解析器时不能对未知 type 抛错 |
 | session_id 从 init 事件捕获 | resume 支持不依赖 result 事件 |
 | codebuddy 用 `interpreter` 拉 node 才能跑 | `CommandSpec.interpreter` 是必需字段，不是可选优化 |
-| openclaw 身份必须带 profile | registry 的 `argsPrefix` 要支持「全局 flag + 子命令」组合 |
+| openclaw 身份必须带 profile | `argsPrefix` 只放**全局 flag**（`['--profile','autoclaw']`），**不放子命令**：`agent` 由 driver 的 `buildOpenclawArgs()` 发出，前缀里再放一次会让最终 argv 变成 `… agent agent …`（实测被拒为 "Too many arguments for this command."）。原结论「argsPrefix 要支持全局 flag + 子命令组合」是错的，见 `docs/plan.md` D12/D28 |
 
 ---
 

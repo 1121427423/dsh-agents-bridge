@@ -74,11 +74,16 @@ export const CLI_TRACK_DESCRIPTORS: readonly AgentDescriptor[] = [
     track: 'cli',
     family: 'openclaw',
     displayName: 'OpenClaw CLI (openclaw on PATH)',
-    command: { executable: 'openclaw', argsPrefix: ['agent'] },
+    // Deliberately NO `argsPrefix`: the openclaw driver emits the `agent`
+    // subcommand itself as the first driver arg, so a prefix here would produce
+    // `openclaw agent agent …` and the CLI answers "Too many arguments for this
+    // command." A prefix is only for tokens the driver cannot know about — the
+    // per-app profile selector the `autoclaw` descriptor needs.
+    command: { executable: 'openclaw' },
     envPrefix: 'OPENCLAW',
     capabilities: { resume: true, model: true },
     notes:
-      'A run MUST carry an explicit session selector (--session-id); without one the CLI exits with "No target session selected". See docs/driver-pitfalls.md.',
+      'A run MUST carry an explicit session selector (--session-id); without one the CLI exits with "No target session selected". The `agent` subcommand is supplied by the driver, not by an argsPrefix. See docs/driver-pitfalls.md.',
   },
   {
     id: 'generic',

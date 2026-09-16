@@ -122,7 +122,7 @@ describe('desktop track policy', () => {
     })
     expect('command' in outcome).toBe(true)
     if (!('command' in outcome)) return
-    expect(outcome.command.argsPrefix).toEqual(['agent'])
+    expect(outcome.command.argsPrefix).toEqual(['--profile', 'autoclaw'])
     expect(outcome.command.interpreter).toBe('/opt/homebrew/bin/node')
   })
 })
