@@ -6,7 +6,7 @@
  * reading four CLIs' output, while ACP is one wire protocol spoken by a dozen
  * engines (multica drives hermes / kimi / kiro / qoder / trae / grok / qwenpaw /
  * dim / zeroclaw / mcode / reasonix through it — `docs/multica-reference.md` §4).
- * One driver, twelve identities, and adding one is a descriptor (decision D24).
+ * One driver, twelve identities, and adding one is a descriptor (decision D27).
  *
  * Authoritative spec, ported line by line rather than from memory:
  * `~/BigModel/LLM/tools/multica/server/pkg/agent/` —

@@ -3,7 +3,7 @@
  *
  * The rule under test is design doc D16, applied to `webServer`: the HTTP route
  * exists only to serve the Web client half, so a host WITHOUT a web server must
- * still get all six agent tools. Declaring `webServer` in `inject` would mark
+ * still get all nine agent tools. Declaring `webServer` in `inject` would mark
  * the whole plugin INACTIVE on such a host — the tools would vanish along with a
  * panel that could never have been drawn.
  *
@@ -131,7 +131,7 @@ function fakeHost(services: { readonly webServer?: boolean; readonly commands?: 
 describe('entry wiring — webServer is optional (D16)', () => {
   it('registers every tool when the host HAS no web server', () => {
     const host = fakeHost()
-    // The six tools are the plugin's reason to exist; a host that cannot draw a
+    // The nine tools are the plugin's reason to exist; a host that cannot draw a
     // panel must still get all of them.
     expect(host.registeredTools).toEqual([...TOOL_NAMES])
     expect(host.routes).toEqual([])
@@ -139,7 +139,7 @@ describe('entry wiring — webServer is optional (D16)', () => {
 
   it('never declares webServer in its inject list', () => {
     // Declaring it would mark the plugin INACTIVE on a headless host and take
-    // the six tools down with it.
+    // the nine tools down with it.
     expect([...inject]).toEqual(['tools', 'systemPrompt'])
     expect([...inject]).not.toContain('webServer')
     expect([...inject]).not.toContain('commands')
@@ -184,7 +184,7 @@ describe('entry wiring — webServer present', () => {
 /* -------------------------------------------------------------------------- */
 
 describe('buildPromptSection', () => {
-  it('still names the six tools and the async-polling contract', () => {
+  it('still names the nine tools and the async-polling contract', () => {
     const section = buildPromptSection()
     for (const name of TOOL_NAMES) expect(section).toContain(name)
     // D5's promise is in the prompt, not only in the code: the model must not

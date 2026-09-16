@@ -61,7 +61,7 @@ import { createAcpBackend } from './acp.ts'
  * identities may share one family (multica's "identity fork": WorkBuddy ships a
  * CodeBuddy binary, both speak the claude stream-json dialect).
  *
- * `acp` is the v3 addition (decision D24): one entry unlocks every CLI that
+ * `acp` is the v4 addition (decision D27): one entry unlocks every CLI that
  * speaks the Agent Client Protocol, regardless of which vendor ships it.
  */
 export const DRIVER_FAMILIES: readonly ProtocolFamily[] = [

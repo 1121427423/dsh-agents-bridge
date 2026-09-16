@@ -10,7 +10,7 @@
 
 **目标**
 
-1. 主 agent 能发现（probe）、启动（run）、观察（status/output）、打断（cancel）、续接（send）本机 agent CLI。
+1. 主 agent 能发现（probe）、启动（run / run_many）、观察（status / wait / output / usage）、打断（cancel）、续接（send）本机 agent CLI。
 2. 一次 run 是**异步长任务**：立即返回 `sessionId`，事件流增量拉取——规避工具调用的超时语义（multica 的 daemon 也是这个模型）。
 3. 加一个新 CLI = **加一条 registry 描述符**，不写新驱动（协议家族复用）。
 4. 复用为主：方言解析、argv 构造、blocked flags、超时策略全部以 multica 源码为规格移植。
@@ -20,7 +20,7 @@
 - 不做看板/issue/任务队列（multica 的 server+daemon 外壳）——DSH 主 agent 就是调度器。
 - 不做 GUI 监工页（P4 再说）。v1 为 `bundle` 形态、纯 Node half。
 - 不做 `connect` 模式（拨已运行实例：openclaw gateway、WorkBuddy sidecar）。契约留字段，实现留空。
-- 不做 ACP driver（v2；见 §3 协议决策）。**→ 已兑现：D24（`docs/plan.md`）落地 ACP driver（ABI v3）。**
+- 不做 ACP driver（v2；见 §3 协议决策）。**→ 已兑现：D27（`docs/plan.md`）落地 ACP driver（ABI v4）。**
 
 ---
 
@@ -28,7 +28,7 @@
 
 ```
 DSH 主 agent
-    │  调用 6 个工具（agents_probe / run / status / output / cancel / send）
+    │  调用 9 个工具（agents_probe / run / run_many / status / wait / output / usage / cancel / send）
     ▼
 src/index.ts            ← 插件入口：inject ['tools','systemPrompt']，注册工具 + 系统提示段
     ▼
@@ -84,19 +84,29 @@ src/drivers/index.ts    ← family → driver 表
 
 ---
 
-## 5. 模型可见的工具（6 个）
+## 5. 模型可见的工具（9 个）
 
 | 工具 | 参数 | 返回 | 说明 |
 |---|---|---|---|
 | `agents_probe` | `refresh?: boolean` | `ProbeResult[]` | 探测本机可用身份；冒烟点 |
-| `agents_run` | `agent`, `prompt` (必填), `cwd?`, `model?`, `effort?`, `timeoutMs?`, `mode?` | `{sessionId, agent, status:'running'}` | **立即返回**，不等长任务 |
+| `agents_run` | `agent`, `prompt` (必填), `cwd?`, `model?`, `effort?`, `timeoutMs?`, `mode?` | `{sessionId, agent, status:'running', startedAt}` | **立即返回**，不等长任务 |
+| `agents_run_many` | `runs: [{agent, prompt, cwd?, model?, effort?, timeoutMs?}]`（1..16） | `{requested, started, failed, runs:[{index, agent, started, sessionId?, status?, error?}], hint}` | 并行 fan-out：一次调用起 N 个；**单项被拒不影响其余**；超 `maxConcurrent` 不排队，该项直接报错 |
 | `agents_status` | `sessionId?` | `{sessions: SessionSnapshot[]}` | 不传 = 全部活跃会话 |
-| `agents_output` | `sessionId`, `sinceIndex?`, `limit?` | `{sessionId, status, messages, nextIndex}` | 增量拉取，`nextIndex` 回传 |
-| `agents_cancel` | `sessionId`, `reason?` | `{sessionId, cancelled, status}` | 三段式取消 |
-| `agents_send` | `sessionId`, `prompt` | `{sessionId, status}` | 续接（v1 best-effort：用后端 session id resume） |
+| `agents_wait` | `sessionIds`（字符串或数组，必填）, `timeoutMs?`（缺省 20s，上限 60s）, `until?: 'all'\|'any'`, `sinceIndex?` | `{waitedMs, timedOut, until, timeoutMs, sessions:[{sessionId, agentId, status, terminal, waitedMs, nextIndex, result?, events?}], hint}` | **有界等待**：全部/任一终态或超时即返回。**超时是正常返回**（`timedOut: true`），不取消任何会话 |
+| `agents_output` | `sessionId`, `sinceIndex?`, `limit?` | `{sessionId, status, messages, nextIndex, terminal, result, hint}` | 增量拉取，`nextIndex` 回传 |
+| `agents_usage` | `sessionIds?`, `includeFinished?`（缺省 true） | `{sessions:[...], summary:{inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, totalTokens, reasoningTokens, sessions, running, finished, totalDurationMs}, note}` | 用量汇总。**`reasoningTokens` 是披露项、不计入 `totalTokens`**（引擎把它算在 output 内） |
+| `agents_cancel` | `sessionId`, `reason?` | `{sessionId, cancelled, status, note}` | 三段式取消 |
+| `agents_send` | `sessionId`, `prompt` | `{sessionId, status, resumed, messageCount}` | 续接（v1 best-effort：用后端 session id resume） |
 
 工具定义必须用 `defineTool`（`@deepseek-ai/dsh-tools`），每工具声明 `output.schema`（ValueSchemaSpec DSL）+ 纯函数 `render`。
-另注册一段 `ctx.systemPrompt.section(...)`，告诉模型何时该委派给哪个 agent。
+另注册一段 `ctx.systemPrompt.section(...)`，告诉模型何时该委派、prompt 必须自包含、优先 `agents_wait` 而不是高频轮询。
+
+**两条契约（E 明确下来的）**
+
+1. **`agents_run` 的 `execute()` 永不等待**（D5）；等待是 `agents_wait` 的全部意义，两者不许合并。
+2. **面向模型的每条错误都要说下一步**：哪个参数、什么值、为什么不行、合法范围/选项。
+   回归锁在 `tests/tools/error-copy.test.ts`（unknown agent / cwd 白名单 / 会话不存在 /
+   超并发 / `send` 到运行中会话 / 不可驱动的身份）。
 
 ---
 
@@ -143,7 +153,7 @@ src/drivers/index.ts    ← family → driver 表
 | **P1** | kernel + 4 driver + 6 工具 | **WorkBuddy 与 AutoClaw 各跑通一次真实任务**，事件流可见 |
 | P2 | 会话存储 + resume + watchdog | 取消能杀掉整棵进程树；`send` 能续接 |
 | P3 | probe 泛化（app bundle 扫描 + 端口指纹）、上下文注入 | 新桌面 app 可自动发现 |
-| P4 | ACP driver / 监工 UI / 并行 fan-out 对比 | 12 家 ACP CLI 一条 entry 解锁（**ACP driver 已完成：D24**） |
+| P4 | ACP driver / 监工 UI / 并行 fan-out 对比 | 12 家 ACP CLI 一条 entry 解锁（**ACP driver 已完成：D27**）；监工 UI 已完成（client half）；**并行 fan-out 已完成（`agents_run_many` + `agents_wait` + `agents_usage`，工具面 6 → 9）** |
 
 ## 10. 风险与开放问题
 

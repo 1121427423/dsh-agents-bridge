@@ -23,15 +23,26 @@
  * plugin's `inject` (adding it would make the *entire* plugin INACTIVE on a
  * host that mounts no command registry — cordis deactivates a plugin whose
  * inject-listed service is missing), and a missing command registry must not
- * cost the user the six agent tools.
+ * cost the user the nine agent tools.
  *
  * @module dsh-agents-bridge/tools/smoke
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 
+import { TOOL_NAMES } from './definitions.ts'
+
 /** The command name, exported so tests and the README cannot drift from it. */
 export const HELLO_COMMAND_NAME = 'agents-bridge-hello'
+
+/**
+ * Short tool names for the smoke line (`probe`, `run`, `run_many`, …).
+ *
+ * Derived from `TOOL_NAMES` rather than written out: the smoke command is the
+ * one place a human reads the surface from, and a hand-maintained copy is
+ * exactly how it ends up advertising a tool that no longer exists.
+ */
+const SHORT_TOOL_NAMES = TOOL_NAMES.map((name) => name.replace(/^agents_/u, ''))
 
 /** One command invocation, structurally typed (see the module doc above). */
 interface CommandInvocation {
@@ -82,7 +93,7 @@ export function registerSmokeCommand(ctx: Context): (() => void) | undefined {
       const who = name === undefined || name.length === 0 ? 'world' : name
       return {
         kind: 'success',
-        text: `agents-bridge is alive: hello ${who}. Tools agents_probe/run/status/output/cancel/send are registered; run agents_probe to see which agent CLIs this host can drive.`,
+        text: `agents-bridge is alive: hello ${who}. Tools agents_${SHORT_TOOL_NAMES.join('/agents_')} are registered; run agents_probe to see which agent CLIs this host can drive.`,
       }
     },
   })

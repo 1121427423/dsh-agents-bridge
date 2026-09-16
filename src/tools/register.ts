@@ -2,7 +2,7 @@
  * dsh-agents-bridge — tool registration wiring.
  *
  * Separated from the definitions so `definitions.ts` stays host-free and this
- * module owns exactly one responsibility: push the six definitions into
+ * module owns exactly one responsibility: push the nine definitions into
  * `ctx.tools` and hand back the disposers that take them out again.
  *
  * `ctx.tools.register` returns the exact Cordis effect disposer for that
