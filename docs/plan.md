@@ -31,6 +31,7 @@
 | D28 | **argv 所有权切分**：driver 独占「子命令」token（openclaw 的 `agent`、codex 的 `exec`），描述符的 `argsPrefix` 只放 driver 无法知道的全局 token（`--profile autoclaw`、wrappers） | 两个 openclaw 身份都曾在 `argsPrefix` 里重复 driver 的子命令，`spawn.ts` 直接拼接后得到 `… agent agent …`，被 CLI 拒为 "Too many arguments for this command."。既有测试全部只断言**单个字段**（`argsPrefix === ['agent']`），于是每个测试都通过、唯独真正交给操作系统的 argv 是错的。护栏：`tests/integration/argv-shape.test.ts` 对**每一个内置身份**断言最终 argv（通用不变量：无相邻重复 token；openclaw 引擎的 `agent` 恰好出现一次；`--profile` 必须早于 `agent`） | ✅ 已实现 |
 | D29 | **`src/kernel/types.ts` 仅改注释**（冻结 ABI 的例外，纯文档） | `CommandSpec.argsPrefix` 的示例仍写作 `['agent']` —— 正是 D28 那个 bug 的示范值，留着会继续误导下一个读者。**只改注释，不改任何字段、类型或可选性**，故 ABI 不变、无需版本号变更 | ✅ 已改（本工作流唯一触碰 types.ts 之处） |
 | D30 | **client bundle 必须包装成 `window.__ModuleLoader__.load({ id, factory })`**；`id`、slot 注册 `id`、`registrant` 一律从 `package.json#name` 派生（构建期 `define`，源码里不出现字面量） | 宿主**不是** import 产物再读 exports，而是启动时注册 factory；裸 esbuild CJS 产物全文 0 次 `ModuleLoader`，于是**装不上且静默无 UI**（不报错，因为没人去找它）。字面量则会在改包名时静默失配 | ✅ 已实现（`verify_plugin.py` 11/11 PASS） |
+| D31 | **工具的 `output.schema` 必须声明内核实际返回的每一个字段**；护栏：`tests/tools/probe-schema.test.ts` 把**真实返回值**逐键走过**真实声明的 schema** | `ProbeResult.capabilities` 一直是 registry 返回的字段，而 `agents_probe` 的 `output.schema` 没声明它、同时还开着 `additionalProperties: false` → 内核物化输出时对**每一个身份**抛 `value[0].capabilities is not a declared property`：模型在任何会话里的第一个调用就失败，从模型视角看"没有任何东西可驱动"。单测只把 `execute()` 的返回值拿去断言、**不经物化**，所以 704 个全绿用例也照漏（与 D28 同一形状：断言的不是真正交出去的那个对象）。护栏改走运行时那条路——同一份 schema、同一个返回值 | ✅ 已修（+3 用例） |
 
 ## 任务拆分（3 个并行工作流）
 
@@ -318,9 +319,10 @@ $ python3 /Users/king/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py 
 [verify] PASS: 全部 11 项通过
 ```
 
-`pnpm exec vitest run` → **704 passed / 1 skipped（42 个文件）**（基线 696/1、41 文件；
-新增 8 个用例，零删除、零跳过）；`pnpm exec tsc --noEmit` → 0 错误；
-`pnpm run build` → `lib/index.js` 310.1 KB + `lib/client.js` 59.5 KB（含包装）。
+`pnpm exec vitest run` → **707 passed / 1 skipped（42 passed | 1 skipped 文件）**
+（工作流 G 交回时 704/1、42 文件；本轮新增 3 个用例，零删除、零跳过）；
+`pnpm exec tsc --noEmit` → 0 错误；
+`pnpm run build` → `lib/index.js` 311.2 KB + `lib/client.js` 59.5 KB（含包装）。
 
 **关于校验器的第 9 项（React 保持 external）**：它 grep 的是 `scripts/build.mjs` 里有没有
 `react` / `react/jsx-runtime` / `react-dom` / `react-dom/client` 四个串，而本仓库的 client

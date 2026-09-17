@@ -433,6 +433,23 @@ export function createToolDefinitions(manager: AgentManager) {
             executable: { type: 'string' },
             version: { type: 'string' },
             reason: { type: 'string' },
+            // `ProbeResult.capabilities` — which engine knobs this dialect
+            // supports. The registry has always returned it; this schema did not
+            // declare it, and `additionalProperties: false` turns an undeclared
+            // field into a hard materialization error ("capabilities is not a
+            // declared property"), so `agents_probe` failed for EVERY identity.
+            // Keep this list in sync with `AgentDescriptor['capabilities']`.
+            capabilities: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                resume: { type: 'boolean' },
+                model: { type: 'boolean' },
+                effort: { type: 'boolean' },
+                mcpConfig: { type: 'boolean' },
+                clientTools: { type: 'boolean' },
+              },
+            },
             notes: { type: 'string' },
             health: {
               type: 'object',
@@ -459,11 +476,13 @@ export function createToolDefinitions(manager: AgentManager) {
       const results = await manager.probe(args.refresh === undefined ? {} : { refresh: args.refresh })
       // Spread into mutable JSON arrays: the kernel returns `readonly` views,
       // and `output.schema` materialization must see plain lossless JSON.
-      return results.map(({ models, authMethods, ...rest }) => ({
+      return results.map(({ models, authMethods, capabilities, ...rest }) => ({
         ...rest,
         // `ProbeResult.models` is a readonly view; materialization needs a
         // plain mutable array to satisfy the schema type. Same for the ACP-only
-        // `authMethods`.
+        // `authMethods`, and for `capabilities` (a `readonly` descriptor field
+        // that must reach the schema as a plain object).
+        ...(capabilities === undefined ? {} : { capabilities: { ...capabilities } }),
         ...(models === undefined ? {} : { models: [...models] }),
         ...(authMethods === undefined ? {} : { authMethods: [...authMethods] }),
       }))
