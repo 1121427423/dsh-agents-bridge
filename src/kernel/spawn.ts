@@ -267,6 +267,15 @@ export function signalProcessGroup(
  * killed only when the live process really is the one we spawned. `ps -o
  * lstart=` is the one spelling that works on both macOS and Linux (GNU's
  * `etimes` does not exist in the BSD userland macOS ships).
+ *
+ * RR-MI-12: `lstart` is LOCALIZED. Under `zh_CN.UTF-8` the same `ps` prints
+ * `五  9月/18 03:23:00 2026`, which `Date.parse` cannot read, so the reap lost
+ * its pid-reuse guard on any host that does not happen to run in a locale whose
+ * date V8 can guess (`de_DE.UTF-8` prints `Fr. 18 Sep. …`, which V8 does parse
+ * — by luck, and a locale that moves the month before the day would parse into
+ * a WRONG date, which is worse than failing). The child is therefore pinned to
+ * the C locale: the text this parses is then one fixed format, whatever
+ * language the operator runs the host in.
  */
 export function processStartTimeMs(pid: number): number | undefined {
   let text: string
@@ -275,6 +284,9 @@ export function processStartTimeMs(pid: number): number | undefined {
       encoding: 'utf8',
       timeout: 2_000,
       stdio: ['ignore', 'pipe', 'ignore'],
+      // `LC_ALL` overrides every other `LC_*` category, including the one the
+      // start time is formatted with. Everything else is inherited untouched.
+      env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
     }).trim()
   } catch {
     // A vanished pid, a permission error, or a missing `ps` all mean "cannot

@@ -6,6 +6,7 @@ import {
   POST_EXIT_DRAIN_MS,
   buildArgv,
   processGone,
+  processStartTimeMs,
   spawnDetached,
 } from '../../src/kernel/spawn.ts'
 import { MAX_STREAM_LINE_BYTES, StreamOverflowError } from '../../src/kernel/stream-limits.ts'
@@ -273,5 +274,73 @@ describe('RR-IM-4: the drain path must not leave the group alive', () => {
     expect(exit.code).toBe(0)
     expect(Date.now() - startedAt).toBeLessThan(POST_EXIT_DRAIN_MS)
     expect(processGone(pid!)).toBe(true)
+  })
+})
+
+/**
+ * RR-MI-12 — the orphan reap must not depend on how `ps` writes a date.
+ *
+ * `processStartTimeMs` reads `ps -o lstart=` and hands the text to `Date.parse`.
+ * `lstart` is LOCALIZED: with `LC_ALL=de_DE.UTF-8` the same `ps` prints
+ * `Fr. 18 Sep. 03:23:00 2026` and with `zh_CN.UTF-8` `五  9月/18 03:23:00 2026`
+ * — neither parses, so the reaper silently lost its pid-reuse guard on any host
+ * that does not run in the C locale (a recycled pid then looks unidentifiable,
+ * which is the safe direction, but the recovery it exists for never happens).
+ *
+ * These tests set the AMBIENT locale and read a REAL pid — no fake `ps`: the
+ * oracle is the actual `/bin/ps` on this machine, and the assertion is that the
+ * answer does not move when the operator's language does.
+ */
+describe('RR-MI-12: processStartTimeMs is independent of the locale', () => {
+  /** Runs `fn` with `LC_ALL`/`LANG` forced to a localized value. */
+  async function withLocale(locale: string, fn: () => number | undefined): Promise<number | undefined> {
+    const saved = { LC_ALL: process.env['LC_ALL'], LANG: process.env['LANG'] }
+    process.env['LC_ALL'] = locale
+    process.env['LANG'] = locale
+    try {
+      return fn()
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+  }
+
+  const LOCALES = ['de_DE.UTF-8', 'zh_CN.UTF-8']
+
+  for (const locale of LOCALES) {
+    it(`reads a real pid's start time under ${locale}`, async () => {
+      const started = await withLocale(locale, () => processStartTimeMs(process.pid))
+
+      // The identity the reap depends on: a real epoch, in the past, for the
+      // process we asked about — not `undefined`, which is what an unparsed
+      // localized date used to produce.
+      expect(started).toBeTypeOf('number')
+      expect(Number.isFinite(started)).toBe(true)
+      expect(started!).toBeLessThanOrEqual(Date.now())
+      expect(started!).toBeGreaterThan(Date.now() - 24 * 60 * 60 * 1000)
+    })
+  }
+
+  it('reads the same start time in every locale (negative control: the C-locale answer is unchanged)', async () => {
+    const inC = processStartTimeMs(process.pid)
+    const inGerman = await withLocale('de_DE.UTF-8', () => processStartTimeMs(process.pid))
+    const inChinese = await withLocale('zh_CN.UTF-8', () => processStartTimeMs(process.pid))
+
+    expect(inC).toBeTypeOf('number')
+    expect(inGerman).toBe(inC)
+    expect(inChinese).toBe(inC)
+  })
+
+  it('answers undefined for a pid that is gone, never a guess', () => {
+    // The other half of "language-independent facts": a pid that no longer
+    // exists has no start time, and the reap must not invent one.
+    const dead = spawnDetached({ command: { executable: '/bin/sh' }, args: ['-c', 'exit 0'] })
+    return dead.exited.then(() => {
+      const pid = dead.pid!
+      expect(processGone(pid)).toBe(true)
+      expect(processStartTimeMs(pid)).toBeUndefined()
+    })
   })
 })
