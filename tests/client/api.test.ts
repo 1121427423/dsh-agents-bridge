@@ -233,6 +233,23 @@ describe('createBridgeApi', () => {
     expect(JSON.parse(String(recorded[1]?.init?.body))).toEqual({ refresh: true })
   })
 
+  it('sends the separate `rescan` dimension without disturbing the existing callers (RR-MI-1b)', async () => {
+    // `probe(refresh)` keeps its exact meaning, so every existing caller —
+    // `store.refreshEngines()` above all — is unaffected; the re-walk is a
+    // SECOND, additive flag. A re-scan implies a version refresh (the registry
+    // documents `rescan` as re-resolving too), so both go on the wire.
+    const recorded: Recorded[] = []
+    const api = createBridgeApi(fakeFetch(() => ({ status: 200, body: { ok: true, value: { available: true, results: [], at: 1, cached: false } } }), recorded), API_BASE)
+    await api.probe(undefined, true)
+    expect(JSON.parse(String(recorded[0]?.init?.body))).toEqual({ refresh: true, rescan: true })
+    await api.probe(false, true)
+    expect(JSON.parse(String(recorded[1]?.init?.body))).toEqual({ refresh: true, rescan: true })
+    // A bare refresh must NOT smuggle a re-scan in: the walk is the expensive
+    // part and MI-8 exists precisely to keep `refresh` version-only.
+    await api.probe(true)
+    expect(JSON.parse(String(recorded[2]?.init?.body))).toEqual({ refresh: true })
+  })
+
   it('surfaces a network-level rejection as the "host is gone" case', async () => {
     const api = createBridgeApi((async () => {
       throw new TypeError('Failed to fetch')

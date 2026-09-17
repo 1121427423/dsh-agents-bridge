@@ -246,6 +246,33 @@ describe('host API — method dispatch', () => {
     expect(probes).toBe(3)
     expect(refreshes).toBe(1)
   })
+
+  it('carries the explicit `rescan` verb to the manager and never answers it from cache (RR-MI-1b)', async () => {
+    // "I just installed the app — show it to me" is the ONE thing a 30s panel
+    // cache must not swallow, so a rescan has to reach the manager AND skip
+    // this route's own memo. The manager is the observer: it records every
+    // option object it was handed.
+    const seen: ({ readonly refresh?: boolean; readonly rescan?: boolean } | undefined)[] = []
+    const manager = fakeManager({
+      probe: async opts => {
+        seen.push(opts)
+        return [{ id: 'late', displayName: 'Late Agent', track: 'desktop', family: 'claude', available: true }] as readonly ProbeResult[]
+      },
+    })
+    const handler = makeHandler(manager)
+
+    // Warm the route's cache first: a fresh install must not be invisible
+    // simply because the panel probed a second ago.
+    await call(handler, { url: `${API_PREFIX}/probe`, body: '{}' })
+    const rescanned = await call(handler, { url: `${API_PREFIX}/probe`, body: JSON.stringify({ rescan: true }) })
+
+    expect(seen).toHaveLength(2)
+    expect(seen[1]?.rescan).toBe(true)
+    // `rescan` implies a fresh version pass too, exactly as the registry
+    // documents — the panel gets current versions, not the memoised ones.
+    expect(seen[1]?.refresh).toBe(true)
+    expect((rescanned.body as { value: { cached: boolean } }).value.cached).toBe(false)
+  })
 })
 
 /* -------------------------------------------------------------------------- */

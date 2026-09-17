@@ -107,7 +107,7 @@ function fakeApi(script: {
   readonly failOutput?: boolean
   readonly output?: (sessionId: string, sinceIndex: number) => { readonly nextIndex: number; readonly messages: readonly { index: number; type: string; text?: string; at: number }[]; readonly terminal?: boolean }
 } = {}) {
-  const calls = { status: 0, output: 0, cancel: 0, probe: 0 }
+  const calls = { status: 0, output: 0, cancel: 0, probe: 0, rescan: 0 }
   const api: BridgeApi = {
     async status() {
       calls.status += 1
@@ -129,8 +129,9 @@ function fakeApi(script: {
       calls.cancel += 1
       return { sessionId: 'x', cancelled: true, status: 'running' as const, note: 'Cancellation requested.' }
     },
-    async probe() {
+    async probe(_refresh?: boolean, rescan?: boolean) {
       calls.probe += 1
+      if (rescan === true) calls.rescan += 1
       return { available: true, results: [], at: 1_000, cached: true }
     },
     ...noSettings,
@@ -566,6 +567,28 @@ describe('supervisor store — engines', () => {
 
     await store.refreshEngines()
     expect(calls.probe).toBe(2)
+    store.stop()
+  })
+
+  it('has a SEPARATE re-scan entry point, and Refresh does not smuggle one in (RR-MI-1b)', async () => {
+    // Two different questions with two different costs: "which version does
+    // each engine answer" (Refresh) and "which bundles are installed at all"
+    // (Rescan — a synchronous walk of the bundle roots). Folding the walk into
+    // Refresh is MI-8, and never offering it is RR-MI-1b: an operator who
+    // installs an app while the host runs would have no way to be seen.
+    const clock = fakeClock()
+    const { api, calls } = fakeApi({ sessions: () => [] })
+    const store = makeStore(api, clock)
+    store.start()
+    await settle()
+
+    await store.refreshEngines()
+    expect(calls.probe).toBe(2)
+    expect(calls.rescan).toBe(0)
+
+    await store.rescanEngines()
+    expect(calls.probe).toBe(3)
+    expect(calls.rescan).toBe(1)
     store.stop()
   })
 })

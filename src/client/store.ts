@@ -74,6 +74,15 @@ export interface SupervisorStore {
   readonly refresh: () => Promise<void>
   /** Re-probe engines with the expensive `refresh` flag. */
   readonly refreshEngines: () => Promise<void>
+  /**
+   * Re-probe engines AND re-walk the app-bundle roots, so an app installed
+   * while the host has been running becomes visible (RR-MI-1b).
+   *
+   * Separate from {@link refreshEngines} on purpose: the walk is a synchronous
+   * filesystem sweep, so it is an explicit operator action rather than
+   * something every version re-check pays for (MI-8).
+   */
+  readonly rescanEngines: () => Promise<void>
   /** Open the transcript view for a session and load its first events. */
   readonly openSession: (sessionId: string) => Promise<void>
   /** Close the transcript view (back to the list). */
@@ -298,11 +307,11 @@ export function createSupervisorStore(
     }
   }
 
-  async function loadEngines(refresh: boolean): Promise<void> {
+  async function loadEngines(refresh: boolean, rescan = false): Promise<void> {
     engines = { ...engines, loading: true }
     emit()
     try {
-      const result = await api.probe(refresh)
+      const result = await api.probe(refresh, rescan)
       engines = { loading: false, results: result.results, available: result.available, cached: result.cached }
     } catch (caught) {
       engines = {
@@ -362,6 +371,10 @@ export function createSupervisorStore(
 
     async refreshEngines() {
       await loadEngines(true)
+    },
+
+    async rescanEngines() {
+      await loadEngines(true, true)
     },
 
     async openSession(sessionId) {

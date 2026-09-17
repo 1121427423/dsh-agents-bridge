@@ -86,10 +86,11 @@ function engineRow(result: ClientProbeResult, translator: Translator): ReactElem
 }
 
 /** The engine availability strip. */
-function EngineStrip({ snapshot, translator, onRefresh }: {
+function EngineStrip({ snapshot, translator, onRefresh, onRescan }: {
   readonly snapshot: SupervisorSnapshot
   readonly translator: Translator
   readonly onRefresh: () => void
+  readonly onRescan: () => void
 }): ReactElement {
   const summary = useMemo(() => summarizeEngines(snapshot.engines.results), [snapshot.engines.results])
   const ok = summary.total > 0 && summary.available > 0
@@ -108,9 +109,24 @@ function EngineStrip({ snapshot, translator, onRefresh }: {
       createElement('span', null, `${translator.t('enginesTitle')} · ${headline}`),
       summary.withModels > 0 ? createElement('span', null, ` · ${translator.t('enginesModels', { n: summary.withModels })}`) : null,
       createElement('span', { className: `${ROOT_CLASS}__spacer` }),
-      // Re-probing is the EXPENSIVE path (`refresh: true` re-resolves
-      // executables), so it is an explicit human action, never automatic.
+      // TWO verbs, deliberately not one button. Re-probing versions is the
+      // cheap half (and the expensive-looking path: `refresh` re-resolves
+      // executables), while RE-WALKING the bundle roots is a synchronous
+      // filesystem sweep whose only purpose is to notice an app installed since
+      // the host started. Folding them together would either tax every refresh
+      // with the walk (MI-8) or leave the walk undiscoverable (RR-MI-1b), so
+      // the walk gets its own labelled button and its reason in the tooltip.
       createElement('button', { type: 'button', className: `${ROOT_CLASS}__btn`, onClick: onRefresh }, translator.t('refresh')),
+      createElement(
+        'button',
+        {
+          type: 'button',
+          className: `${ROOT_CLASS}__btn`,
+          title: translator.t('rescanInstallsTitle'),
+          onClick: onRescan,
+        },
+        translator.t('rescanInstalls'),
+      ),
     ),
     snapshot.engines.error === undefined
       ? null
@@ -375,6 +391,7 @@ export function SupervisorPanel({ store, translator }: PanelProps): ReactElement
       snapshot,
       translator,
       onRefresh: () => void store.refreshEngines(),
+      onRescan: () => void store.rescanEngines(),
     }),
     snapshot.error !== undefined && snapshot.loaded
       ? createElement(

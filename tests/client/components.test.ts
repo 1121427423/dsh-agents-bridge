@@ -286,6 +286,26 @@ describe('SupervisorPanel — every state is readable', () => {
     store.stop()
   })
 
+  it('offers a re-scan that is DISTINCT from Refresh, and explains what it re-walks (RR-MI-1b)', async () => {
+    // The operator's problem: "I installed the app while DSH was running and
+    // the panel still cannot see it". Refresh only re-probes versions, so the
+    // re-walk needs its own, explicitly-labelled entry point — one button that
+    // silently did two jobs would leave the expensive one undiscoverable.
+    const store = makeStore({ sessions: () => [] })
+    const { tree } = await renderPanel(store)
+    const buttons = findAll(tree, 'button').map(button => ({
+      label: button.props.children.map(child => (typeof child === 'string' ? child : '')).join(''),
+      title: button.props.title,
+    }))
+    expect(buttons.map(button => button.label)).toContain(DICTS.en.refresh)
+    // The re-scan is its own button, and its consequence — a filesystem walk
+    // that is slower than Refresh — is stated where the operator hovers.
+    const rescan = buttons.find(button => button.label === DICTS.en.rescanInstalls)
+    expect(rescan).toBeDefined()
+    expect(rescan?.title).toBe(DICTS.en.rescanInstallsTitle)
+    store.stop()
+  })
+
   it('renders the incremental transcript view once a session is opened', async () => {
     const store = makeStore({
       sessions: () => [session('a', 'running')],
