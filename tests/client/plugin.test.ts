@@ -20,7 +20,18 @@
 
 import { describe, expect, it } from 'vitest'
 
-import { INDICATOR_ID, INDICATOR_SLOT, PANEL_ID, PANEL_SLOT, apply, inject, localeOf, type SlotsService } from '../../src/client/index.ts'
+import {
+  INDICATOR_ID,
+  INDICATOR_SLOT,
+  PANEL_ID,
+  PANEL_SLOT,
+  SETTINGS_NAMESPACE,
+  SETTINGS_SLOT,
+  apply,
+  inject,
+  localeOf,
+  type SlotsService,
+} from '../../src/client/index.ts'
 import { STYLE_TAG_ID } from '../../src/client/styles.ts'
 
 /* -------------------------------------------------------------------------- */
@@ -30,6 +41,8 @@ import { STYLE_TAG_ID } from '../../src/client/styles.ts'
 interface Registration {
   readonly name: string
   readonly id?: string | undefined
+  /** Present only on a KEYED slot (the settings card): the namespace it edits. */
+  readonly key?: string | undefined
   readonly order?: number | undefined
 }
 
@@ -50,7 +63,12 @@ function fakeSlots(options: { readonly available?: readonly string[] } = {}) {
       }
     },
     register(regOptions) {
-      registered.push({ name: regOptions.name, id: regOptions.id, order: regOptions.order })
+      registered.push({
+        name: regOptions.name,
+        id: regOptions.id,
+        ...(regOptions.key === undefined ? {} : { key: regOptions.key }),
+        order: regOptions.order,
+      })
       return () => {
         disposed += 1
       }
@@ -129,7 +147,7 @@ describe('client half — graceful degradation', () => {
     const { slots, registered, injected } = fakeSlots({ available: [INDICATOR_SLOT] })
     const { ctx, disposeAll } = fakeContext({ slots })
     expect(() => apply(ctx)).not.toThrow()
-    expect(injected).toEqual([PANEL_SLOT, INDICATOR_SLOT])
+    expect(injected).toEqual([PANEL_SLOT, SETTINGS_SLOT, INDICATOR_SLOT])
     expect(registered.map(entry => entry.name)).toEqual([INDICATOR_SLOT])
     expect(registered[0]?.id).toBe(INDICATOR_ID)
     disposeAll()
@@ -143,6 +161,18 @@ describe('client half — graceful degradation', () => {
       { name: PANEL_SLOT, id: PANEL_ID, order: 30 },
       { name: INDICATOR_SLOT, id: INDICATOR_ID, order: 40 },
     ])
+    disposeAll()
+  })
+
+  it('registers the settings card KEYED by the namespace the host dispatches by', () => {
+    // A keyed slot is only dispatched for namespaces the host serves, so the key
+    // must be the settings namespace — the same string the Node half registers
+    // with the settings service. A card registered without it renders NOTHING,
+    // silently, which is the failure this assertion exists for.
+    const { slots, registered } = fakeSlots({ available: [SETTINGS_SLOT] })
+    const { ctx, disposeAll } = fakeContext({ slots })
+    apply(ctx)
+    expect(registered).toEqual([{ name: SETTINGS_SLOT, id: undefined, key: SETTINGS_NAMESPACE, order: undefined }])
     disposeAll()
   })
 

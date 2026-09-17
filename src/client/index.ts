@@ -45,12 +45,31 @@ import { PACKAGE_NAME } from './identity.ts'
 import { createTranslator, DICTS, detectLocaleTag, LOCALE_NS, localeTagOf, type Translator } from './i18n.ts'
 import { Indicator } from './indicator.ts'
 import { SupervisorPanel } from './panel.ts'
+import { SettingsCard } from './settings.ts'
 import { createSupervisorStore, type SupervisorStore } from './store.ts'
 import { DEFAULT_POLL_POLICY } from './util.ts'
 import { injectStyles } from './styles.ts'
+import { SETTINGS_NAMESPACE } from '../namespace.ts'
 
 /** Slot names this half registers into. See `docs/client-half-slots.md` §2. */
 export const PANEL_SLOT = 'sidebar.right.pane.tab'
+/**
+ * DSH's plugin-configuration card slot, KEYED by the settings namespace.
+ *
+ * The first-party tab enumerates the namespaces the host serves and dispatches
+ * this slot once per namespace ("a served namespace no card claims renders
+ * nothing"), so registering the namespace on the Node half is necessary but NOT
+ * sufficient — this registration is what puts a card on screen.
+ */
+export const SETTINGS_SLOT = 'settings.plugin.item'
+
+/**
+ * Re-exported so the artifact carries the namespace as part of its public
+ * surface: `tests/integration/client-bundle.test.ts` evaluates the BUILT bundle
+ * and compares the card's slot key against this value, which is the only way to
+ * assert the two halves agree without a second literal in the test.
+ */
+export { SETTINGS_NAMESPACE }
 export const INDICATOR_SLOT = 'conversation.session.header.utilities'
 
 /**
@@ -156,8 +175,11 @@ export function apply(ctx: Context): void {
   }
 
   const translator = createTranslator(detectLocaleTag())
+  // ONE api instance, shared by the panel's store and the settings card: two
+  // instances would mean two request paths with two failure stories.
+  const api = createBridgeApi()
   const store: SupervisorStore = createSupervisorStore(
-    createBridgeApi(),
+    api,
     translator,
     { policy: DEFAULT_POLL_POLICY, autoRefresh: true },
     {
@@ -210,6 +232,16 @@ export function apply(ctx: Context): void {
         ),
       )
 
+      // Registered under the settings NAMESPACE (no `id`): that key is what the
+      // first-party tab dispatches by, and it is the same string the Node half
+      // registered with the settings service (`src/namespace.ts`).
+      const disposeSettings = slots.inject(SETTINGS_SLOT, () =>
+        slots.register(
+          { name: SETTINGS_SLOT, key: SETTINGS_NAMESPACE, registrant: PACKAGE_NAME },
+          (() => createElement(SettingsCard, { api, translator })) as never,
+        ),
+      )
+
       const disposeIndicator = slots.inject(INDICATOR_SLOT, () =>
         slots.register(
           { name: INDICATOR_SLOT, id: INDICATOR_ID, order: 40, registrant: PACKAGE_NAME },
@@ -224,6 +256,7 @@ export function apply(ctx: Context): void {
 
       return () => {
         disposePanel()
+        disposeSettings()
         disposeIndicator()
         offVisibility()
         localeDisposer?.()

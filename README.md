@@ -127,7 +127,31 @@ agents-bridge:
   defaultCwd: /Users/king/BigModel/LLM       # agents_run 不传 cwd 时的默认工作目录
 ```
 
-### 4.1 P2 加固项（都可选，不配 = 与之前完全一致）
+### 4.1 在 DSH 设置界面里改（设置 → 插件 → 可配置）
+
+上表里的一部分值不必手改 YAML：本插件注册了一个 settings 命名空间
+（`dsh-agents-bridge`，即包名），DSH 的「设置 → 插件」里会出现一张属于它的卡片。
+
+| 字段 | 类型 | 生效时机 | 说明 |
+|---|---|---|---|
+| `defaultCwd` | 字符串 | **立即**（每次 run 都读，`src/kernel/manager.ts:401`） | `agents_run` 不传 `cwd` 时的默认目录 |
+| `maxConcurrent` | 正整数 | 下次加载（构造 manager 时快照进运行策略，`manager.ts:160-168`） | 同时运行的会话上限，超了直接拒绝、不排队 |
+| `allowedCwd` / `deniedCwd` | 字符串列表 | 下次加载 | `cwd` 白名单 / 黑名单（`realpath` 后比较） |
+| `allowedAgents` | 字符串列表 | 下次加载 | 允许被驱动的身份白名单 |
+
+几条刻意的规矩：
+
+- **保存后写进 `$DSH_HOME/settings.yaml` 的 `dsh-agents-bridge:` 节**，与手写 config 叠加；
+  卡片上标着每个字段是「立即生效」还是「下次加载生效」——不写清楚的话，一个不生效的开关
+  和一个生效的开关看起来一模一样。
+- **留空 = 跟随内核默认或部署配置**，插件不在 schema 里声明任何默认值：默认值只在代码里
+  定义一次，设置面板抄一份就会两边漂移（有一条测试专门盯这件事）。
+- **恢复默认**只清除该字段的用户层条目，让它回落到部署配置。
+- **本部署没挂设置服务时**卡片照常显示，但标明不可写，保存会被**拒绝**（不是静默成功）。
+- 写入只走 settings 服务的 scope（按命名空间串行 + revision 栅），插件自己从不直接改
+  `settings.yaml`。
+
+### 4.2 P2 加固项（都可选，不配 = 与之前完全一致）
 
 ```yaml
 agents-bridge:
@@ -160,7 +184,7 @@ agents-bridge:
 - **`connect` 模式未实现**：`mode` 参数收 `spawn` | `connect`，但只有 `spawn` 有实现。拨已运行实例（openclaw gateway / WorkBuddy sidecar）是 P4。
 - **ACP driver 已实现（D27）**：`ProtocolFamily += 'acp'`（ABI v4）+ `src/drivers/acp.ts` + CLI 轨道身份 `codebuddy-code-acp`（真机 2.151.0 端到端跑通）。一条 ACP entry 解锁 multica 里 12 家说 ACP 的 CLI。
 - **`agents_usage` 的 token 记账规则**：`totalTokens` **只加四个互斥桶**（input / output / cache read / cache write）。`reasoningTokens` 是**披露项不是桶** —— codex 把它报成 `output_tokens` 的**子集**，加进去就是重复计数，所以它单列并标注「已含在 output 内」。同一个会话没有终态结果时用量按 0 计并标 `usageReported: false`，零不能被读成「这次没花钱」。
-- **安全**：spawn 任意 CLI = 任意代码执行。这仍然是**设计前提**，没有变：v1 依赖 DSH 自身的 approval / sandbox 语义。P2 补上的是 `cwd` / agent 白名单与并发上限（§4.1），它们的作用域是「防误操作」——防止模型手滑把 `cwd` 指到 `/`、或一次点起十几个 agent 树把机器打死。它们**不是**沙箱：被委派的 agent 一旦拿到写文件的工具，仍然可以走出 `cwd`；真正拦这件事的只有 OS 层的 approval / sandbox。注意被委派的 agent **看不到本对话**，prompt 必须自包含（系统提示段已告知模型）。
+- **安全**：spawn 任意 CLI = 任意代码执行。这仍然是**设计前提**，没有变：v1 依赖 DSH 自身的 approval / sandbox 语义。P2 补上的是 `cwd` / agent 白名单与并发上限（§4.2），它们的作用域是「防误操作」——防止模型手滑把 `cwd` 指到 `/`、或一次点起十几个 agent 树把机器打死。它们**不是**沙箱：被委派的 agent 一旦拿到写文件的工具，仍然可以走出 `cwd`；真正拦这件事的只有 OS 层的 approval / sandbox。注意被委派的 agent **看不到本对话**，prompt 必须自包含（系统提示段已告知模型）。
 
 ---
 

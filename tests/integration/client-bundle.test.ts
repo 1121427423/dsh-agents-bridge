@@ -267,24 +267,34 @@ describe('lib/client.js — host module-table contract', () => {
 /* -------------------------------------------------------------------------- */
 
 describe('lib/client.js — slot registrations carry the package name', () => {
-  it('registers both slots with this package as id/registrant', () => {
+  it('registers every slot with this package as id/registrant', () => {
     const { factory } = registeredFactory()
     const module = factory(hostRequire().require)
-    const { slots, registered } = recordingSlots([PANEL_SLOT, INDICATOR_SLOT])
+    const settingsSlot = module.SETTINGS_SLOT as string
+    const { slots, registered } = recordingSlots([PANEL_SLOT, settingsSlot, INDICATOR_SLOT])
     const { ctx, disposeAll } = fakeContext({ slots })
 
     module.apply(ctx)
     disposeAll()
 
-    expect(registered.map(entry => entry.name)).toEqual([PANEL_SLOT, INDICATOR_SLOT])
+    expect(registered.map(entry => entry.name)).toEqual([PANEL_SLOT, settingsSlot, INDICATOR_SLOT])
+
+    // The settings card is the ONE registration that must be keyed, and keyed by
+    // the settings namespace: the first-party tab enumerates the namespaces the
+    // host serves and dispatches `settings.plugin.item` per namespace, so a card
+    // registered without a key (or under a drifted string) renders NOTHING while
+    // every other assertion here still passes. That is the silent-missing-UI
+    // failure this file exists for.
+    const settings = registered.find(entry => entry.name === settingsSlot)
+    expect(settings?.key).toBe(module.SETTINGS_NAMESPACE)
+    expect(settings?.key).toBe(pkg.name)
+    expect(settings?.id).toBeUndefined()
+
     // The host attributes a slot to the plugin named by `registrant`, and
     // dedupes on `id`; both must be the package name, not a stale literal.
-    for (const entry of registered) {
-      expect(entry.registrant).toBe(pkg.name)
-      expect(entry.id?.startsWith(pkg.name)).toBe(true)
-    }
+    for (const entry of registered) expect(entry.registrant).toBe(pkg.name)
     expect(registered[0]?.id).toBe(pkg.name)
-    expect(registered[1]?.id).toBe(`${pkg.name}:indicator`)
+    expect(registered[2]?.id).toBe(`${pkg.name}:indicator`)
   })
 
   it('degrades to nothing (no throw) when the host has no slot registry', () => {

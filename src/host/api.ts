@@ -40,6 +40,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AgentManager, AgentRunStatus, BridgeLogger, ProbeResult, SessionSnapshot } from '../kernel/types.ts'
+import type { SettingsPort, SettingsView, SettingsWriteResult } from '../settings.ts'
 
 /** Path prefix this plugin owns. Method names are the suffixes. */
 export const API_PREFIX = '/agents-bridge/api'
@@ -335,6 +336,14 @@ export interface HostApiDeps {
   /** Absent when the host has no web runtime — the fence then trusts loopback only. */
   readonly webRuntime?: WebRuntimeFace | undefined
   readonly manager: AgentManager
+  /**
+   * The plugin's settings port, when the entry wired one.
+   *
+   * Optional so a host API can be constructed in a test that has no settings
+   * service; the route then answers a read-only view that says exactly that,
+   * instead of 404-ing a surface the client half always asks for.
+   */
+  readonly settings?: SettingsPort | undefined
   readonly logger: BridgeLogger
   /** Where the probe cache's freshness is decided; injectable for tests. */
   readonly now?: (() => number) | undefined
@@ -357,6 +366,27 @@ export function createApiHandlers(deps: HostApiDeps): Record<string, (payload: R
   const { manager } = deps
   const now = deps.now ?? (() => Date.now())
   const probeCacheMs = deps.probeCacheMs ?? DEFAULT_PROBE_CACHE_MS
+
+  /**
+   * The settings port, or an honest stand-in.
+   *
+   * The stand-in exists because the client half always asks for `settings`: a
+   * 404 would be rendered as "the host does not implement this", which is a
+   * different (and wrong) story from "this host API was mounted without a
+   * settings port".
+   */
+  const unwiredSettings: SettingsPort = {
+    namespace: 'agents-bridge',
+    read: () => ({
+      namespace: 'agents-bridge',
+      writable: false,
+      reason: 'this host API was mounted without a settings port, so nothing can be read or persisted here',
+      fields: [],
+    }),
+    write: async () => ({ ok: false, error: 'this host API was mounted without a settings port' }),
+    reset: async () => ({ ok: false, error: 'this host API was mounted without a settings port' }),
+  }
+  const settingsPort = (): SettingsPort => deps.settings ?? unwiredSettings
   /** Last successful probe + when it was produced. Serves the non-refresh path. */
   let probeCache: { value: ProbePayload } | undefined
 
@@ -477,6 +507,43 @@ export function createApiHandlers(deps: HostApiDeps): Record<string, (payload: R
       }
       probeCache = { value }
       return value
+    },
+
+    /**
+     * `settings` — the plugin's own settings namespace, as a form needs it.
+     *
+     * Read-only and cheap (no I/O): the values in force, which of them the user
+     * layer overrides, and — per field — whether saving takes effect immediately
+     * or from the next plugin load. That last column is why this route exists
+     * instead of the card rendering a bare form: a knob whose effect is not
+     * stated is a knob that lies.
+     *
+     * It answers even when no settings provider is mounted (`writable: false`
+     * plus the reason), so the card can explain the deployment instead of showing
+     * an empty box.
+     */
+    async settings(): Promise<SettingsView> {
+      return settingsPort().read()
+    },
+
+    /**
+     * `settings-write` — persist a patch into the user layer, or reset a field.
+     *
+     * The only write path: this route calls the settings SCOPE, which merges into
+     * the user layer, serializes per namespace and is revision-gated by the
+     * provider. It never touches `settings.yaml` itself and never widens a
+     * value's type, and it answers a refusal (`ok: false` plus the rule that was
+     * broken) instead of throwing — a form has to be able to show the reason.
+     */
+    async 'settings-write'(payload): Promise<SettingsWriteResult> {
+      const port = settingsPort()
+      const field = payload['field']
+      if (typeof field === 'string' && field !== '') return port.reset(field)
+      const patch = payload['patch']
+      if (patch === undefined || patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
+        return { ok: false, error: 'settings-write needs a `patch` object or a `field` to reset' }
+      }
+      return port.write(patch as Record<string, unknown>)
     },
   }
 }

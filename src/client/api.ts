@@ -180,11 +180,84 @@ export function normalizeProbe(raw: unknown): ClientProbeResult | undefined {
  * The client-side API face. Every method resolves or throws an {@link ApiError};
  * nothing here touches the DOM.
  */
+/**
+ * One settings field as the card renders it.
+ *
+ * `effect` is not decoration: `live` means saving changes the next run, `reload`
+ * means the value is snapshotted when the manager is built and therefore applies
+ * from the next plugin load. The card prints it; hiding it would make a
+ * do-nothing switch look like a working one.
+ */
+export interface ClientSettingField {
+  readonly key: string
+  readonly kind: 'string' | 'natural' | 'strings'
+  readonly effect: 'live' | 'reload'
+  readonly reason: string
+  readonly value: string | number | readonly string[] | undefined
+  readonly overridden: boolean
+}
+
+/** The whole namespace as the card receives it. */
+export interface ClientSettingsView {
+  readonly namespace: string
+  readonly writable: boolean
+  readonly reason?: string
+  readonly fields: readonly ClientSettingField[]
+}
+
+/** A save or reset either landed (with the new state) or was refused, with a reason. */
+export type ClientSettingsWriteResult =
+  | { readonly ok: true; readonly value: ClientSettingsView }
+  | { readonly ok: false; readonly error: string }
+
+/** Normalize one field off the wire; an unknown `kind` is dropped, never guessed. */
+function normalizeSettingField(raw: unknown): ClientSettingField | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const value = raw as Record<string, unknown>
+  const key = value['key']
+  const kind = value['kind']
+  if (typeof key !== 'string') return undefined
+  if (kind !== 'string' && kind !== 'natural' && kind !== 'strings') return undefined
+  const rawValue = value['value']
+  return {
+    key,
+    kind,
+    effect: value['effect'] === 'reload' ? 'reload' : 'live',
+    reason: typeof value['reason'] === 'string' ? value['reason'] : '',
+    value: Array.isArray(rawValue)
+      ? rawValue.filter((entry): entry is string => typeof entry === 'string')
+      : typeof rawValue === 'string' || typeof rawValue === 'number'
+        ? rawValue
+        : undefined,
+    overridden: value['overridden'] === true,
+  }
+}
+
+/** Normalize a settings view; a malformed body yields an empty, explained view. */
+export function normalizeSettings(raw: unknown): ClientSettingsView {
+  const value = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {}
+  const reason = value['reason']
+  return {
+    namespace: typeof value['namespace'] === 'string' ? value['namespace'] : 'agents-bridge',
+    writable: value['writable'] === true,
+    ...(typeof reason === 'string' ? { reason } : {}),
+    fields: Array.isArray(value['fields'])
+      ? value['fields'].map(normalizeSettingField).filter((field): field is ClientSettingField => field !== undefined)
+      : [],
+  }
+}
+
 export interface BridgeApi {
   status(): Promise<{ readonly sessions: readonly ClientSession[]; readonly concurrency: { readonly running: number; readonly limit: number }; readonly now: number }>
   output(sessionId: string, sinceIndex: number, limit?: number): Promise<ClientOutputPayload>
   cancel(sessionId: string, reason?: string): Promise<{ readonly sessionId: string; readonly cancelled: boolean; readonly status: ClientRunStatus; readonly note: string }>
   probe(refresh?: boolean): Promise<{ readonly available: boolean; readonly results: readonly ClientProbeResult[]; readonly at: number; readonly cached: boolean }>
+  /** The plugin's own settings namespace, as the settings card needs it. */
+  settings(): Promise<ClientSettingsView>
+  /** Persist a patch into the settings user layer (the only write path). */
+  settingsWrite(patch: Readonly<Record<string, unknown>>): Promise<ClientSettingsWriteResult>
+  /** Clear one field from the user layer so it falls back to the deployment value. */
+  settingsReset(field: string): Promise<ClientSettingsWriteResult>
 }
 
 /** How long a request may hang before it is treated as a dead host. */
@@ -296,6 +369,26 @@ export function createBridgeApi(
         at: typeof value['at'] === 'number' ? value['at'] : Date.now(),
         cached: value['cached'] === true,
       }
+    },
+
+    async settings() {
+      return normalizeSettings(await call('settings', {}))
+    },
+
+    async settingsWrite(patch) {
+      // The envelope's `value` is the write ANSWER, not a settings view, so this
+      // one reads the raw body rather than reusing `normalizeSettings`.
+      const value = (await call('settings-write', { patch })) as Record<string, unknown>
+      return value['ok'] === true
+        ? { ok: true, value: normalizeSettings(value['value']) }
+        : { ok: false, error: typeof value['error'] === 'string' ? value['error'] : 'the save was refused' }
+    },
+
+    async settingsReset(field) {
+      const value = (await call('settings-write', { field })) as Record<string, unknown>
+      return value['ok'] === true
+        ? { ok: true, value: normalizeSettings(value['value']) }
+        : { ok: false, error: typeof value['error'] === 'string' ? value['error'] : 'the reset was refused' }
     },
   }
 }

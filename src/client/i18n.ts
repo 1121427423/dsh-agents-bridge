@@ -84,6 +84,25 @@ export interface Dict {
   readonly tokens: string
   /** Shown where a usage figure would go while the engine has reported none. */
   readonly instantaneous: string
+  /* ── settings card (DSH 设置 → 插件) ─────────────────────────────────── */
+  readonly settingsTitle: string
+  readonly settingsIntro: string
+  readonly settingsSave: string
+  readonly settingsSaving: string
+  readonly settingsSaved: string
+  readonly settingsReset: string
+  readonly settingsOverridden: string
+  readonly settingsInherited: string
+  readonly settingsEffectLive: string
+  readonly settingsEffectReload: string
+  readonly settingsReadOnly: string
+  readonly settingsLoadFailed: string
+  readonly settingsListsHint: string
+  readonly settingsFieldDefaultCwd: string
+  readonly settingsFieldMaxConcurrent: string
+  readonly settingsFieldAllowedCwd: string
+  readonly settingsFieldDeniedCwd: string
+  readonly settingsFieldAllowedAgents: string
 }
 
 /** Simplified Chinese. */
@@ -150,6 +169,24 @@ const zh: Dict = {
   stepBack: '返回',
   tokens: 'token',
   instantaneous: 'token 未上报',
+  settingsTitle: '监督桥设置',
+  settingsIntro: '这些值只影响本插件；留空即跟随内核默认或部署配置。',
+  settingsSave: '保存',
+  settingsSaving: '保存中…',
+  settingsSaved: '已保存',
+  settingsReset: '恢复默认',
+  settingsOverridden: '已被用户覆盖',
+  settingsInherited: '跟随部署配置',
+  settingsEffectLive: '立即生效',
+  settingsEffectReload: '下次加载生效',
+  settingsReadOnly: '本部署未挂载设置服务，无法保存',
+  settingsLoadFailed: '读取设置失败',
+  settingsListsHint: '多个值用换行或逗号分隔',
+  settingsFieldDefaultCwd: '默认工作目录',
+  settingsFieldMaxConcurrent: '最大并发会话数',
+  settingsFieldAllowedCwd: '允许的工作目录白名单',
+  settingsFieldDeniedCwd: '禁止的工作目录',
+  settingsFieldAllowedAgents: '允许的 agent 白名单',
 }
 
 /** English. */
@@ -216,6 +253,24 @@ const en: Dict = {
   stepBack: 'Back',
   tokens: 'tokens',
   instantaneous: 'usage not reported',
+  settingsTitle: 'Bridge settings',
+  settingsIntro: 'These values affect this plugin only; leaving one empty means "follow the kernel default or the deployment config".',
+  settingsSave: 'Save',
+  settingsSaving: 'Saving…',
+  settingsSaved: 'Saved',
+  settingsReset: 'Reset to default',
+  settingsOverridden: 'overridden by user',
+  settingsInherited: 'from deployment config',
+  settingsEffectLive: 'takes effect now',
+  settingsEffectReload: 'takes effect on next load',
+  settingsReadOnly: 'this deployment mounted no settings service, so nothing can be saved',
+  settingsLoadFailed: 'could not read settings',
+  settingsListsHint: 'separate values with newlines or commas',
+  settingsFieldDefaultCwd: 'Default working directory',
+  settingsFieldMaxConcurrent: 'Max concurrent sessions',
+  settingsFieldAllowedCwd: 'Allowed working directories',
+  settingsFieldDeniedCwd: 'Denied working directories',
+  settingsFieldAllowedAgents: 'Allowed agent ids',
 }
 
 /** Both dictionaries, keyed by the locale tag the host uses. */

@@ -29,6 +29,7 @@ import { installDriverRuntime } from './integrate.ts'
 import { createLogger } from './kernel/logger.ts'
 import { createAgentManager } from './kernel/manager.ts'
 import type { AgentDescriptor, AgentId, BridgeLogger, ManagerOptions } from './kernel/types.ts'
+import { installSettings, settingsEntryFrom, type MutableManagerOptions } from './settings.ts'
 import { TOOL_NAMES, createToolDefinitions } from './tools/definitions.ts'
 import { registerTools } from './tools/register.ts'
 import { HELLO_COMMAND_NAME, registerSmokeCommand } from './tools/smoke.ts'
@@ -117,7 +118,20 @@ export function apply(ctx: Context, config: Config = {}): void {
   // resource this fiber owns (see src/integrate.ts).
   installDriverRuntime(config.graceMs)
 
-  const managerOptions: ManagerOptions = {
+  /**
+   * The manager options object, kept MUTABLE on purpose.
+   *
+   * The settings namespace below resolves to `schema ← this composition entry ←
+   * user layer`, and its values reach the kernel by writing into THIS object:
+   * the manager captured it at construction, and fields it reads per call
+   * (`options.defaultCwd`, `manager.ts:401`) therefore change the moment a user
+   * saves. The same object is what makes the other knobs meaningful too — they
+   * are snapshotted into the run policy when the manager is built
+   * (`manager.ts:160-168`), so their saved value applies from the next plugin
+   * load. Which is which is declared per field in `src/settings.ts` and rendered
+   * by the card; a switch that does nothing would be worse than no switch.
+   */
+  const managerOptions: MutableManagerOptions = {
     logger,
     // `createBackend` is the seam that keeps the kernel free of driver imports:
     // the kernel asks for a family, the entry decides what implements it.
@@ -132,6 +146,13 @@ export function apply(ctx: Context, config: Config = {}): void {
     ...(config.maxConcurrent === undefined ? {} : { maxConcurrent: config.maxConcurrent }),
     ...(config.graceMs === undefined ? {} : { graceMs: config.graceMs }),
   }
+
+  // BEFORE the manager is built: when the host's settings service is already up,
+  // `ctx.inject` fires synchronously and the resolved user layer is in place for
+  // construction. When it mounts later, the composition entry is what the manager
+  // starts with and the resolved values arrive on the next change (matching the
+  // per-field effect declared above).
+  const settings = installSettings(ctx, managerOptions, settingsEntryFrom(config))
 
   const manager = createAgentManager(managerOptions)
   const definitions = createToolDefinitions(manager)
@@ -215,6 +236,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           webServer,
           ...(webRuntime === undefined ? {} : { webRuntime }),
           manager,
+          settings,
           logger,
         }),
       'agents-bridge.host-api()',
