@@ -26,6 +26,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { createBackend } from './drivers/index.ts'
 import { attachHostApi, type WebRuntimeFace, type WebServerFace } from './host/api.ts'
 import { installDriverRuntime } from './integrate.ts'
+import { createJobRegistrar, type JobSeat, type JobsFace } from './host/jobs.ts'
 import { createLogger } from './kernel/logger.ts'
 import { createAgentManager } from './kernel/manager.ts'
 import type { AgentDescriptor, AgentId, BridgeLogger, ManagerOptions } from './kernel/types.ts'
@@ -155,7 +156,16 @@ export function apply(ctx: Context, config: Config = {}): void {
   const settings = installSettings(ctx, managerOptions, settingsEntryFrom(config))
 
   const manager = createAgentManager(managerOptions)
-  const definitions = createToolDefinitions(manager)
+  /**
+   * The completion-notice seam, kept MUTABLE for the same reason
+   * `managerOptions` is: the `jobs` service is a loader row like any other and
+   * is frequently NOT up yet when this plugin applies, so the tool definitions
+   * have to be built before the registry they will use exists. The scope below
+   * fills this seat in (and empties it again on unload); `agents_run` reads it
+   * per call, so a run started in either state behaves correctly.
+   */
+  const jobSeat: JobSeat = {}
+  const definitions = createToolDefinitions(manager, jobSeat)
   // Identities the CONFIG names (built-ins are the kernel registry's business).
   // Rendered into the prompt so the model knows the deployment's own ids, while
   // still being told to confirm them with agents_probe.
@@ -246,6 +256,43 @@ export function apply(ctx: Context, config: Config = {}): void {
       disposeApi()
     }
   })
+
+  /**
+   * Completion notices live on the same optional-service footing as the HTTP API
+   * above, and for the same reason (D16): `jobs` is a loader row that is usually
+   * NOT up yet when this plugin applies, and declaring it in `inject` would mark
+   * the whole plugin INACTIVE on every host without one — costing the nine tools
+   * in exchange for a notice. Scope-injected instead, so a host with no job
+   * registry keeps every tool and simply gets no `jobId` back from `agents_run`.
+   *
+   * `createJobRegistrar` attaches the controller the registry requires before any
+   * `start` can be accepted; the disposer below detaches it and empties the seat,
+   * so a reload cannot leave `agents_run` holding a registrar whose registry is
+   * gone.
+   */
+  let jobSeatFilled = false
+  ctx.inject(['jobs'], (scoped) => {
+    const jobs = scoped.get('jobs') as JobsFace | undefined
+    if (jobs === undefined) return
+    const registrar = createJobRegistrar(jobs, logger)
+    jobSeat.registrar = registrar
+    jobSeatFilled = true
+    scoped.effect(
+      () => () => {
+        jobSeatFilled = false
+        if (jobSeat.registrar === registrar) jobSeat.registrar = undefined
+        registrar.dispose()
+      },
+      'agents-bridge.jobs()',
+    )
+  })
+
+  // Same honesty rule as the panel line below: what is knowable is that the
+  // service is not up YET, never that this host lacks one. The definitive line
+  // is `session completion notices are on` from `createJobRegistrar`.
+  if (!jobSeatFilled) {
+    logger.info('no job registry available yet: session completions will not announce themselves (agents_run still returns a sessionId, and the nine tools are unaffected)')
+  }
 
   // Whether the panel is mounted is knowable only as a STATE, never as a claim
   // about the host. The host's own web server is just another row of the loader

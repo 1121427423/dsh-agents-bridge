@@ -7,9 +7,11 @@
  * testing the tools and testing the runtime: `tests/plugin-config.test.ts`
  * already covers the registration path.
  *
- * `exec` is passed as an empty object because none of these tools read the
- * execution context — they are fire-and-forget by contract, so there is no
- * signal to forward.
+ * `exec` defaults to an empty object. `agents_run` / `agents_run_many` are the
+ * two tools that DO read it: `exec.agent` is the calling agent, and it is what a
+ * session's completion notice is addressed to (host/jobs.ts). A test that means
+ * "the agent loop called this" passes one; everything else keeps the default,
+ * which exercises the unowned path.
  *
  * @module tests/helpers/tool-harness
  */
@@ -17,13 +19,16 @@
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 
 import { createToolDefinitions, type ToolDefinitions } from '../../src/tools/definitions.ts'
+import type { JobSeat } from '../../src/host/jobs.ts'
 import type { AgentManager } from '../../src/kernel/types.ts'
 
 /** The definition table keyed by tool name, for `callTool` / `renderTool`. */
 export type ToolTable = Map<string, ToolDefinitions[number]>
 
-export function toolsFor(manager: AgentManager): ToolTable {
-  return new Map(createToolDefinitions(manager).map((definition) => [definition.name, definition]))
+export function toolsFor(manager: AgentManager, seat?: JobSeat): ToolTable {
+  return new Map(
+    createToolDefinitions(manager, seat).map((definition) => [definition.name, definition]),
+  )
 }
 
 function requireTool(tools: ToolTable, name: string): ToolDefinitions[number] {
@@ -39,11 +44,12 @@ export async function callTool<T = Record<string, unknown>>(
   tools: ToolTable,
   name: string,
   args: unknown,
+  exec: unknown = {},
 ): Promise<T> {
   const tool = requireTool(tools, name)
   return (await (tool as unknown as {
     execute: (input: unknown, exec: unknown) => Promise<unknown>
-  }).execute(args, {})) as T
+  }).execute(args, exec)) as T
 }
 
 /** Runs the tool's PURE render over an already-produced value. */

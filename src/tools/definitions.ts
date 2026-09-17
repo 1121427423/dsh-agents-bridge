@@ -30,6 +30,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { AgentManager, AgentMessage, AgentResult, SessionSnapshot } from '../kernel/types.ts'
 import { AgentRunRejectedError } from '../kernel/types.ts'
 import { MAX_TIMER_DELAY_MS } from '../kernel/watchdog.ts'
+import type { JobSeat } from '../host/jobs.ts'
 import { redactSecrets } from '../tracks/host-files.ts'
 
 /** Lifecycle states a session can be in, in the order a model should reason about them. */
@@ -462,7 +463,85 @@ function renderEventBlocks(messages: readonly RenderedEvent[]): string[] {
  * same definition table cannot accidentally capture a stale manager: the entry
  * passes the live one once, at registration time.
  */
-export function createToolDefinitions(manager: AgentManager) {
+export function createToolDefinitions(manager: AgentManager, seat: JobSeat = {}) {
+  /* ------------------------------------------------- completion notices */
+  // How often a registered job checks its session, and how long a session that
+  // has VANISHED from the manager is tolerated before the job reports that it is
+  // gone. A session is always known right after `run()` resolves; a momentary
+  // `undefined` is a race, a persistent one is a restart.
+  const JOB_POLL_MS = 250
+  const JOB_VANISH_TICKS = 20
+
+  /**
+   * Wait for one session to reach a terminal state.
+   *
+   * This is the producer side of the host's job contract, so it is deliberately
+   * NOT bounded by a tool-call budget: the jobs runtime owns the lifetime, and
+   * the kernel's own watchdogs are what end a wedged session. It never rejects:
+   * a job that throws here would be a producer that did not settle.
+   */
+  async function waitForTerminal(sessionId: string): Promise<SessionSnapshot | undefined> {
+    let missing = 0
+    for (;;) {
+      const snapshot = manager.status(sessionId)
+      if (snapshot !== undefined) {
+        if (snapshot.terminal) return snapshot
+        missing = 0
+      } else if (++missing >= JOB_VANISH_TICKS) {
+        return undefined
+      }
+      await delay(JOB_POLL_MS)
+    }
+  }
+
+  /** The last few readable lines of a session, for the completion notice. */
+  function tailOf(sessionId: string): string | undefined {
+    const snapshot = manager.status(sessionId)
+    const from = Math.max(0, (snapshot?.messageCount ?? 0) - 4)
+    const page = manager.output(sessionId, { sinceIndex: from, limit: 4 })
+    const parts = (page?.messages ?? [])
+      .map(message => message.content ?? message.output ?? '')
+      .filter(part => part !== '')
+    if (parts.length === 0) {
+      const last = snapshot?.lastMessage?.content ?? snapshot?.lastMessage?.output ?? ''
+      return last === '' ? undefined : last
+    }
+    return parts.join('\n')
+  }
+
+  /**
+   * Register a just-started session with the host, so its completion opens a
+   * model turn instead of waiting to be polled.
+   *
+   * Returns `undefined` — meaning "this run gets no notice" — whenever the host
+   * has no job registry, the call has no agent behind it, or the registry
+   * refuses. Never throws: a missing notice must not fail the delegation.
+   */
+  function announceCompletion(
+    snapshot: SessionSnapshot,
+    owner: unknown,
+    prompt: string,
+  ): string | undefined {
+    const registrar = seat.registrar
+    // The owner check lives HERE, not only in the registrar: this layer is the
+    // one that knows whether an agent is behind the call, and a registration
+    // request nobody can serve should never be made. `createJobRegistrar`
+    // repeats the check because a job with no owner would be a job with no
+    // session to announce into — defence in depth on the same invariant.
+    if (registrar === undefined || owner === undefined) return undefined
+    return registrar.register({
+      sessionId: snapshot.sessionId,
+      agentId: snapshot.agentId,
+      label: prompt,
+      owner,
+      waitTerminal: () => waitForTerminal(snapshot.sessionId),
+      cancel: reason => {
+        void manager.cancel(snapshot.sessionId, reason).catch(() => {})
+      },
+      tail: () => tailOf(snapshot.sessionId),
+    })
+  }
+
   /** `agents_probe` — is anything drivable on this host? The smoke tool. */
   const probe = defineTool({
     name: 'agents_probe',
@@ -607,20 +686,29 @@ export function createToolDefinitions(manager: AgentManager) {
           agent: { type: 'string' },
           status: { type: 'string', enum: [...RUN_STATUSES] },
           startedAt: { type: 'integer' },
+          jobId: { type: 'string' },
         },
       },
       render: (_args, value) => text(
         [
           `started ${value.agent} session ${value.sessionId} (status=${value.status})`,
+          ...(value.jobId === undefined
+            ? []
+            : [
+                `host job ${value.jobId}: its completion will be announced in this session — you do NOT have to poll for it.`,
+              ]),
           '',
           `Next: agents_wait { "sessionIds": "${value.sessionId}", "timeoutMs": 20000 } to wait for it in ONE call`,
           `(a timeout there is normal — call it again), or agents_output { "sessionId": "${value.sessionId}", "sinceIndex": 0 }`,
           `to read the transcript, or agents_status { "sessionId": "${value.sessionId}" } for a one-line liveness check.`,
           'Do not re-run the task while it is running; keep the returned nextIndex and pass it back to read only new events.',
+          ...(value.jobId === undefined
+            ? []
+            : ['If you would rather wait than be told, agents_wait still works; the notice arrives either way.']),
         ].join('\n'),
       ),
     },
-    execute: async (args) => {
+    execute: async (args, exec) => {
       // The kernel's `run()` resolves once the child is spawned and the session
       // is registered — it does NOT await `done`. Everything optional is spread
       // conditionally so an omitted knob is absent rather than `undefined`.
@@ -639,11 +727,18 @@ export function createToolDefinitions(manager: AgentManager) {
       } catch (err) {
         throw await describeRunFailure(manager, err, 'run')
       }
+      // Hand the session to the host's job registry so its completion opens a
+      // model turn (see host/jobs.ts). `exec.agent` is the CALLING agent — the
+      // agent loop sets it — and it is what makes the notice land in the right
+      // session. Without one, no job is created: an unowned job would settle
+      // with nobody to tell.
+      const jobId = announceCompletion(snapshot, exec?.agent, args.prompt)
       return {
         sessionId: snapshot.sessionId,
         agent: snapshot.agentId,
         status: snapshot.status,
         startedAt: snapshot.startedAt,
+        ...(jobId === undefined ? {} : { jobId }),
       }
     },
   })
@@ -721,6 +816,7 @@ export function createToolDefinitions(manager: AgentManager) {
                 started: { type: 'boolean' },
                 sessionId: { type: 'string' },
                 status: { type: 'string', enum: [...RUN_STATUSES] },
+                jobId: { type: 'string' },
                 error: { type: 'string' },
               },
             },
@@ -735,6 +831,7 @@ export function createToolDefinitions(manager: AgentManager) {
           const head = `#${entry.index ?? 0} ${entry.agent ?? 'unknown'}`
           return entry.started === true
             ? `✓ ${head} → session ${entry.sessionId ?? '?'} (status=${entry.status ?? 'running'})`
+              + (entry.jobId === undefined ? '' : `, job ${entry.jobId} will announce itself`)
             : `✗ ${head} → ${entry.error ?? 'refused'}`
         })
         const started = runs.filter((entry) => entry.started === true)
@@ -757,7 +854,7 @@ export function createToolDefinitions(manager: AgentManager) {
         return text(body.join('\n'))
       },
     },
-    execute: async (args) => {
+    execute: async (args, exec) => {
       const requested = args.runs
       if (!Array.isArray(requested) || requested.length === 0) {
         throw new Error(
@@ -777,6 +874,7 @@ export function createToolDefinitions(manager: AgentManager) {
         started: boolean
         sessionId?: string
         status?: (typeof RUN_STATUSES)[number]
+        jobId?: string
         error?: string
       }> = []
       for (const [index, entry] of requested.entries()) {
@@ -814,12 +912,17 @@ export function createToolDefinitions(manager: AgentManager) {
               ? {}
               : { idleTimeoutMs: capRunWindow(entry.idleTimeoutMs) }),
           })
+          // One job PER ENTRY, not one for the batch: a fan-out's whole point is
+          // that the caller learns about each session as it lands, and a batch
+          // job would announce only the slowest one.
+          const jobId = announceCompletion(snapshot, exec?.agent, prompt)
           results.push({
             index,
             agent: snapshot.agentId,
             started: true,
             sessionId: snapshot.sessionId,
             status: snapshot.status,
+            ...(jobId === undefined ? {} : { jobId }),
           })
         } catch (err) {
           // Per-entry isolation is the whole point: one refused entry (bad id,
