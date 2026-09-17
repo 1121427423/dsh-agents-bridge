@@ -263,3 +263,37 @@ text: OK1
   改完 `dsh --profile web --no-open` 重启即可验证；**不要**在本仓库里找「消息里的 developer 角色」——
   桥只搬运模型输出，不构造发给模型的角色。若将来 pi-ai 在收到该 400 时自动降级重试，本记录随之作废。
 
+### 后续：该配置**已由操作员明确授权后加上**（越过了交接边界 §0，一次、可回滚）
+
+- **授权**：操作员直接指示「帮我加这个配置」。§0 把配置面划在仓库之外是为了防止**未经授权**改动，
+  操作员既然是本人授权，这一条就是合规的；**只有这一处被改**。
+- **改动位置（一处，ROUTE 层）**：`~/.dsh/settings.yaml` → `llm-pi-ai.providers.command-code.compat:
+  { supportsDeveloperRole: false }`（`settings.yaml:61-72`，含解释性注释）。
+  **为什么放 route 层而不是 qwen 那个模型条目**：拒绝 `developer` 的是**端点**
+  （`api.commandcode.ai/provider/v1`），而该 provider 的 `reasoning: high` 让**全部 13 个模型**都暴露在
+  同一路径上；`profile.compat` 是 schema 里正为这种情况提供的层（`dsh-llm-pi-ai/lib/index.js:988`、
+  `resolveModelCompat` 先取 route 再让 model 覆盖）。`system` 是所有 OpenAI 兼容端点都接受的基线，
+  所以这里不可能拿走某个模型的能力；需要例外的模型仍可在自己的 `compat` 里覆盖。
+- **备份**：`~/.dsh/settings.yaml.bak-20260917-154645-pre-commandcode-developer-role`
+  （改前 sha256 前缀 `02c15fdf6a3db339`；改后 `6fc1d704ad5182f1`，差异仅这 12 行）。
+- **已证（读代码 + 解析器）**：① YAML 合法、diff 恰好是预期 12 行（第一次编辑把 `command-code:` 缩进成
+  5 空格，**被 YAML 解析器当场拒绝**后修正）；② `supportsDeveloperRole` 确实是 `openai-completions`
+  **可配置**的开关 —— 直接读 `COMPLETIONS_COMPAT_GATE`（`:379-410`）与
+  `COMPAT_GATES["openai-completions"]`（`:428-429`），即 `assertOfferedCompatFields` 与
+  `resolveModelCompat` 查的同一张表；③ `false` **不会**被过滤掉（`configuredCompatEntries` 只丢空对象，
+  `:472-476`）；④ 语义：`useDeveloperRole = model.reasoning && compat.supportsDeveloperRole` → `false`
+  → 角色回落 `system`（`@earendil-works/pi-ai/dist/api/openai-completions.js:910`）。
+- **未证（如实说）**：
+  - **没有对该端点发过一次真实请求** —— 工具 shell 里没有 `COMMAND_CODE_API_KEY`。所以「400 消失了」
+    是**由构造推出**的，不是**观察到**的。要观察到，只能在有凭据的会话里用该模型跑一句话。
+  - **本来打算用「重启宿主无告警」当证据，被自己的反向对照推翻了**：把同一个键改成非法值
+    （`supportsDeveloperRole: "yes-please"`）后重启，日志里**同样没有** `invalid stored section` 告警。
+    原因是 pi-ai 的校验**写在写路径上（strict）、读路径上延迟**（`resolveRouteModels(request,
+    validation)`，`:630-631`）—— **手改 `settings.yaml` 不会在启动时被复查**。
+    结论：那条「无告警」是**空跑的门禁**，不能算证据（「没跑到的门禁永远不是通过的门禁」）。
+    附带事实（值得操作员知道）：**手写错的 compat 键不会被启动拦住**。
+- **生效时机**：已解析的 profiles 按**原始配置**记忆化（`:2575-2590`），settings 文件 provider 有
+  watcher；因此运行中的宿主在下次解析该路由时会取到新值。要绝对确定，重启 DSH Desktop 即可。
+  **注意：我没有重启桌面端**（它就是当前会话的宿主）——只重启了 43121 上那个独立 web 测试宿主。
+
+
