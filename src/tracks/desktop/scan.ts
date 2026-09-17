@@ -426,19 +426,23 @@ function findBundles(root: string, readDir: DirReader, out: AppBundle[]): void {
   // MAX_BUNDLES_PER_ROOT every later root returned immediately, and with the
   // production roots (`/Applications` first, `~/Applications` second) that made
   // the user-writable root unreachable on any host with 64+ `.app` in
-  // `/Applications` — i.e. the home root was never scanned at all. The snapshot
-  // is what keeps the bound a bound while letting root 2 be walked.
-  const startLen = out.length
+  // `/Applications` — i.e. the home root was never scanned at all. Cutting this
+  // ROOT's own candidate list (below) is what keeps the bound a bound while
+  // letting root 2 be walked.
   const candidates: string[] = []
-  for (const entry of readDir(root)) {
-    if (candidates.length >= MAX_BUNDLES_PER_ROOT) break
+  // Names are collected FIRST, bounded by the per-directory entry cap, and only
+  // then sorted and cut to MAX_BUNDLES_PER_ROOT. Cutting in raw readdir order
+  // (the old shape: push until the cap, sort afterwards) made WHICH identities
+  // survive the cap a function of the order the filesystem returned entries, so
+  // installing or removing one app could swap an identity out of the reported
+  // set and make `get()`/`resolve()` disagree with the previous run (RR-MI-2).
+  for (const entry of readDir(root).slice(0, MAX_ENTRIES_PER_DIR)) {
     if (entry.isDirectory && entry.name.endsWith('.app')) candidates.push(entry.name)
   }
   // Sorted, so probe order is a property of the SET of bundles rather than of
   // the order the filesystem happened to hand back. This is what makes the
   // scanned ids reproducible across runs.
-  for (const name of candidates.sort()) {
-    if (out.length - startLen >= MAX_BUNDLES_PER_ROOT) return
+  for (const name of candidates.sort().slice(0, MAX_BUNDLES_PER_ROOT)) {
     const bundle = asBundle(path.join(root, name), readDir)
     if (bundle !== undefined) out.push(bundle)
   }

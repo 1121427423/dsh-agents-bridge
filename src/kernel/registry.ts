@@ -13,6 +13,21 @@
  * agent loop: probing is called from a model-facing tool and must be cheap,
  * silent and safe.
  *
+ * TWO VERBS, TWO LIFETIMES. `probe` answers two different questions with two
+ * different cache lifetimes, and conflating them was a defect in each direction:
+ *
+ *   - "which version does each installed engine answer?" — `probe({refresh:true})`.
+ *     Cheap-ish, bounded, and legitimately re-run whenever a caller wants fresh
+ *     version numbers.
+ *   - "which app bundles are INSTALLED?" — `probe({rescan:true})`, or
+ *     `invalidate()` followed by a plain `probe()`. This one re-walks the bundle
+ *     roots, which is a synchronous filesystem walk, so it is NEVER implicit:
+ *     re-walking on every `refresh` was MI-8 (a model could block the event loop
+ *     up to the scan budget per call), and never re-walking at all was RR-MI-1
+ *     (an app installed while the host ran could not be discovered by any call,
+ *     including the operator's own Refresh). Both routes are single-flighted
+ *     with everything else (MI-22).
+ *
  * @module dsh-agents-bridge/kernel/registry
  */
 
@@ -166,8 +181,25 @@ export interface AgentRegistry {
   get(id: AgentId): AgentDescriptor | undefined
   /** Resolve one identity against the host; never throws. */
   resolve(id: AgentId): ResolvedIdentity
-  /** Probe every identity; `refresh: true` bypasses the TTL cache. */
-  probe(opts?: { readonly refresh?: boolean }): Promise<readonly ProbeResult[]>
+  /**
+   * Probe every identity.
+   *
+   * `refresh: true` bypasses the TTL cache — it re-resolves executables and
+   * re-runs `<exe> --version`, but it deliberately does NOT re-walk the bundle
+   * roots (MI-8: the walk is synchronous and model-triggerable).
+   *
+   * `rescan: true` is the other verb: it ALSO discards the memoised bundle scan
+   * so an app installed while the host has been running is discovered
+   * (RR-MI-1). It implies `refresh` and shares the single-flight with every
+   * other pass, so concurrent rescans walk once.
+   */
+  probe(opts?: { readonly refresh?: boolean; readonly rescan?: boolean }): Promise<readonly ProbeResult[]>
+  /**
+   * Drop the memoised probe cache AND the memoised bundle scan, so the next
+   * `probe()` re-walks the roots. This is the deliberate "an app was installed,
+   * re-read the machine" route (RR-MI-1); it is the caller's explicit choice,
+   * never an implicit side effect of `refresh`.
+   */
   invalidate(): void
   /**
    * One-line summary of what the app-bundle scan found (identities added,
@@ -442,12 +474,17 @@ export function createRegistry(options: RegistryOptions = {}): AgentRegistry {
   /**
    * Resolve the table this probe run should use, running the scan at most once.
    *
-   * `refresh` deliberately does NOT discard the scan memo. Which app bundles are
+   * The memo survives `refresh` on purpose (MI-8): which app bundles are
    * INSTALLED does not change on a 60-second TTL, and the walk is synchronous
    * (`fs.readdirSync`), so re-running it on every `probe({refresh:true})` blocked
    * the event loop for up to the scan budget each time a model asked for fresh
-   * version numbers — the re-run was the bug (MI-8), and it contradicted the
-   * memoisation this very function is documented to provide.
+   * version numbers.
+   *
+   * The memo does NOT survive an explicit `rescan` / `invalidate()` (RR-MI-1):
+   * with no way to drop it, a probe could never notice an app installed while
+   * the host has been running — MI-8 removed the only trigger, so the operator's
+   * Refresh button was inert for new installs. `resetScan()` is that trigger,
+   * and it is deliberately explicit rather than folded into `refresh`.
    */
   function effectiveDescriptors(): readonly AgentDescriptor[] {
     if (!scanEnabled) return descriptors
@@ -470,6 +507,18 @@ export function createRegistry(options: RegistryOptions = {}): AgentRegistry {
 
   function tableFor(id: AgentId): AgentDescriptor | undefined {
     return scanState?.descriptors.find((descriptor) => descriptor.id === id) ?? byId.get(id)
+  }
+
+  /**
+   * Drop the memoised bundle scan, so the next pass re-walks the roots.
+   *
+   * Called only from the two EXPLICIT re-scan routes (`invalidate()` and
+   * `probe({rescan:true})`) and never from `refresh`. `scanNote` is cleared with
+   * it so a stale "added N identities" line cannot outlive the scan it described.
+   */
+  function resetScan(): void {
+    scanState = undefined
+    scanNote = undefined
   }
 
   function resolve(id: AgentId): ResolvedIdentity {
@@ -665,16 +714,22 @@ export function createRegistry(options: RegistryOptions = {}): AgentRegistry {
     resolve,
     async probe(opts) {
       const refresh = opts?.refresh === true
+      const rescan = opts?.rescan === true
       const at = now()
-      if (!refresh && cache !== undefined && at - cachedAt < ttlMs) return cache
+      if (!refresh && !rescan && cache !== undefined && at - cachedAt < ttlMs) return cache
       // Single-flight (MI-22): a pass is a synchronous bundle walk, a port
       // sweep and one `--version` child per resolvable identity. Two callers
       // arriving together (the panel's refresh button plus a model's
       // `agents_probe`) used to run all of that twice; the second now joins the
       // first's promise. `inFlight` is read and assigned with no `await` in
       // between, so a concurrent caller cannot slip past it; the `finally`
-      // clears it for the next pass, whoever started it.
+      // clears it for the next pass, whoever started it. The check is BEFORE
+      // `resetScan()` on purpose: a rescan that joins an in-flight pass shares
+      // that pass's walk instead of starting a second one.
       if (inFlight !== undefined) return inFlight
+      // The explicit re-walk: drop the memo so `runProbePass` re-reads the roots
+      // (RR-MI-1). `refresh` alone must NOT do this (MI-8).
+      if (rescan) resetScan()
       const run = runProbePass()
       inFlight = run
       try {
@@ -686,6 +741,11 @@ export function createRegistry(options: RegistryOptions = {}): AgentRegistry {
     invalidate() {
       cache = undefined
       cachedAt = 0
+      // RR-MI-1: the scan memo is part of what a caller means by "forget what
+      // you know about this host". Leaving it in place made `invalidate()` the
+      // ONLY invalidation route and yet unable to notice a new install, so
+      // nothing in the bridge could ever rediscover one.
+      resetScan()
     },
     scanDiagnostics() {
       return scanNote

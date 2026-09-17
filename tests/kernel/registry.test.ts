@@ -6,6 +6,7 @@ import { afterAll, describe, expect, it } from 'vitest'
 
 import { BUILTIN_DESCRIPTORS, createRegistry } from '../../src/kernel/registry.ts'
 import { policyFor } from '../../src/tracks/index.ts'
+import type { DirEntry } from '../../src/tracks/desktop/scan.ts'
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-bridge-registry-'))
 
@@ -479,5 +480,128 @@ describe('probe()', () => {
     registry.invalidate()
     await registry.probe()
     expect(probeCalls).toBe(afterFirst * 2)
+  })
+})
+
+/* -------------------------------------------------------------------------- */
+/* Re-scanning the bundle roots: two verbs (RR-MI-1)                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Which bundles are INSTALLED and which VERSIONS they answer are two different
+ * facts with two different lifetimes, and the registry now exposes one verb for
+ * each:
+ *
+ *   - `probe({refresh:true})` re-resolves executables and re-runs `--version`.
+ *     It deliberately does NOT re-walk the bundle roots (MI-8: the walk is
+ *     synchronous and a model could trigger it repeatedly).
+ *   - `probe({rescan:true})` (and `invalidate()`) do re-walk, because that is
+ *     the ONLY way a probe can ever notice an app installed while the host has
+ *     been running. MI-8 removed that trigger entirely: the scan memo outlived
+ *     every refresh, so the operator's Refresh button could never discover a
+ *     new install.
+ *
+ * These tests are the pair of oracles: MI-8 must SURVIVE (refresh is still
+ * version-only) and the re-scan path must EXIST.
+ */
+function writeScannedBundle(root: string, name: string, applicationName: string): string {
+  const bundlePath = path.join(root, name)
+  const cli = path.join(bundlePath, 'Contents', 'Resources', 'app.asar.unpacked', 'cli')
+  fs.mkdirSync(path.join(cli, 'bin'), { recursive: true })
+  fs.writeFileSync(
+    path.join(cli, 'product.json'),
+    JSON.stringify({ productName: applicationName, applicationName, dataFolderName: `.${applicationName}` }),
+  )
+  fs.writeFileSync(path.join(cli, 'bin', 'codebuddy'), '#!/usr/bin/env node\n', { mode: 0o755 })
+  return bundlePath
+}
+
+/** The real directory reader, so a counting wrapper can delegate to it. */
+function realReadDir(absolutePath: string): readonly DirEntry[] {
+  let names: string[]
+  try {
+    names = fs.readdirSync(absolutePath)
+  } catch {
+    return []
+  }
+  return names.map((name) => {
+    try {
+      const stat = fs.statSync(path.join(absolutePath, name))
+      return { name, isDirectory: stat.isDirectory(), isFile: stat.isFile(), size: stat.size }
+    } catch {
+      return { name, isDirectory: false, isFile: false }
+    }
+  })
+}
+
+describe('re-scanning the bundle roots is an explicit verb (RR-MI-1)', () => {
+  /** A registry whose ONLY bundle root is a tmp fixture, so the host is unseen. */
+  function scannedRegistry(root: string, extra: Parameters<typeof createRegistry>[0] = {}) {
+    return createRegistry({
+      env: { PATH: '' },
+      probeVersion: async () => undefined,
+      portProbe: false,
+      trackPolicyOptions: { searchPath: [] },
+      hostOptions: { home: '/home/test', contents: {} },
+      ...extra,
+      // `??` (not a bare spread) so a test that injects a counting `scan`
+      // actually gets it — the first RED run silently used the plain root and
+      // counted zero walks, which would have made the single-flight oracle
+      // vacuous.
+      scan: extra.scan ?? { roots: [root] },
+    })
+  }
+
+  it('keeps `refresh` version-only, but rediscovers an app installed mid-flight after a rescan', async () => {
+    const root = fs.mkdtempSync(path.join(tmpRoot, 'rescan-'))
+    const registry = scannedRegistry(root)
+    const ids = async () => (await registry.probe()).map((result) => result.id)
+    expect(await ids()).not.toContain('late-agent')
+
+    // The app is installed AFTER the first probe.
+    writeScannedBundle(root, 'LateAgent.app', 'late-agent')
+
+    // MI-8 PRESERVED: a refresh re-probes versions, it does not re-walk.
+    expect((await registry.probe({ refresh: true })).map((result) => result.id)).not.toContain('late-agent')
+
+    // The deliberate route notices it. Before the fix `invalidate()` left the
+    // scan memo in place, so this stayed absent — the operator's Refresh could
+    // never discover a newly installed app.
+    registry.invalidate()
+    expect(await ids()).toContain('late-agent')
+  })
+
+  it('exposes `rescan: true` as the explicit re-walk verb', async () => {
+    const root = fs.mkdtempSync(path.join(tmpRoot, 'rescan-verb-'))
+    const registry = scannedRegistry(root)
+    await registry.probe()
+    writeScannedBundle(root, 'LateAgent.app', 'late-agent')
+    expect((await registry.probe({ rescan: true })).map((result) => result.id)).toContain('late-agent')
+  })
+
+  it('still collapses two concurrent rescans into ONE walk (MI-22 holds)', async () => {
+    const root = fs.mkdtempSync(path.join(tmpRoot, 'rescan-single-flight-'))
+    writeScannedBundle(root, 'HouseAgent.app', 'house-agent')
+    let rootListings = 0
+    const registry = scannedRegistry(root, {
+      scan: {
+        roots: [root],
+        readDir: (absolutePath: string) => {
+          if (absolutePath === root) rootListings += 1
+          return realReadDir(absolutePath)
+        },
+      },
+    })
+    await registry.probe()
+    const afterFirst = rootListings
+    expect(afterFirst).toBe(1)
+
+    const [first, second] = await Promise.all([
+      registry.probe({ rescan: true }),
+      registry.probe({ rescan: true }),
+    ])
+    // One walk for two callers: a re-scan is expensive and must not double up.
+    expect(rootListings).toBe(afterFirst + 1)
+    expect(first.map((result) => result.id).sort()).toEqual(second.map((result) => result.id).sort())
   })
 })

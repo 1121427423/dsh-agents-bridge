@@ -605,15 +605,18 @@ B5a 按约定只追加 §L、未改旧行（它明确注明"请监理复核后�
 | RR-IM-2 | `manager.ts:289-304` + `store.ts` 的 running 行 | 持久化**所有者证据**（写行宿主的 pid + 该进程启动时间，或 boot-unique id）；只在所有者确证已死时回收进程组 | 管理器 A 跑真进程（行含活 pid）→ 于同目录起管理器 B → 断言 A 的子进程仍活、行仍 `running` | **fixed**（批次 A · §P，树未提交） |
 | RR-IM-3 | `manager.ts:378-379` | 区分「从未见过」与「被驱动清掉」：驱动侧置 cleared 标志并在终态传播，管理器**不得**回退到 pin | 假 handle 运行中给 `live-A`、终态省略该字段 → 断言 store 无指针 | **fixed**（批次 A · §P，树未提交） |
 | RR-IM-4 | `spawn.ts:434-454,494-501` | drain 路径上「管道仍被持有」应视为「组可能仍活」：结算前 SIGKILL 进程组；或不要因 `exit!==undefined` 短路 `cancel()` | `sh -c 'sleep 30 & exit 0'` 记录后代 pid → `done` 后 `processGone(pid)` 为真 | **fixed**（批次 A · §P，树未提交） |
-| RR-IM-5 | `scan.ts:886/768/730` → probe `path=` | executable 保留原值，在**输出端**做 `oneLine` + 截断 + `redactSecrets` | 目录名含 `\n` 的假 bundle → 渲染行数不增加 | 待批次 B（本批未动） |
+| RR-IM-5 | `scan.ts:886/768/730` → probe `path=` | executable 保留原值，在**输出端**做 `oneLine` + 截断 + `redactSecrets` | 目录名含 `\n` 的假 bundle → 渲染行数不增加 | **fixed**（批次 B · §Q，树未提交） |
 | RR-IM-6 | `acp.ts:2075-2088` | `failBeforePrompt` 也 `await client.dispose()`（幂等），或收敛为单一 `settleAndDispose()` | fixture 先 `terminal/create` 再让 `session/new` 报错 → `done` 后 `process.kill(pid,0)` 抛 ESRCH | 待批次 C（本批未动） |
 
 批次：**A = RR-IM-1..4（kernel，一个模块）** · **B = RR-IM-5（tracks+tools）** · **C = RR-IM-6（drivers/acp）**。
+批次 B 另按 O-2 收了同一特征区（discovery → probe → render）的两条 Minor：**RR-MI-2**（bundle 身份集合稳定）与
+**RR-MI-1**（重扫 verbs）；两条均已 fixed，见 §Q。
 
 ### O-2 accepted · Minor（8 条）
 
-RR-MI-1（`registry.ts:450-454,686-689`：`invalidate()` 清 scan memo，恢复唯一重扫触发器）·
-RR-MI-2（`scan.ts:433-441`：先 sort readdir 名再取前 64，使身份集合稳定）·
+RR-MI-1（`registry.ts:450-454,686-689`：`invalidate()` 清 scan memo，恢复唯一重扫触发器）——
+**fixed**（批次 B · §Q；registry 侧两项 verb 均落地，面板侧接线见 §Q「如实记账」）·
+RR-MI-2（`scan.ts:433-441`：先 sort readdir 名再取前 64，使身份集合稳定）——**fixed**（批次 B · §Q）·
 RR-MI-5（六个驱动的自有计时器补 2^31-1 钳位）·
 RR-MI-6（`codex.ts:777`：`cancelled` 不走 parser 状态结算，避免取消被改判 completed）·
 RR-MI-7（`acp.ts:1043-1046`：溢出时走真实终态路径，而不是 resolve 一个无人读的 promise）·
@@ -768,4 +771,109 @@ id 又写回磁盘）。**绿**：`9 passed`（含「重启后 `status()` 无指
 2. `dropped` 目前只在 kernel 读接口暴露，**没有任何面向模型的文案**说「transcript 被截断」；
    旧文案随 marker 一起删除。表面层补提示前，模型看到的是一段没有告警的短 transcript（数据上诚实、呈现上仍是缺口）。
 3. RR-IM-2 牺牲了「同进程 HMR 重载后回收上一实例残留子进程」的旧行为（同进程 pid 视为存活 → 不回收）。
+
+## Q. 批次 B 落地记录（RR-IM-5, RR-MI-1, RR-MI-2）（2026-09-18）
+
+范围：§O-1 的 **RR-IM-5** 加 §O-2 的 **RR-MI-1 · RR-MI-2**（三条都在同一个特征区：
+bundle discovery → probe → render，故并为一批）。**RR-IM-6（drivers/acp）本批未动**，仍为「待批次 C」。
+树按约定**未提交**（保持 dirty，HEAD 仍 `6d98cef`）；**零 `git stash` / `checkout` / `reset`**，零负控残留
+（判别实验全部做成常驻测试，没有临时改源码再回滚的动作）。
+红/绿命令统一为 `/opt/homebrew/bin/node node_modules/vitest/vitest.mjs run <file>`。
+
+### Q-1 RR-IM-5 · executable 路径通道在输出端收口
+
+**修法**（`src/tools/definitions.ts:33,189-221,250`）
+- IM-12 把 `product.json` 的每个事实（`notes` / `displayName` / `id`）都收成了一行，**漏掉了扫描器不拥有的那一个值**：
+  `command.executable`。它是 `path.join(root, entry.name)` 的产物，即由**攻击者可控的 bundle 目录名**拼出，
+  三个 recogniser 都原样存储（`scan.ts:886` CLI / `:768` interpreter / `:730` engine），registry 原样发布成
+  `ProbeResult.executable`，渲染器原样写进 `path=<...>`。
+- 内核**继续原样保留**这个值 —— 它是操作员据以声明 descriptor 的启动数据，隐藏或改写它会让人无法 opt-in；
+  收口放在**唯一让这个值变成模型可见文本的地方**：新增 `renderExecutablePath()`
+  （`definitions.ts:191,215-220`）：① 折叠空白（换行在内）成一行 ② `redactSecrets` ③ 按 ~200 字符**中间省略**，
+  保留头尾（`…/bin/codebuddy` 是识别文件的那一段，`oneLine` 的头部截断会把它切掉）。
+- 调用点只有一处：`definitions.ts:250`。`available`/`unavailable` 两种行都过同一函数。
+
+**测试**：`tests/tools/probe-render.test.ts:88-116`（真 manager：fake bundle → scan → probe → 真 render；
+断言渲染行数 `=== value.length + 2` 且每行以 `✓`/`✗` 开头 —— 伪造行两处都过不了）、`:117-126`（**负控**：
+短路径逐字渲染且**不**出现 `…`）、`:128-143`（长路径中间省略、头尾都在、≤200）、`:145-160`（路径里的
+credential 形状被 redact）。
+
+**红（= 修复前源码）**：`… run tests/tools/probe-render.test.ts` → `3 failed | 1 passed (4)`：
+`expected [ …(16) ] to have a length of 15 but got 16`（目录名里的 `\n` 多插了一行 —— `\n` 与 `available; path=`
+一起出现就是伪造行）、`expected '/Applications/segment-0/…' not to be '/Applications/segment-0/…'`（未省略）、
+`expected '✓ leaky [generic] Leaky — available; …' to contain '[redacted]'`。
+**绿**：同命令 `4 passed`，其中负控（第 2 条）在红阶段就已通过 —— 它证明守卫收的是「恶意路径」而不是「所有路径」。
+**负控（常驻）**：`tests/tools/probe-render.test.ts:117-126`。
+
+### Q-2 RR-MI-2 · 每 root 上限先排序后截断
+
+**修法**（`src/tracks/desktop/scan.ts:431-447`）
+- 旧形状是「按 raw readdir 顺序 push 到 64 为止，之后再 `sort()`」，于是**哪 64 个身份能活下来取决于文件系统的返回顺序**：
+  装/卸一个 app 就可能把某个身份挤出报告集，`get()`/`resolve()` 与上一次 run 不一致。
+- 改为：先收集候选名（显式按 `MAX_ENTRIES_PER_DIR` 有界，不依赖注入 reader 自觉），再 `sort()`，**然后**切到
+  `MAX_BUNDLES_PER_ROOT`。这样「选中的 64 个」是**已安装 bundle 集合**的函数，与 readdir 顺序无关。
+- 顺带删掉第二个循环里 `out.length - startLen >= MAX_BUNDLES_PER_ROOT` 的 return：切片之后它已不可达
+  （`startLen` 随之移除）。IM-10 的「per ROOT 而非 per scan」语义不变（切片的是本 root 自己的候选表）。
+
+**测试**：`tests/tracks/scan.test.ts:446-480`（tmp root 里 70 个 bundle，注入 reader 只置换 **root 那一层**的返回顺序：
+forward vs reverse）。
+
+**红（= 修复前源码）**：`… run tests/tracks/scan.test.ts` → `1 failed | 42 passed (43)`，
+`AssertionError: expected [ …(64) ] to deeply equal [ …(64) ]`，diff 精确给出
+`reverse` 多出 `cap-64..cap-69`、`forward` 多出 `cap-00..cap-05` —— 即两个顺序选出了**不同的 64 个身份**（上限本身没破）。
+**绿**：同命令 `43 passed`，断言含 `forward[0] === 'cap-00'`（前 64 个是字典序最小的那批）与两侧长度均为 64。
+
+### Q-3 RR-MI-1 · 重扫是一条显式 verb（MI-8 必须存活）
+
+**修法**（`src/kernel/registry.ts:16-31,183-201,483-490,519-527,725-748`）
+- 两个问题、两种生命周期，文档写在 registry 模块 docstring（`:16-31`）与 `AgentRegistry.probe`（`:183-201`）：
+  **版本**（`probe({refresh:true})`，重新解析 executable 并重跑 `--version`，**不**重扫 bundle）
+  与**安装集合**（`probe({rescan:true})` 或 `invalidate()` + `probe()`，重走 bundle roots）。
+- `resetScan()`（`:519-527`）= 清 `scanState` + `scanNote`。只有两条**显式**重扫路径调用它：
+  `probe({rescan:true})`（`:731-732`）与 `invalidate()`（`:744-748`）。`refresh` 绝不调用 —— MI-8 的原样保留。
+- 顺序是刻意的：`probe` 里单飞检查（`:725-730`）在 `resetScan()` **之前**，所以并发重扫会**加入**在飞的那一趟，
+  而不是各自再走一遍（MI-22 不变式继续成立）。`invalidate()` 清 scan memo 也正是 §O-2 的验收判据。
+
+**测试**：`tests/kernel/registry.test.ts:485-607`，三条：
+(a) `:551-568` 首次 probe 后装 bundle → `probe({refresh:true})` 仍**不**含 `late-agent`（**MI-8 preserved**）→
+`invalidate()` + `probe()` 才含；(b) `:570-576` `probe({rescan:true})` 单独可发现；
+(c) `:578-606` 计数 reader：首趟 walk = 1，`Promise.all` 两个并发 `rescan` 后仍只 **+1**（单飞）。
+
+**红（= 修复前源码）**：`… run tests/kernel/registry.test.ts` → `3 failed | 21 passed (24)`：
+`expected [ 'claude', 'codex', 'openclaw', …(9) ] to include 'late-agent'`（invalidate 后仍看不见新装的 app）、
+`… to include 'late-agent'`（`rescan` 这个 verb 不存在，参数被忽略）、
+`expected 1 to be 2`（rescan 没有重走 walk）。（首跑另暴露一处**测试自身**的缺陷：`scannedRegistry` 里 `scan` 覆盖了注入的
+计数 reader，导致 walk 计数恒为 0、单飞断言会变成空转 —— 已先修（`extra.scan ?? {roots}`），再取上述 RED，与批次 A
+先修 helper 作用域的做法一致。）
+**绿**：同命令 `24 passed`。**负控（常驻）**：(a) 的中间一步就是 MI-8 的负控 —— `refresh` 不重扫，红绿两阶段都必须成立。
+
+### 逐条门禁（每完成一条即全跑，均为真实数字）
+
+| 完成项 | vitest | `tsc --noEmit` | `tsc -p tsconfig.tests.json` | build.mjs | build-client.mjs | verify_plugin.py |
+|---|---|---|---|---|---|---|
+| RR-IM-5 | 4 passed（本文件） | 0 | 0 | OK | OK | 11/11 |
+| RR-MI-2 | 43 passed（本文件） | 0 | 0 | OK | OK | 11/11 |
+| RR-MI-1 | 24 passed（本文件） | 0 | 0 | OK | OK | 11/11 |
+| 终态（本记录） | **891 passed / 1 skipped（892）** | **0** | **0** | `lib/index.js` **370.7kb** | `lib/client.js` **74.7kb** | **11/11 PASS** |
+
+基线：批次 A 终态为 883/1（884）、370.2kb；本批新增 8 个测试（4 + 1 + 3），883 + 8 = 891。
+
+**文件与行区间**：`src/tools/definitions.ts:33,189-221,250` · `src/tracks/desktop/scan.ts:431-447` ·
+`src/kernel/registry.ts:16-31,183-201,483-490,519-527,725-748` · `tests/tools/probe-render.test.ts:1-161` ·
+`tests/tracks/scan.test.ts:446-480` · `tests/kernel/registry.test.ts:485-607` ·
+`docs/review-fixes.md` §O-1/§O-2 状态列 + 本节。
+
+### 如实记账（本批留下的接缝）
+
+1. **重扫 verb 还没接到操作员那颗按钮上**（本批 HARD RULE 明确禁止改 `src/host/**`、`src/client/**`、
+   `src/kernel/{types,manager}.ts`）：`src/host/api.ts:544` 的 `probe` 路由只认 `refresh`（面板
+   `src/client/api.ts:374` 亦然），`AgentManager` 门面类型 `src/kernel/types.ts:476` 也只声明了
+   `{ refresh?: boolean }`，`manager.probe` 又会把 options 原样转给 registry。于是：
+   **registry 侧的 `invalidate()` / `probe({rescan:true})`（本批已落地并测试）在运行期可达，但经
+   `AgentManager` 门面静态调用 `rescan` 会 TS 报错，面板的 Refresh 目前仍只做版本重探。**
+   RR-MI-1 的验收判据（`invalidate()` 清 scan memo）已满足；把按钮接上需要一处 fenced 改动
+   （types.ts 的门面签名 + `src/host/api.ts:544` 传 `rescan`），留给监理或下一批。
+2. RR-IM-5 只收口了**渲染端**：`ProbeResult.executable` 仍是原样的（含换行）路径。这是刻意的（启动数据必须可读、
+   可复制去声明 descriptor），但**任何未来新增的模型可见渲染路径都必须自己过一遍 `renderExecutablePath`**；
+   目前 `agents_probe` 是唯一一处。
    这是「宁可漏杀不可错杀」的取向，已在 §O-5 的「附加字段、无需裁决」前提下选定。

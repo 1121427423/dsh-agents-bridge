@@ -31,6 +31,7 @@ import {
   shadowedSummary,
   slugify,
   type DirEntry,
+  type DirReader,
 } from '../../src/tracks/desktop/scan.ts'
 import { DESKTOP_TRACK_DESCRIPTORS } from '../../src/tracks/desktop/catalog.ts'
 import { createDesktopPolicy } from '../../src/tracks/desktop/index.ts'
@@ -440,6 +441,42 @@ describe('scanDesktopBundles', () => {
     expect(ids.filter((id) => id.startsWith('bulk-'))).toHaveLength(64)
     // …and root 2 was actually walked. Before the fix this list has no `needle`.
     expect(ids).toContain('needle')
+  })
+
+  it('picks the capped bundles by NAME, not by readdir order (RR-MI-2)', () => {
+    // The per-root budget used to take the first 64 candidates in RAW readdir
+    // order and only then sort them. Which 64 survived therefore depended on
+    // the order the filesystem happened to hand entries back, so installing or
+    // removing ONE app could change the identity set a probe reports — and
+    // `get()`/`resolve()` then disagreed with the previous run. Sorting BEFORE
+    // the cap makes the choice a property of the SET of installed bundles.
+    const root = freshRoot()
+    for (let i = 0; i < 70; i += 1) {
+      const label = String(i).padStart(2, '0')
+      writeBundle(root, { name: `Cap${label}.app`, product: productJson({ applicationName: `cap-${label}` }) })
+    }
+
+    /** The real reader, with the ROOT listing permuted for this run. */
+    const readerIn = (order: 'forward' | 'reverse'): DirReader => (absolutePath: string) => {
+      const entries = [...defaultReadDirForTest(absolutePath)]
+      if (absolutePath !== root) return entries
+      return order === 'forward' ? entries : entries.reverse()
+    }
+    const idsFor = (order: 'forward' | 'reverse'): string[] =>
+      scanDesktopBundles({ roots: [root], readDir: readerIn(order), budgetMs: 30_000 }).identities.map(
+        (entry) => entry.descriptor.id,
+      )
+
+    const forward = idsFor('forward')
+    const reverse = idsFor('reverse')
+    // The cap still holds — and it is the SAME 64 identities either way.
+    expect(forward).toHaveLength(64)
+    expect(reverse).toHaveLength(64)
+    expect(reverse).toEqual(forward)
+    // Deterministic in the strong sense: the first identities are the
+    // lexicographically first names, so `get()`/`resolve()` agree run to run.
+    expect(forward[0]).toBe('cap-00')
+    expect(forward).not.toContain('cap-69')
   })
 })
 

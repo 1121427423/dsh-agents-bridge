@@ -30,6 +30,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { AgentManager, AgentMessage, AgentResult, SessionSnapshot } from '../kernel/types.ts'
 import { AgentRunRejectedError } from '../kernel/types.ts'
 import { MAX_TIMER_DELAY_MS } from '../kernel/watchdog.ts'
+import { redactSecrets } from '../tracks/host-files.ts'
 
 /** Lifecycle states a session can be in, in the order a model should reason about them. */
 const RUN_STATUSES = ['running', 'completed', 'failed', 'cancelled', 'timeout'] as const
@@ -186,6 +187,39 @@ function truncate(value: string, max: number): string {
 const MAX_RENDERED_MESSAGES = 80
 const MAX_RENDERED_CHARS = 12_000
 
+/** Longest `path=` value a probe row prints, in characters. */
+const MAX_RENDERED_PATH_CHARS = 200
+
+/**
+ * Make one `command.executable` value safe for an `agents_probe` ROW.
+ *
+ * The kernel keeps this value VERBATIM on purpose — it is launch data an
+ * operator must see exactly to declare a descriptor for it — so the sanitising
+ * belongs HERE, at the single point the value becomes model-visible text.
+ *
+ * The channel is real: a scanned executable is `path.join(root, entry.name)`,
+ * i.e. it is built from the bundle's DIRECTORY NAME, which is attacker-chosen
+ * under the user-writable `~/Applications`. IM-12 hardened `notes`,
+ * `displayName` and `id`, but this value reaches the row untouched, so a
+ * directory name containing a newline (plus `available; path=`) forged extra
+ * rows in the probe table the model reads, and a credential-looking path
+ * component was echoed. So:
+ *
+ *   1. collapse to ONE line (whitespace runs, newlines included),
+ *   2. redact credential-looking substrings,
+ *   3. bound the length — but elide the MIDDLE instead of the tail. The tail
+ *      (`…/bin/codebuddy`) is what identifies the file and the head names the
+ *      root; a head-only cap (what `oneLine` does) would strip the only part an
+ *      operator can act on and leave the row unrecognisable.
+ */
+function renderExecutablePath(raw: string): string {
+  const safe = redactSecrets(raw.replace(/\s+/g, ' ').trim())
+  if (safe.length <= MAX_RENDERED_PATH_CHARS) return safe
+  const head = Math.ceil((MAX_RENDERED_PATH_CHARS - 1) / 2)
+  const tail = MAX_RENDERED_PATH_CHARS - 1 - head
+  return `${safe.slice(0, head)}…${safe.slice(safe.length - tail)}`
+}
+
 /**
  * Render a probe table. Unavailable identities are shown WITH their reason.
  *
@@ -211,7 +245,9 @@ function renderProbe(
     return text('No agent identities are registered. Add one to the plugin config (`descriptors`) or the kernel registry.')
   }
   const lines = results.map(result => {
-    const path = result.executable ?? '-'
+    // The executable is the one output column NOT produced by the scan's own
+    // hardening: it comes from the bundle's directory name. Sanitise it here.
+    const path = result.executable === undefined ? '-' : renderExecutablePath(result.executable)
     const version = result.version === undefined ? '' : ` v${result.version}`
     const status = result.available === true ? 'available' : `unavailable (${result.reason ?? 'reason not reported'})`
     return `${result.available === true ? '✓' : '✗'} ${result.id ?? 'unknown'} [${result.family ?? 'unknown'}] ${result.displayName ?? ''} — ${status}; path=${path}${version}`
