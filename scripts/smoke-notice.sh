@@ -58,6 +58,17 @@ if [ ! -e "$PLUGIN_LINK" ]; then
   exit 2
 fi
 
+# A one-shot prompt is a HEADLESS-shaped app feature: `web` boots a server and
+# takes no task argument, so asking it for one would hang instead of failing.
+case "$PROFILE" in
+  web|desktop)
+    printf '\nREFUSING: profile "%s" boots a server, not a one-shot task.\n' "$PROFILE"
+    printf 'Use a headless-shaped profile (the `headless` profile is one), or drive\n'
+    printf 'the same claim from a real session in that profile and watch for the notice.\n'
+    exit 2
+    ;;
+esac
+
 PROMPT=$(cat <<EOF
 This is a smoke test of a local-agent delegation bridge. Follow the steps exactly and do nothing else.
 
