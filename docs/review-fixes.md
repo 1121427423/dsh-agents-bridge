@@ -1110,3 +1110,51 @@ IIFE 卡在 `await child.exited`。
    不响应 SIGTERM 且 grace 配成分钟级，pre-prompt 失败的结算会被拉长——记在这里，不冒充已处理。
 7. RR-MI-9 / RR-MI-10 / RR-MI-12（§O-2）本批未动，未授权；`idleTimeoutMs` 的非正值归一仍在内核侧（RR-MI-9）。
 
+## T. 监理核验：批次 C（独立门禁 + 监理自写 oracle）（2026-09-18）
+
+提交：**`0711087`**。监理未改被测实现，只新增临时 oracle（跑完即删，未入库）。
+
+### T-1 门禁（监理亲跑，与批次 C 自报逐位一致）
+
+| 门禁 | 结果 |
+|---|---|
+| vitest | **919 passed / 1 skipped（920）**，57 文件通过 / 1 skipped |
+| tsc(src) / tsc(tests) | **0 / 0** |
+| build / build-client | `lib/index.js` **372.0kb** / `lib/client.js` **74.7kb** |
+| verify_plugin.py | **11/11 PASS** |
+
+### T-2 监理自写 oracle：新钳位是「全函数」吗？
+
+**结论：不是 —— 新增一条 **SV-2**（latent）。** 实测（临时 oracle，读 `src/drivers/argv.ts` 的导出）：
+
+```
+[oracle] MAX=2147483647
+[oracle] clampTimerDelay(Infinity) = Infinity          ← 未钳
+[oracle] capRunWindow-style(Infinity) = 2147483647     ← 钳了（Math.min 对 Infinity 有效）
+[oracle] NaN -> NaN
+[oracle] setTimeout(cb, Infinity) fired after 2ms
+[oracle] warnings: ["TimeoutOverflowWarning: Infinity does not fit into a 32-bit signed integer.
+                    Timeout duration was set to 1."]
+```
+
+即：`clampTimerDelay` 用 `Number.isFinite(ms) ? min(…) : ms` **放行 +Infinity**，而工具面同一语义的
+`capRunWindow` 用 `Math.min` **钳住 Infinity** —— 同一棵树里两个守卫对同一输入给出不同答案（**RR-MI-5 的 bug 类在
++Infinity 上原样存活**，且 `clampTimerDelay` 自己的 doc 注释「Non-finite values are left untouched — they are disarmed
+by each driver's own `<= 0` guard」**对 +Infinity 是假的**，因为 `Infinity > 0` 为真）。
+
+**可达到性（诚实标注：未证实可达）**：目前我**没有找到活路径** —— `openclawIdleGraceFromEnv` 用 `Number.isFinite`
+挡掉非有限值，模型面 `timeoutMs` 走 `capRunWindow`，host API 无 `run` 路由。所以这是**潜在不一致 + 失实注释**，
+不是正在发生的缺陷。判为 **Minor（latent）**，编号 **SV-2**，与 RR-MI-1b / SV-1 同批处理（一行改动：
+非有限值改为钳到 `MAX_TIMER_DELAY_MS`，或只放行 `NaN` 并修正注释）。
+
+### T-3 未独立复现的项（如实记账）
+
+- **RR-MI-6**：批次 C 在 §S-3 提醒「判据的字面顺序在修复前就是绿的」。监理据此**没有**写字面顺序 oracle（那会是
+  一个红绿都通过、不能判别的实验）；改为读码确认机制 —— `codex.ts:777-783` 现在是
+  `if (reason !== 'cancelled' && settleFromParsedTerminal()) return`，取消被显式排除在 parser 结算之外。**读码为证，
+  未独立复现**。
+- **RR-IM-6 / RR-MI-7**：接受其文件级红阶段证据（`git archive cba18aa` 只读副本上取红，非「改源码再回滚」），
+  未另写 pid 级 oracle；其 fixture 是构造的（§S-4 已自陈），真实引擎的握手期溢出现象本机未复现。
+- **RR-MI-5 的 9 处调用点**：监理核对了守卫形态（8 处 `opts.… > 0` 前置，env 两处自带 `Number.isFinite`），
+  除 +Infinity 外未发现新的放行路径。
+
