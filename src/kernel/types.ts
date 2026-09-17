@@ -55,6 +55,12 @@
  *      letting a missing case fall through to `generic` and launch the wrong
  *      CLI with the wrong flags.
  *
+ *  v6  P4 durability, ADDITIVE ONLY:
+ *        - `AgentSessionHandle.backendSessionId?`: the dialect's conversation id
+ *          published mid-run, so the kernel can persist the resume pointer
+ *          before the run settles (IM-5). Optional, so every existing driver
+ *          handle still satisfies the interface unchanged.
+ *
  * @module dsh-agents-bridge/kernel/types
  */
 
@@ -393,6 +399,28 @@ export interface AgentSessionHandle {
   /** Idempotent. Graceful signal → grace window → process-group kill. */
   cancel(reason?: string): Promise<void>
   snapshot(): SessionSnapshot
+  /**
+   * The dialect's own conversation id, published as soon as the driver OBSERVES
+   * it — not only on the terminal `AgentResult`.
+   *
+   * ABI v6, additive/optional. The manager persists this to the session store
+   * the moment it appears, because a host that restarts between "the engine
+   * accepted the session" and "the run finished" would otherwise lose the resume
+   * pointer permanently and `agents_send` could never continue that
+   * conversation (IM-5). The terminal `AgentResult.backendSessionId` stays
+   * authoritative: a driver that discovers a resume was rejected reports no id
+   * there, and the manager clears the pointer accordingly.
+   */
+  readonly backendSessionId?: string
+  /**
+   * The child's process-group leader pid, once it exists.
+   *
+   * ABI v6, additive/optional. `detached: true` makes the child its own group
+   * leader, so this is the pgid the manager persists with the `running` row and
+   * the post-restart orphan reap signals (IM-4). Absent before the spawn or when
+   * the spawn failed synchronously.
+   */
+  readonly pid?: number
 }
 
 /** One wire dialect. Ported from multica's `Backend` interface. */

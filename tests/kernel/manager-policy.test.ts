@@ -131,6 +131,27 @@ describe('cwd allow-list', () => {
     expect((error as AgentRunRejectedError).code).toBe('cwd-unresolvable')
     expect((error as AgentRunRejectedError).message).toContain('definitely-not-here')
   })
+
+  it('applies the allow-list even when the run omits cwd (MI-2)', async () => {
+    // The bypass: with NO default cwd configured, `run({})` used to fall
+    // through `checkCwd(undefined)` — which is "unrestricted" — and the child
+    // then inherited the bridge's own cwd, which may be outside the allow-list.
+    const allowed = workDir()
+    const manager = slow({ allowedCwd: [allowed], defaultCwd: undefined })
+
+    const error = await manager
+      .run({ agent: 'claude', prompt: 'x', timeoutMs: 0 })
+      .catch((err: unknown) => err)
+    expect(error).toBeInstanceOf(AgentRunRejectedError)
+    expect((error as AgentRunRejectedError).code).toBe('cwd-not-allowed')
+  })
+
+  it('accepts an omitted cwd that resolves inside the allow-list', async () => {
+    // Same shape, but the resolved default cwd IS allowed, so the run proceeds —
+    // the rule rejects by location, not by "did you pass cwd".
+    const manager = slow({ allowedCwd: [process.cwd()], defaultCwd: undefined })
+    await expect(manager.run({ agent: 'claude', prompt: 'x', timeoutMs: 0 })).resolves.toBeDefined()
+  })
 })
 
 describe('cwd deny-list', () => {

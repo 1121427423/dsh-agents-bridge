@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { createAgentSession } from '../../src/kernel/session.ts'
+import { MAX_TRANSCRIPT_MESSAGES, createAgentSession } from '../../src/kernel/session.ts'
 
 describe('createAgentSession', () => {
   it('buffers pushed events and timestamps them', () => {
@@ -126,5 +126,47 @@ describe('createAgentSession', () => {
     })
     await expect(session.cancel('boom')).resolves.toBeUndefined()
     expect(session.cancelRequested).toBe(true)
+  })
+})
+
+describe('transcript bound (IM-7)', () => {
+  it('keeps the newest events and prepends one synthetic truncation marker', () => {
+    const session = createAgentSession({ sessionId: 's1', agentId: 'claude' })
+    const total = MAX_TRANSCRIPT_MESSAGES + 100
+    for (let index = 0; index < total; index += 1) {
+      session.push({ type: 'text', content: `e${index}` })
+    }
+
+    const messages = session.messages
+    expect(messages.length).toBeLessThanOrEqual(MAX_TRANSCRIPT_MESSAGES)
+    // Drop-oldest: the first real event is gone, the last one is present.
+    expect(messages[1]?.content).toBe(`e${total - (messages.length - 1)}`)
+    expect(messages[messages.length - 1]?.content).toBe(`e${total - 1}`)
+    // One marker at the head, and only one.
+    expect(messages[0]?.type).toBe('status')
+    expect(messages[0]?.content).toContain('transcript truncated')
+    expect(messages.filter((m) => m.content?.includes('transcript truncated'))).toHaveLength(1)
+    // The reported count includes the marker, so it never exceeds the cap.
+    expect(session.snapshot().messageCount).toBeLessThanOrEqual(MAX_TRANSCRIPT_MESSAGES)
+  })
+
+  it('bounds a sync() from a driver buffer too, not just push()', () => {
+    const session = createAgentSession({ sessionId: 's1', agentId: 'claude' })
+    const source = Array.from({ length: MAX_TRANSCRIPT_MESSAGES * 2 }, (_, index) => ({
+      type: 'text' as const,
+      content: `s${index}`,
+      at: index,
+    }))
+    expect(session.sync(source)).toBe(source.length)
+    expect(session.messages.length).toBeLessThanOrEqual(MAX_TRANSCRIPT_MESSAGES)
+    expect(session.snapshot().messageCount).toBeLessThanOrEqual(MAX_TRANSCRIPT_MESSAGES)
+  })
+
+  it('does not allocate a marker while the transcript fits', () => {
+    const session = createAgentSession({ sessionId: 's1', agentId: 'claude' })
+    session.push({ type: 'text', content: 'a' })
+    session.push({ type: 'text', content: 'b' })
+    expect(session.messages.map((m) => m.content)).toEqual(['a', 'b'])
+    expect(session.snapshot().messageCount).toBe(2)
   })
 })

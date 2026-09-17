@@ -54,11 +54,50 @@ function logger() {
 }
 
 describe('concurrent writers', () => {
+  it('does not lose a row another store added (merge on write)', () => {
+    // IM-6, reproduced by the reviewer against the old whole-table write:
+    //   s1.upsert(A)            disk = A
+    //   s2(reload).upsert(B)    disk = A,B
+    //   s1.upsert(C)  <-- the write published only s1's table, so disk = A,C
+    //                      and B vanished permanently.
+    // A write now re-reads the file and merges this store's pending change onto
+    // it, so the last writer adds rather than replaces.
+    const s1 = createSessionStore({ dir })
+    s1.upsert(record('sess_A'))
+
+    const s2 = createSessionStore({ dir })
+    s2.reload()
+    s2.upsert(record('sess_B'))
+
+    s1.upsert(record('sess_C'))
+
+    const fresh = createSessionStore({ dir }).reload()
+    expect(fresh.map((r) => r.sessionId).sort()).toEqual(['sess_A', 'sess_B', 'sess_C'])
+  })
+
+  it('keeps a concurrent writer\'s removal from resurrecting', () => {
+    const s1 = createSessionStore({ dir })
+    s1.upsert(record('sess_A'))
+    const s2 = createSessionStore({ dir })
+    s2.reload()
+    s2.upsert(record('sess_B'))
+
+    s2.remove('sess_A')
+    s1.upsert(record('sess_C'))
+
+    const fresh = createSessionStore({ dir }).reload()
+    expect(fresh.map((r) => r.sessionId).sort()).toEqual(['sess_B', 'sess_C'])
+  })
+
   it('two instances in one process do not collide on the temp filename', () => {
-    // Regression: the temp name used to be `<file>.<pid>.<per-instance-counter>`,
-    // so two stores over the same directory both chose `...<pid>.0.tmp`. The
-    // second rename could then move a file the first writer had already
-    // replaced, silently discarding its records.
+    // Regression (two bugs, one test):
+    //   1. the temp name used to be `<file>.<pid>.<per-instance-counter>`, so two
+    //      stores over the same directory both chose `...<pid>.0.tmp`, and
+    //   2. the write used to publish only the writer's OWN table, so `b` silently
+    //      dropped `a`'s row (IM-6, the lost update).
+    // Writes now MERGE onto a re-read of the file, so both rows survive and a
+    // stale temp carrying the old colliding name can never be renamed over the
+    // real store.
     const a = createSessionStore({ dir })
     const b = createSessionStore({ dir })
 
@@ -70,7 +109,9 @@ describe('concurrent writers', () => {
     b.upsert(record('sess_b'))
 
     const revived = createSessionStore({ dir }).reload()
-    expect(revived.map((r) => r.sessionId)).toEqual(['sess_b'])
+    // BOTH writers survive: `b` merged onto the file `a` had already written
+    // instead of overwriting it with its own single-row table.
+    expect(revived.map((r) => r.sessionId)).toEqual(['sess_a', 'sess_b'])
     expect(JSON.parse(fs.readFileSync(path.join(dir, 'sessions.json'), 'utf8'))).toBeTruthy()
   })
 

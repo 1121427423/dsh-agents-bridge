@@ -1618,6 +1618,8 @@ export async function runAcp(
     cwd: opts.cwd,
     env: deps.env,
   })
+  // ABI v6: hand the kernel the pid it persists for the post-restart reap (IM-4).
+  session.attachProcess(child.pid)
 
   deps.logger.debug('driver launched', {
     family: 'acp',
@@ -1879,6 +1881,10 @@ export async function runAcp(
         content: `session ${client.sessionId} ready`,
       }),
     )
+    // ABI v6: the ACP session id is established by the handshake, before the
+    // prompt is sent — publish it now so the kernel persists the resume pointer
+    // even if the host restarts mid-turn (IM-5).
+    session.pinBackendSessionId(client.sessionId)
 
     // 2b. Reasoning effort, best effort. A session that advertises no effort
     //     option is normal (most runtimes do not) and must not fail the run; a

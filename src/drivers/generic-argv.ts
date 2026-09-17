@@ -178,6 +178,10 @@ export async function runGeneric(
     logger: deps.logger,
     onCancel: (reason) => settleCancelled(reason),
   })
+  // ABI v6: the generic dialect's only notion of a backend session is the id it
+  // was asked to resume, which is known at launch — persist it immediately
+  // (IM-5).
+  session.pinBackendSessionId(opts.resumeSessionId)
 
   const chunks: string[] = []
   const stderrTail = { value: '' }
@@ -192,6 +196,8 @@ export async function runGeneric(
     cwd: opts.cwd,
     env: deps.env,
   })
+  // ABI v6: hand the kernel the pid it persists for the post-restart reap (IM-4).
+  session.attachProcess(child.pid)
 
   deps.logger.debug('driver launched', {
     family: 'generic',

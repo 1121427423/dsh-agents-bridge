@@ -433,10 +433,18 @@ export function createRegistry(options: RegistryOptions = {}): AgentRegistry {
   let cache: readonly ProbeResult[] | undefined
   let cachedAt = 0
 
-  /** Resolve the table this probe run should use, running the scan at most once. */
-  function effectiveDescriptors(refresh: boolean): readonly AgentDescriptor[] {
+  /**
+   * Resolve the table this probe run should use, running the scan at most once.
+   *
+   * `refresh` deliberately does NOT discard the scan memo. Which app bundles are
+   * INSTALLED does not change on a 60-second TTL, and the walk is synchronous
+   * (`fs.readdirSync`), so re-running it on every `probe({refresh:true})` blocked
+   * the event loop for up to the scan budget each time a model asked for fresh
+   * version numbers — the re-run was the bug (MI-8), and it contradicted the
+   * memoisation this very function is documented to provide.
+   */
+  function effectiveDescriptors(): readonly AgentDescriptor[] {
     if (!scanEnabled) return descriptors
-    if (refresh) scanState = undefined
     if (scanState !== undefined) return scanState.descriptors
     const scan = scanDesktopBundles(scanOptions)
     const merged = mergeScan(descriptors, scan)
@@ -618,9 +626,10 @@ export function createRegistry(options: RegistryOptions = {}): AgentRegistry {
       const refresh = opts?.refresh === true
       const at = now()
       if (!refresh && cache !== undefined && at - cachedAt < ttlMs) return cache
-      // The bundle scan runs before the (possibly longer) identity list is
-      // assembled, so the table is complete for this pass.
-      const table = effectiveDescriptors(refresh)
+      // The bundle scan runs at most ONCE per registry lifetime, before the
+      // (possibly longer) identity list is assembled, so the table is complete
+      // for this pass.
+      const table = effectiveDescriptors()
       if (portProbeEnabled) {
         try {
           const sweep = await probePorts({

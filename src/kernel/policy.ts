@@ -22,7 +22,7 @@
 import { realpathSync } from 'node:fs'
 import path from 'node:path'
 
-import { AgentRunRejectedError } from './types.ts'
+import { AgentRunRejectedError, type BridgeLogger } from './types.ts'
 
 /**
  * Default concurrent-session cap.
@@ -43,27 +43,72 @@ export interface RunPolicy {
   readonly deniedCwd: readonly string[]
   readonly allowedAgents: readonly string[]
   readonly maxConcurrent: number
+  /**
+   * True when the host CONFIGURED an `allowedCwd` list, even if every entry was
+   * unusable and `allowedCwd` ended up empty.
+   *
+   * This is the difference between "unset = unrestricted" (the documented
+   * default) and "configured but nothing resolved" — the latter must FAIL
+   * CLOSED, because an allow-list that silently becomes empty would let every
+   * cwd through (the fail-open MI-3 fixed).
+   */
+  readonly allowedCwdConfigured: boolean
 }
 
-/** Directory prefixes are compared after `realpath`, so `/` is normalized too. */
-function normalizeRoots(roots: readonly string[] | undefined): string[] {
-  if (roots === undefined || roots.length === 0) return []
+interface NormalizedRoots {
+  readonly roots: readonly string[]
+  /** True when the caller actually supplied a non-empty list. */
+  readonly configured: boolean
+  /** Configured entries that could not be `realpath`-resolved. */
+  readonly unresolved: readonly string[]
+}
+
+/**
+ * Resolve configured directory roots for prefix comparison.
+ *
+ * A root that cannot be `realpath`-resolved is KEPT in its lexical
+ * (`path.resolve`) form rather than silently dropped: dropping it would make an
+ * allow-list narrower than the operator wrote (and, when it was the only root,
+ * empty = unrestricted = fail OPEN). Keeping it lexical still lets it match the
+ * path the child would really be spawned with, while the unresolved entry is
+ * reported to the caller so a shared config naming another machine's paths is
+ * visible instead of silent.
+ */
+function normalizeRoots(
+  roots: readonly string[] | undefined,
+  label: string,
+  logger: BridgeLogger | undefined,
+): NormalizedRoots {
+  const configured = roots !== undefined && roots.length > 0
+  if (!configured) return { roots: [], configured: false, unresolved: [] }
   const out: string[] = []
+  const unresolved: string[] = []
   for (const raw of roots) {
     if (typeof raw !== 'string' || raw.trim() === '') continue
-    const resolved = resolveExisting(raw.trim())
-    if (resolved !== undefined && !out.includes(resolved)) out.push(resolved)
+    const trimmed = raw.trim()
+    const resolved = resolveExisting(trimmed)
+    if (resolved !== undefined) {
+      if (!out.includes(resolved)) out.push(resolved)
+      continue
+    }
+    const lexical = path.resolve(trimmed)
+    if (!unresolved.includes(lexical)) unresolved.push(lexical)
+    if (!out.includes(lexical)) out.push(lexical)
   }
-  return out
+  if (unresolved.length > 0) {
+    logger?.error(`${label} root(s) do not exist on this host; kept in lexical form`, {
+      [label]: unresolved,
+    })
+  }
+  return { roots: out, configured: true, unresolved }
 }
 
 /**
  * `realpath` that never throws.
  *
- * A configured root that does not exist on this host is skipped rather than
- * making every run fail: the config may be shared across machines (the README
- * ships `/Users/king/...`), and a missing *allowed* root is a configuration
- * mistake worth surfacing through the rejection message, not a crash.
+ * Called only for a path that is about to be COMPARED, never for the value the
+ * child is spawned with — so a missing root is a policy-data problem (reported
+ * by {@link normalizeRoots}), not a run failure.
  */
 function resolveExisting(target: string): string | undefined {
   try {
@@ -78,6 +123,8 @@ export function createRunPolicy(options: {
   readonly deniedCwd?: readonly string[]
   readonly allowedAgents?: readonly string[]
   readonly maxConcurrent?: number
+  /** Reports configured roots that could not be resolved (MI-3). */
+  readonly logger?: BridgeLogger
 }): RunPolicy {
   const rawMax = options.maxConcurrent
   const maxConcurrent =
@@ -85,13 +132,17 @@ export function createRunPolicy(options: {
       ? Math.floor(rawMax)
       : DEFAULT_MAX_CONCURRENT
 
+  const allowed = normalizeRoots(options.allowedCwd, 'allowedCwd', options.logger)
+  const denied = normalizeRoots(options.deniedCwd, 'deniedCwd', options.logger)
+
   return Object.freeze({
-    allowedCwd: normalizeRoots(options.allowedCwd),
-    deniedCwd: normalizeRoots(options.deniedCwd),
+    allowedCwd: allowed.roots,
+    deniedCwd: denied.roots,
     allowedAgents: (options.allowedAgents ?? []).filter(
       (id): id is string => typeof id === 'string' && id.trim() !== '',
     ),
     maxConcurrent,
+    allowedCwdConfigured: allowed.configured,
   })
 }
 
@@ -137,11 +188,20 @@ export function checkCwd(cwd: string | undefined, policy: RunPolicy): string | u
     )
   }
 
-  if (policy.allowedCwd.length > 0 && !policy.allowedCwd.some((root) => isUnder(resolved, root))) {
+  // `allowedCwdConfigured` matters even when the ROOTS came out empty: a
+  // configured allow-list whose entries were all unusable must deny, not become
+  // "unrestricted". Only a genuinely-unset list (the documented default) lets
+  // every cwd through.
+  const allowListApplies = policy.allowedCwd.length > 0 || policy.allowedCwdConfigured
+  if (allowListApplies && !policy.allowedCwd.some((root) => isUnder(resolved, root))) {
+    const allowedText =
+      policy.allowedCwd.length > 0
+        ? policy.allowedCwd.join(', ')
+        : '(configured, but no root could be resolved on this host)'
     throw new AgentRunRejectedError(
       'cwd-not-allowed',
       `cwd "${requested}" resolves to "${resolved}", which is outside every allowed path. ` +
-        `Allowed: ${policy.allowedCwd.join(', ')}.`,
+        `Allowed: ${allowedText}.`,
       { value: requested, allowed: policy.allowedCwd },
     )
   }

@@ -723,6 +723,11 @@ export async function runOpenclaw(
     logger: deps.logger,
     onCancel: (reason) => settleCancelled(reason),
   })
+  // ABI v6: openclaw's conversation id is chosen at launch, not discovered in
+  // the stream, so it is known from the start and can be persisted immediately
+  // (IM-5). A resume that the engine rejects still reports no id at settle,
+  // which the kernel treats as authoritative.
+  session.pinBackendSessionId(agentSessionId)
 
   const parser = new OpenclawStreamParser({ emit: (m) => session.push(m) }, now)
   const stderrTail = { value: '' }
@@ -738,6 +743,8 @@ export async function runOpenclaw(
     cwd: opts.cwd,
     env: deps.env,
   })
+  // ABI v6: hand the kernel the pid it persists for the post-restart reap (IM-4).
+  session.attachProcess(child.pid)
 
   deps.logger.debug('driver launched', {
     family: 'openclaw',

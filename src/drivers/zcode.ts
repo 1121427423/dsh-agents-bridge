@@ -359,6 +359,8 @@ export async function runZcode(
     cwd: opts.cwd,
     env,
   })
+  // ABI v6: hand the kernel the pid it persists for the post-restart reap (IM-4).
+  session.attachProcess(child.pid)
 
   deps.logger.debug('driver launched', {
     family: 'zcode',
@@ -441,6 +443,8 @@ export async function runZcode(
 
   const reader = readLines(child.stdout, (line) => {
     parser.handleLine(line)
+    // ABI v6: publish the backend session id as soon as a frame names it (IM-5).
+    session.pinBackendSessionId(parser.state.backendSessionId)
     if (parser.state.terminalSeen !== undefined) armTerminalBoundary()
   })
   child.stderr.on('data', (chunk: Buffer | string) => {

@@ -12,7 +12,7 @@
  * @module dsh-agents-bridge/kernel/spawn
  */
 
-import { spawn as nodeSpawn } from 'node:child_process'
+import { spawn as nodeSpawn, execFileSync } from 'node:child_process'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 
 import type { BridgeLogger, CommandSpec } from './types.ts'
@@ -23,6 +23,18 @@ import { redactArgs } from './logger.ts'
 export const DEFAULT_GRACE_MS = 5_000
 /** How long we wait for the group to die after SIGKILL before giving up. */
 const KILL_CONFIRM_MS = 2_000
+/**
+ * How long `exited` keeps waiting for stdout/stderr to finish draining after the
+ * child itself has exited.
+ *
+ * A descendant that inherited the pipe (a helper the agent CLI forked) keeps
+ * Node's `close` event from firing even though the child we spawned is dead.
+ * Waiting for `close` alone therefore deferred settlement indefinitely; the
+ * bounded drain gives real trailing output a chance to arrive and then settles
+ * on the `exit` observation rather than hanging. `close` still wins whenever it
+ * arrives first, so the common case is unchanged.
+ */
+export const POST_EXIT_DRAIN_MS = 300
 /**
  * Upper bound on the caller-supplied grace window.
  *
@@ -149,6 +161,108 @@ export function processGone(pid: number): boolean {
 }
 
 /**
+ * Signal the whole process GROUP led by `pid`, falling back to the pid itself.
+ *
+ * `detached: true` makes the child a group leader, so `process.kill(-pid, sig)`
+ * reaches its descendants. ESRCH means the group is already gone (not an error);
+ * EPERM means "exists but the group is not addressable", where the direct pid is
+ * still worth a try. Shared by the live cancel path and the orphan reaper so the
+ * two cannot drift on which errors mean "gone".
+ *
+ * @returns true when a signal was delivered to something.
+ */
+export function signalProcessGroup(
+  pid: number,
+  sig: NodeJS.Signals,
+  logger?: BridgeLogger,
+): boolean {
+  try {
+    // Negative pid = the whole group (pid is its pgid because of detached).
+    process.kill(-pid, sig)
+    return true
+  } catch (err) {
+    const code = errorCode(err)
+    if (code === 'ESRCH') return false
+    if (code !== 'EPERM') {
+      logger?.debug('process-group signal rejected; falling back to the pid', {
+        pid,
+        signal: sig,
+        code,
+      })
+    }
+    try {
+      process.kill(pid, sig)
+      return true
+    } catch (fallbackErr) {
+      const fallbackCode = errorCode(fallbackErr)
+      if (fallbackCode !== 'ESRCH') {
+        logger?.warn('failed to signal agent process', {
+          pid,
+          signal: sig,
+          error: toError(fallbackErr).message,
+        })
+      }
+      return false
+    }
+  }
+}
+
+/**
+ * Epoch ms when `pid` started, or `undefined` when it is gone or unreadable.
+ *
+ * Used to guard the post-restart reap against PID REUSE: a pid is only a stable
+ * identity together with the moment its process started, so a recovered row is
+ * killed only when the live process really is the one we spawned. `ps -o
+ * lstart=` is the one spelling that works on both macOS and Linux (GNU's
+ * `etimes` does not exist in the BSD userland macOS ships).
+ */
+export function processStartTimeMs(pid: number): number | undefined {
+  let text: string
+  try {
+    text = execFileSync('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], {
+      encoding: 'utf8',
+      timeout: 2_000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+  } catch {
+    // A vanished pid, a permission error, or a missing `ps` all mean "cannot
+    // establish identity" — never kill on a guess.
+    return undefined
+  }
+  if (text === '') return undefined
+  const parsed = Date.parse(text)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+/**
+ * SIGKILL the process group led by `pid`. Best effort; never throws.
+ *
+ * @returns true when a signal was delivered.
+ */
+export function killProcessGroup(pid: number, logger?: BridgeLogger): boolean {
+  return signalProcessGroup(pid, 'SIGKILL', logger)
+}
+
+/**
+ * The two OS facts the post-restart orphan reap needs, behind one seam so a
+ * manager test can observe the kill without a real orphan process.
+ */
+export interface ProcessReaper {
+  /** Epoch ms when `pid` started, or `undefined` when it is gone/unreadable. */
+  startTimeMs(pid: number): number | undefined
+  /** SIGKILL the process group led by `pid`. Returns true when delivered. */
+  killGroup(pid: number): boolean
+}
+
+/** The real OS reaper; see {@link processStartTimeMs} / {@link killProcessGroup}. */
+export function createProcessReaper(logger?: BridgeLogger): ProcessReaper {
+  return {
+    startTimeMs: (pid) => processStartTimeMs(pid),
+    killGroup: (pid) => killProcessGroup(pid, logger),
+  }
+}
+
+/**
  * Spawn one engine in its own process group.
  *
  * Never throws: a synchronous `spawn()` failure (bad argv, invalid cwd type) is
@@ -183,17 +297,36 @@ export function spawnDetached(request: SpawnRequest): SpawnHandle {
   }
 
   let exit: SpawnExit | undefined
-  let settle: (value: SpawnExit) => void = () => {}
+  let settle: (value: SpawnExit, flush?: () => void) => void = () => {}
   const exited = new Promise<SpawnExit>((resolve) => {
-    settle = (value) => {
+    settle = (value, flush) => {
       if (exit !== undefined) return
       exit = value
+      // Release the abort listener at settle. It used to be removed only inside
+      // `cancel()`, so a run that ended on its own left the listener attached to
+      // the AbortController — keeping the spawn closure (and the dead child)
+      // reachable for as long as the session record lived (IM-7 lifecycle).
+      if (abortListener !== undefined && request.signal !== undefined) {
+        request.signal.removeEventListener('abort', abortListener)
+        abortListener = undefined
+      }
+      if (drainTimer !== undefined) {
+        clearTimeout(drainTimer)
+        drainTimer = undefined
+      }
+      try {
+        flush?.()
+      } catch (err) {
+        logger?.error('failed to flush trailing output', { error: toError(err).message })
+      }
       resolve(value)
     }
   })
 
   let cancelPromise: Promise<void> | undefined
   let abortListener: (() => void) | undefined
+  let drainTimer: NodeJS.Timeout | undefined
+  let exitObservation: { readonly code: number | null; readonly signal: NodeJS.Signals | null } | undefined
 
   if (syncError !== undefined) {
     settle({ code: null, signal: null, error: syncError })
@@ -201,14 +334,41 @@ export function spawnDetached(request: SpawnRequest): SpawnHandle {
     const spawned = child
     let spawnError: Error | undefined
 
-    pipeLines(spawned.stdout, request.onStdoutLine, logger, 'stdout')
-    pipeLines(spawned.stderr, request.onStderrLine, logger, 'stderr')
+    const flushStdout = pipeLines(spawned.stdout, request.onStdoutLine, logger, 'stdout')
+    const flushStderr = pipeLines(spawned.stderr, request.onStderrLine, logger, 'stderr')
 
     spawned.on('error', (err) => {
       spawnError = toError(err)
       logger?.error('agent process failed to start', { error: spawnError.message })
       // `close` may or may not follow an `error`; settle now so callers never hang.
+      // No flush here: the streams have not ended, so flushing would split a line.
       settle({ code: null, signal: null, error: spawnError })
+    })
+    // `exit` fires when the CHILD is gone; `close` only after every stdio pipe it
+    // created is closed. A descendant that inherited the pipe keeps `close` from
+    // ever arriving, which used to defer `exited` for as long as that descendant
+    // lived. Settle on whichever comes first: `close`, or `exit` plus a bounded
+    // drain window for real trailing output.
+    spawned.on('exit', (code, signal) => {
+      exitObservation = { code, signal: signal ?? null }
+      if (drainTimer !== undefined) return
+      drainTimer = setTimeout(() => {
+        drainTimer = undefined
+        const observed = exitObservation ?? { code: null, signal: null }
+        settle(
+          {
+            code: observed.code,
+            signal: observed.signal,
+            ...(spawnError !== undefined ? { error: spawnError } : {}),
+          },
+          () => {
+            flushStdout()
+            flushStderr()
+          },
+        )
+      }, POST_EXIT_DRAIN_MS)
+      // The drain window must not keep a plugin host alive on its own.
+      drainTimer.unref?.()
     })
     spawned.on('close', (code, signal) => {
       const value: SpawnExit = {
@@ -219,7 +379,12 @@ export function spawnDetached(request: SpawnRequest): SpawnHandle {
       if (code !== 0 && spawnError === undefined) {
         logger?.debug('agent process exited', { code, signal: signal ?? null })
       }
-      settle(value)
+      // On `close` the streams have definitely ended, so the splitters already
+      // flushed; flushing again is a harmless no-op.
+      settle(value, () => {
+        flushStdout()
+        flushStderr()
+      })
     })
 
     if (request.signal) {
@@ -239,38 +404,9 @@ export function spawnDetached(request: SpawnRequest): SpawnHandle {
     if (syncError !== undefined) return
     const pid = child?.pid
     if (pid === undefined) return
-    try {
-      // Negative pid = the whole group (pid is its pgid because of detached).
-      process.kill(-pid, sig)
-      return
-    } catch (err) {
-      const code = errorCode(err)
-      // Nothing left to signal: the whole group is already gone.
-      if (code === 'ESRCH') return
-      // Anything else (notably EPERM on a platform without process groups, or
-      // a group we cannot address) falls back to the direct child. EPERM must
-      // NOT be treated as "gone": the process is alive, we simply lack the
-      // right to signal *the group*, and skipping the fallback would leak it.
-      if (code !== 'EPERM') {
-        logger?.debug('process-group signal rejected; falling back to the child', {
-          pid,
-          signal: sig,
-          code,
-        })
-      }
-      try {
-        child?.kill(sig)
-      } catch (fallbackErr) {
-        const fallbackCode = errorCode(fallbackErr)
-        if (fallbackCode !== 'ESRCH') {
-          logger?.warn('failed to signal agent process', {
-            pid,
-            signal: sig,
-            error: toError(fallbackErr).message,
-          })
-        }
-      }
-    }
+    // One implementation of "signal the group, fall back to the pid, treat
+    // ESRCH as gone" (shared with the orphan reaper).
+    signalProcessGroup(pid, sig, logger)
   }
 
   async function cancel(reason?: string): Promise<void> {
@@ -330,13 +466,21 @@ function settledWithin(promise: Promise<unknown>, ms: number): Promise<boolean> 
   })
 }
 
+/**
+ * Attach the line splitter to one stream.
+ *
+ * @returns a flush function that emits any trailing partial line. `settle()`
+ *   calls it so output that arrived just before the child died is delivered
+ *   even when `close` never fires (a descendant holds the pipe) and the stream
+ *   therefore never emits `end`.
+ */
 function pipeLines(
   stream: NodeJS.ReadableStream | null | undefined,
   emit: ((line: string) => void) | undefined,
   logger: BridgeLogger | undefined,
   label: 'stdout' | 'stderr',
-): void {
-  if (!stream || !emit) return
+): () => void {
+  if (!stream || !emit) return () => {}
   const splitter = new LineSplitter()
   const deliver = (lines: readonly string[]): void => {
     for (const line of lines) {
@@ -351,4 +495,5 @@ function pipeLines(
   stream.on('data', (chunk: Buffer | string) => deliver(splitter.push(chunk)))
   stream.on('end', () => deliver(splitter.flush()))
   stream.on('error', () => deliver(splitter.flush()))
+  return () => deliver(splitter.flush())
 }

@@ -357,6 +357,8 @@ export class DriverSession implements AgentSessionHandle {
   #messages: AgentMessage[] = []
   #status: AgentRunStatus = 'running'
   #result: AgentResult | undefined
+  #backendSessionId: string | undefined
+  #pid: number | undefined
   #cancelRequested = false
   #resolveDone: ((result: AgentResult) => void) | undefined
 
@@ -381,6 +383,54 @@ export class DriverSession implements AgentSessionHandle {
 
   get result(): AgentResult | undefined {
     return this.#result
+  }
+
+  /**
+   * Publish the dialect's conversation id the moment it is observed (ABI v6).
+   *
+   * The kernel persists it immediately, so a host restart mid-run cannot lose
+   * the resume pointer (IM-5). First non-empty value wins: drivers re-emit the
+   * id on several frames. A resume the engine later rejects is reported as no
+   * `backendSessionId` on the terminal result, which stays authoritative.
+   */
+  pinBackendSessionId(backendSessionId: string | undefined): void {
+    if (backendSessionId === undefined || backendSessionId === '') return
+    this.#backendSessionId = this.#backendSessionId ?? backendSessionId
+  }
+
+  get backendSessionId(): string | undefined {
+    // Only what was OBSERVED mid-run. Deliberately does not fall back to the
+    // terminal result: a driver that rejected a resume reports no id there, and
+    // conflating the two would re-publish a dead pointer.
+    return this.#backendSessionId
+  }
+
+  /**
+   * Settle-time resolution, which OVERWRITES (and can clear) the pinned id.
+   *
+   * A driver that discovers the id it observed is NOT resumable — claude's
+   * rejected-resume path — passes `''` so the kernel does not persist a dead
+   * pointer. For every other driver the observed value simply stands, which is
+   * what keeps the pointer durable across a crash mid-run (IM-5).
+   */
+  settleBackendSessionId(backendSessionId: string): void {
+    this.#backendSessionId = backendSessionId === '' ? undefined : backendSessionId
+  }
+
+  /**
+   * Record the spawned child's pid (ABI v6).
+   *
+   * The kernel persists it with the `running` row so a host that dies mid-run
+   * can reap the detached process tree on restart (IM-4). Called by every
+   * driver right after `rt.spawn()`; a failed spawn simply never calls it.
+   */
+  attachProcess(pid: number | undefined): void {
+    if (pid === undefined || !Number.isInteger(pid) || pid <= 0) return
+    this.#pid = this.#pid ?? pid
+  }
+
+  get pid(): number | undefined {
+    return this.#pid
   }
 
   /** Append one normalized event. Ignored after the terminal state. */

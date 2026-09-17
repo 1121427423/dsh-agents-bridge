@@ -577,7 +577,13 @@ describe('registry integration', () => {
     expect(scans).toBe(afterFirst)
   })
 
-  it('re-scans when the caller asks for a refresh', async () => {
+  it('does NOT re-walk the bundle scan when the caller asks for a refresh', async () => {
+    // IM-8: `probe({refresh:true})` used to clear the scan memo, so every
+    // refresh re-ran a synchronous filesystem walk (up to the scan budget) on
+    // the event loop — a model could trigger it repeatedly. Which bundles are
+    // INSTALLED does not change on a 60-second TTL, so the walk is memoised for
+    // the registry's lifetime and refresh only re-runs the cheap `--version`
+    // probes.
     const root = freshRoot()
     writeBundle(root, { name: 'HouseAgent.app', product: productJson({ applicationName: 'house-agent' }) })
     let scans = 0
@@ -594,7 +600,7 @@ describe('registry integration', () => {
     const afterFirst = scans
     expect(afterFirst).toBeGreaterThan(0)
     await registry.probe({ refresh: true })
-    expect(scans).toBeGreaterThan(afterFirst)
+    expect(scans).toBe(afterFirst)
   })
 
   it('resolves a discovered identity against its real bundle path', async () => {

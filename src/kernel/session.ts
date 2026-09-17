@@ -27,6 +27,22 @@ import type {
 
 export type TerminalStatus = Exclude<AgentRunStatus, 'running'>
 
+/**
+ * Hard cap on one session's in-memory transcript.
+ *
+ * A long agent run can emit tens of thousands of events (every tool call, every
+ * token batch). The buffer used to grow without bound for the whole life of the
+ * host, so RSS rose monotonically with the number of runs a model started. The
+ * cap is a drop-oldest ring with ONE synthetic `status` event at the head that
+ * says how many events were discarded, so a reader is told the transcript is a
+ * tail rather than silently shown a truncated view.
+ *
+ * 500 is far more than any single `agents_output` window needs: the tool reads
+ * incrementally and a model that wants the beginning of a very long run is
+ * reading a report, not a live transcript.
+ */
+export const MAX_TRANSCRIPT_MESSAGES = 500
+
 /** Everything needed to derive the terminal `AgentResult`. */
 export interface SessionCompletion {
   readonly status: TerminalStatus
@@ -72,6 +88,18 @@ export interface AgentSession extends AgentSessionHandle {
   readonly timeoutKind: 'idle' | 'timeout' | undefined
   /** Status that overrides whatever the driver reports, if any. */
   terminalOverride(): TerminalStatus | undefined
+  /**
+   * Record the dialect's own conversation id as soon as the driver observes it,
+   * NOT at settle (IM-5).
+   *
+   * The resume pointer has to reach the store mid-run: a host restart between
+   * "the engine accepted the session" and "the run finished" otherwise loses it
+   * permanently, and `agents_send` can never continue that conversation. First
+   * non-empty value wins; the terminal result stays authoritative.
+   */
+  pinBackendSessionId(backendSessionId: string): void
+  /** The pinned id, when one was observed. */
+  readonly pinnedBackendSessionId: string | undefined
 }
 
 export function createAgentSession(init: AgentSessionInit): AgentSession {
@@ -87,6 +115,9 @@ export function createAgentSession(init: AgentSessionInit): AgentSession {
   let cancelPromise: Promise<void> | undefined
   let cancelHandler: ((reason?: string) => Promise<void> | void) | undefined = init.onCancel
   let timeoutKind: 'idle' | 'timeout' | undefined
+  let pinnedBackendSessionId: string | undefined
+  /** How many oldest events the ring has discarded. */
+  let dropped = 0
 
   let resolveDone: (value: AgentResult) => void = () => {}
   const done = new Promise<AgentResult>((resolve) => {
@@ -97,6 +128,37 @@ export function createAgentSession(init: AgentSessionInit): AgentSession {
     if (timeoutKind !== undefined) return 'timeout'
     if (cancelRequested) return 'cancelled'
     return undefined
+  }
+
+  /**
+   * Drop the oldest events once the buffer exceeds {@link MAX_TRANSCRIPT_MESSAGES}.
+   *
+   * Once anything has been dropped one slot is reserved for the synthetic
+   * marker, so `snapshot().messageCount` (marker included) never exceeds the
+   * cap. The marker is generated on read rather than stored, so it cannot be
+   * mistaken for a real driver event by `lastMessage`.
+   */
+  function trim(): void {
+    const capacity = dropped > 0 ? MAX_TRANSCRIPT_MESSAGES - 1 : MAX_TRANSCRIPT_MESSAGES
+    const overflow = buffer.length - capacity
+    if (overflow <= 0) return
+    buffer.splice(0, overflow)
+    dropped += overflow
+    // The first overflow flips `capacity` down by one; drop again if needed.
+    const second = buffer.length - (MAX_TRANSCRIPT_MESSAGES - 1)
+    if (second > 0) {
+      buffer.splice(0, second)
+      dropped += second
+    }
+  }
+
+  function truncationMarker(): AgentMessage {
+    return Object.freeze({
+      type: 'status',
+      level: 'warn',
+      content: `transcript truncated: dropped ${dropped} earlier event(s) to bound memory`,
+      at: Date.now(),
+    }) as AgentMessage
   }
 
   function complete(completion: SessionCompletion): AgentResult {
@@ -124,6 +186,7 @@ export function createAgentSession(init: AgentSessionInit): AgentSession {
   function push(message: AgentMessageInput): void {
     if (result !== undefined) return // the transcript is frozen at the terminal state
     buffer.push(Object.freeze({ ...message, at: message.at ?? Date.now() }) as AgentMessage)
+    trim()
   }
 
   function sync(source: readonly AgentMessage[]): number {
@@ -140,6 +203,7 @@ export function createAgentSession(init: AgentSessionInit): AgentSession {
       }
     }
     sourceCursor = source.length
+    if (copied > 0) trim()
     return copied
   }
 
@@ -148,7 +212,8 @@ export function createAgentSession(init: AgentSessionInit): AgentSession {
     agentId: init.agentId,
     startedAt,
     get messages() {
-      return buffer
+      if (dropped === 0) return buffer
+      return [truncationMarker(), ...buffer]
     },
     done,
     async cancel(reason?: string): Promise<void> {
@@ -175,13 +240,16 @@ export function createAgentSession(init: AgentSessionInit): AgentSession {
     },
     snapshot(): SessionSnapshot {
       const last = buffer.length > 0 ? buffer[buffer.length - 1] : undefined
+      // The synthetic truncation marker counts toward the reported total, so a
+      // caller can see the transcript is capped rather than silently short.
+      const messageCount = buffer.length + (dropped > 0 ? 1 : 0)
       return Object.freeze({
         sessionId: init.sessionId,
         agentId: init.agentId,
         status: result?.status ?? 'running',
         startedAt,
         ...(endedAt !== undefined ? { endedAt } : {}),
-        messageCount: buffer.length,
+        messageCount,
         ...(last !== undefined ? { lastMessage: last } : {}),
         ...(result !== undefined ? { result } : {}),
         terminal: result !== undefined,
@@ -206,5 +274,12 @@ export function createAgentSession(init: AgentSessionInit): AgentSession {
       return timeoutKind
     },
     terminalOverride,
+    pinBackendSessionId(backendSessionId) {
+      if (backendSessionId === '') return
+      pinnedBackendSessionId = pinnedBackendSessionId ?? backendSessionId
+    },
+    get pinnedBackendSessionId() {
+      return pinnedBackendSessionId
+    },
   }
 }

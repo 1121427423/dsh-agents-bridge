@@ -21,10 +21,10 @@
 | IM-1 | Important | `src/tracks/desktop/scan.ts:708-712`（经 `registry.ts:574-579,308`） | 扫描产物仅凭文件名形状即标为可启动，`agents_probe` 随即执行它；D26 声称的允许清单只管 run 不管 probe | verified |
 | IM-2 | Important | `src/drivers/claude.ts:746-767` | CodeBuddy/WorkBuddy 的审批帧缺 `allowed:true`（真机 bundle 只读 `allowed ?? false`）→ 每个权限请求被当拒绝 | **fixed**（c554a6f） |
 | IM-3 | Important | `src/kernel/watchdog.ts:62-64,130-132` | `timeoutMs > 2^31` 被 Node 钳成 1ms → 刚 spawn 就被杀并报 timeout | **fixed**（c554a6f） |
-| IM-4 | Important | `src/kernel/store.ts:26-38`（`manager.ts:178-192`） | 游离 agent 进程树在宿主重启后无人回收；pid 根本没落盘 | verified |
-| IM-5 | Important | `src/kernel/manager.ts:247,359,465` | 续跑指针只在终态落盘 → 中途重启即丢，`agents_send` 永久无法续跑 | verified |
-| IM-6 | Important | `src/kernel/store.ts:126-136,212-221` | 整表覆写：同目录两个 store 时，后写者吞掉先写者新增的行 | verified（**已亲手复现**，见 §B） |
-| IM-7 | Important | `src/kernel/manager.ts:173,464,634`（`session.ts:80,129-144`） | 终态会话永不从 `live` 驱逐 + transcript 无上限 → 长期宿主 RSS 单调增长 | verified |
+| IM-4 | Important | `src/kernel/store.ts:26-38`（`manager.ts:178-192`） | 游离 agent 进程树在宿主重启后无人回收；pid 根本没落盘 | **fixed**（B2） |
+| IM-5 | Important | `src/kernel/manager.ts:247,359,465` | 续跑指针只在终态落盘 → 中途重启即丢，`agents_send` 永久无法续跑 | **fixed**（B2） |
+| IM-6 | Important | `src/kernel/store.ts:126-136,212-221` | 整表覆写：同目录两个 store 时，后写者吞掉先写者新增的行 | **fixed**（B2，见 §I） |
+| IM-7 | Important | `src/kernel/manager.ts:173,464,634`（`session.ts:80,129-144`） | 终态会话永不从 `live` 驱逐 + transcript 无上限 → 长期宿主 RSS 单调增长 | **fixed**（B2） |
 | IM-8 | Important | `src/drivers/argv.ts:544-552`（`claude.ts:1036-1050`） | 300s 空闲看门狗在 `tool_use`→`tool_result` 静默期误杀健康长工具调用 | verified |
 | IM-9 | Important | `src/drivers/generic-argv.ts:17-21,237-239,305` | generic 驱动删掉所有空行，违反自己声明的逐字契约 | verified |
 
@@ -33,6 +33,8 @@ MI 级（复核后降级，仍修）：MI-1 Host 栅栏只看 `Host` 头（`host
 （`argv.ts:509-517` · `kernel/spawn.ts:100-110` 同型）· MI-5 openclaw 混合形态永不 arm（`openclaw.ts:366-371`）·
 MI-6 `exited` 只在 `close` 结算（`spawn.ts:213-223`）· MI-7 强制终态不清 `setInterval`（`manager.ts:332-357`）·
 MI-8 `probe(refresh)` 同步重扫（`registry.ts:437-441`）。
+
+**B2 状态**：上述 MI 段中属 B2 的 **MI-2 · MI-3 · MI-6 · MI-7 · MI-8 均已 fixed**（其余 MI-4/MI-5 属 B3，未动）。
 
 ## B. 监理亲手复现（独立于 workbuddy 自述）
 
@@ -80,7 +82,7 @@ IM-3 overflow (timeoutMs=1e12)      : fired after 1ms
 | 批次 | 范围 | 状态 |
 |---|---|---|
 | B1 | IM-2 · IM-3 | **fixed**（`c554a6f`；监理复跑 785/1 · tsc 0 · 双构建 · verify 11/11，并自验负控：把 codebuddy 新字段翻回 `false` → 新测试真红） |
-| B2 | IM-4 · IM-5 · IM-6 · IM-7 · MI-2 · MI-3 · MI-6 · MI-7 · MI-8 | **in-batch** |
+| B2 | IM-4 · IM-5 · IM-6 · IM-7 · MI-2 · MI-3 · MI-6 · MI-7 · MI-8 | **fixed**（本分支未提交；vitest 808/1 · tsc 0 · 双构建 · verify 11/11，九条均先红后绿，见 §I） |
 | B3 | IM-8 · IM-9 · MI-4 · MI-5 + **IM-15**（ACP `dispose()` 零调用者 → 终端孤儿）· MI-16 · MI-17 · MI-18 · MI-19 · MI-20 · MI-21 | pending |
 | B4 | IM-1 · IM-10 · IM-11 · IM-12 · IM-13 · MI-9 —— **IM-1 与 IM-10 必须同批**（前者今天被后者掩盖） | pending |
 | B5 | MI-1 · **IM-16**（settings 清空字段静默 no-op，却报 ok:true）· **IM-17**（`agents_output` nextIndex 越过未展示事件）· **IM-18**（Origin 丢端口 → 任意 loopback 端口页面可驱动 API）· **IM-19**（`textSeen` 永不复位 → 渲染粘连）· MI-10…MI-15 · MI-22 | pending |
@@ -287,3 +289,39 @@ TS2322、TS2349）是**脱离工程 tsconfig 独立编译的假象**，不计入
 | IM-18 | **CONFIRMED** | `host/api.ts:191-197` | Origin 只比 `hostname`，**丢弃端口** → `Origin: http://localhost:9999` 对 `Host: localhost:43120` 通过；判定 3 也救不了（同机不同端口是 `same-site` 而非 `cross-site`）。**无需 CORS 即可利用**：任意 loopback 端口的页面可用 `fetch(...,{mode:'no-cors'})` 发简单请求，body 被 `readJsonBody` 逐字解析，且**不需要 token**。头部注释宣称的「跨源页面无法驱动本插件」对这种情况是假的 |
 | IM-19 | **CONFIRMED** | `definitions.ts:376-397` | `textSeen` 在 397 行置真后**永不复位** → 之后任何 text 事件都会粘到 `blocks[last]`，无论那是 tool_use/tool_result/error：`#2 [tool_use] Bash → out#3 text` 连成一行，text 丢掉自己的序号与类型，工具输出与正文黏连。`tests/tools/` 下无任何覆盖 |
 | MI-22 | DOWNGRADED | `host/api.ts:496-509` + `registry.ts:617-643` | 确实无单飞、无限流：每次 `refresh:true` 都重置 scan 记忆、同步重走 bundle（2s 预算）、扫端口、为每个身份起一个 `--version`（各 3s）。但"无界/阻塞宿主"被高估：同一栅栏本就允许 `run`（起真进程），面板只在显式点击时带 `refresh:true`，每轮有界 → 低危防御性加固，非在线 DoS |
+
+## I. B2 落地记录（kernel）
+
+树未提交（按要求保持 dirty）。九条全部**先红后绿**；红是"撤掉修复"的负控实测，
+命令皆为 `/opt/homebrew/bin/node node_modules/vitest/vitest.mjs run <file> -t "<name>"`。
+
+| ID | 修复 | 红（负控 → 观测失败） |
+|---|---|---|
+| IM-4 | `StoredSession.pid`；run 时随 `running` 行落盘（`manager.ts` startRun）；重启恢复对 `status:'running'` 且有 pid 的行按**进程启动时间**比对 `startedAt`（`ORPHAN_SPAWN_SLACK_MS`）后 `kill(-pid,SIGKILL)`（`spawn.ts` 的 `signalProcessGroup` 复用 ESRCH/EPERM 处理）；pid 复用/取不到启动时间/无 pid 一律不杀 | `git stash push -- src/kernel/manager.ts` → `expected [] to deeply equal [ 4242 ]`（未杀）；`persists the live pid` → `expected false to be true` |
+| IM-5 | ABI v6 增 `AgentSessionHandle.backendSessionId?` + `pid?`；`DriverSession` 增 `pinBackendSessionId`/`attachProcess`；六个驱动在**观察点**pin；manager 轮询发现即 `store.upsert`；终态以 result 为准、取消/超时回落到已观测值（claude 拒绝续跑时 `settleBackendSessionId('')` 清除，不落死指针） | 同上 stash → `expected undefined to be 'fake-slow-session'` |
+| IM-6 | `store.persist()` 改为**合并写**：重读磁盘有效行 → 应用本实例 pending（upsert/删除）→ tmp+rename；`reload()` 也把 pending 折回。§B/§H 的 `A,B,C` 场景现在三次写后磁盘含 A、B、C | `git stash push -- src/kernel/store.ts` → `expected [ 'sess_A', 'sess_C' ] to deeply equal [ 'sess_A', 'sess_B', 'sess_C' ]`（与 §B 复现逐字一致） |
+| IM-7 | 终态会话移出 `live` → 20 条 finished-LRU（留 transcript）→ 溢出压成 compact 行（`restored` 上界 500）；`AgentSession.buffer` 为 500 上限 drop-oldest 环，头部一条合成 `status` 说明丢了多少；settle 释放 `rec.handle` | 逐条负控：① 环上限临时置 `MAX_SAFE_INTEGER` → `expected 600 to be less than or equal to 500`；② stash manager.ts → `expected [ {type:'text'…}, …(2) ] to deeply equal []`（旧 `live` 仍返回 transcript） |
+| MI-2 | `requestedCwd = runOptions.cwd ?? defaultCwd ?? process.cwd()`，**无条件** `checkCwd`，解析结果总进 `effective`（检查路径 = spawn 路径） | stash manager.ts → `expected { …(6) } to be an instance of AgentRunRejectedError`（不传 cwd 时旧代码直接放行） |
+| MI-3 | realpath 失败保留 `path.resolve` 词法兜底；丢弃的根收集后经 logger `error` 一行；`allowedCwdConfigured` 区分"未配置=不受限"与"配了但一个都解析不出=**fail-closed**"。`deniedCwd` 同型 | `git stash push -- src/kernel/policy.ts` → `expected function to throw an error, but it didn't`（旧 `checkCwd('/',p)` 返回 `'/'`） |
+| MI-6 | `spawnDetached` 同时听 `exit`；settle 取「`close`」与「`exit` + `POST_EXIT_DRAIN_MS`(300ms)」先到者，settle 时 flush 行缓冲并**移除 abort 监听器** | 单行负控 `POST_EXIT_DRAIN_MS = 60_000` → `expected 2013 to be less than 1500`（后代占着 stdio，旧行为等它 2s） |
+| MI-7 | `cancelInternal` 强制终态分支 `resolveForced()` + 清 `rec.poll`；`startRun` 用 `Promise.race([handle.done, rec.forced])`，使 wedged driver 的 run task 也能走完 `finally` | stash manager.ts → `expected 29 to be 25`（终态后 poll 仍在读 handle） |
+| MI-8 | `effectiveDescriptors()` 不再因 `refresh` 清 scan 记忆：安装态不随 TTL 变化，refresh 只重跑廉价的 `--version` | `git stash push -- src/kernel/registry.ts` → `expected 10 to be 5`（refresh 又走了一遍目录树） |
+
+**改动的既有断言（必须改，否则修了也红）**
+
+- `tests/kernel/store-robustness.test.ts:71-73` 原先把 IM-6 的丢行**写成了预期**（`toEqual(['sess_b'])`）。现改为
+  `['sess_a','sess_b']` 并在注释里写明这是 merge-on-write 的回归点 —— 该断言本身就是缺陷的一部分。
+- `tests/tracks/scan.test.ts` 的 `re-scans when the caller asks for a refresh` 断言的是 **MI-8 的缺陷行为**，
+  改名为 `does NOT re-walk the bundle scan when the caller asks for a refresh` 并翻转断言。
+
+**IM-7 / MI-6 / MI-7 的相互影响（同一份生命周期，已一起落地）**
+
+三者是同一条生命周期链上的三个缺口：`exited` 拖延（MI-6）→ 驱动 `done` 可能永不结算 → 强制终态（MI-7）
+若不清 poll / 不结束 run task，记录就永远留在 `live` → IM-7 的"终态驱逐"永远等不到。因此 `startRun` 的 `finally`
+统一做：清 `poll` → 停 watchdog → 写 store（**先于**释放 handle，因为续跑指针要从 handle 取）→ `rec.handle = undefined`
+→ `resolveSettled` → `retireSession()` 移出 `live`。`spawnDetached` 侧则在 settle 时移除 abort 监听器，
+不再把 spawn 闭包挂在 `AbortController` 上。
+
+**遗留（不粉饰）**：MI-8 只做到"refresh 不再重走"；**首次冷扫描仍是同步 `fs.readdirSync`**（原设计，
+受 `budgetMs` 约束），把它真正移出事件循环需要把 `scanDesktopBundles` 改异步或上 worker，属 B4 范围，
+未在本批夹带。

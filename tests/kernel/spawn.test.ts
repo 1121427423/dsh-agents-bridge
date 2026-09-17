@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   DEFAULT_GRACE_MS,
   LineSplitter,
+  POST_EXIT_DRAIN_MS,
   buildArgv,
   processGone,
   spawnDetached,
@@ -123,5 +124,41 @@ describe('spawnDetached', () => {
     await handle.exited
     expect(DEFAULT_GRACE_MS).toBe(5_000)
     await expect(handle.cancel('already exited')).resolves.toBeUndefined()
+  })
+})
+
+describe('MI-6: exited settles on the child\'s exit, not a descendant\'s', () => {
+  it('does not wait for a descendant holding the stdio pipes', async () => {
+    // The shell exits at once, but the backgrounded `sleep` inherited stdout and
+    // stderr, so Node's `close` cannot fire until it exits — the old behaviour
+    // made `exited` wait the full 2 s. The bounded drain settles on `exit`.
+    const lines: string[] = []
+    const handle = spawnDetached({
+      command: { executable: '/bin/sh' },
+      args: ['-c', 'printf "tail-no-newline"; sleep 2 & exit 0'],
+      onStdoutLine: (line) => lines.push(line),
+    })
+    const startedAt = Date.now()
+    const exit = await handle.exited
+    const elapsed = Date.now() - startedAt
+
+    expect(exit.code).toBe(0)
+    // The guardrail: settle on the drain window, NOT on the descendant's exit.
+    expect(elapsed).toBeLessThan(1_500)
+    expect(elapsed).toBeGreaterThanOrEqual(POST_EXIT_DRAIN_MS - 50)
+    // The drain also flushes the trailing partial line the stream was holding.
+    expect(lines).toEqual(['tail-no-newline'])
+  })
+
+  it('settles on close when no descendant holds the pipes (fast path unchanged)', async () => {
+    const handle = spawnDetached({
+      command: { executable: '/bin/sh' },
+      args: ['-c', 'exit 7'],
+    })
+    const startedAt = Date.now()
+    const exit = await handle.exited
+    expect(exit.code).toBe(7)
+    // `close` wins the race, so the drain window is not paid.
+    expect(Date.now() - startedAt).toBeLessThan(POST_EXIT_DRAIN_MS)
   })
 })

@@ -37,6 +37,7 @@ import { childLogger } from './logger.ts'
 import { checkAgent, checkConcurrency, checkCwd, createRunPolicy, type RunPolicy } from './policy.ts'
 import { createRegistry, type AgentRegistry, type ResolvedIdentity } from './registry.ts'
 import { createAgentSession, type AgentSession, type SessionCompletion } from './session.ts'
+import { createProcessReaper, type ProcessReaper } from './spawn.ts'
 import { createSessionStore, type StoredSession } from './store.ts'
 import { createWatchdog, type Watchdog } from './watchdog.ts'
 import type { ScanOptions } from '../tracks/desktop/scan.ts'
@@ -52,6 +53,29 @@ const POLL_INTERVAL_MS = 100
 const CANCEL_AWAIT_MS = 3_000
 /** How long we wait for the driver's `done` to settle after cancelling. */
 const CANCEL_SETTLE_MS = 2_000
+/**
+ * How many FINISHED sessions keep their transcript in memory.
+ *
+ * A terminal session used to stay in `live` forever, transcript and all, so a
+ * long-lived host grew without bound (IM-7). Terminal sessions are moved to a
+ * compact row plus this small LRU; only the most recent few remain readable with
+ * a full transcript, which is what `agents_output` needs right after a run ends.
+ */
+const FINISHED_LRU_SIZE = 20
+/** Upper bound on the compact (transcript-free) rows kept for lookup. */
+const MAX_RESTORED = 500
+/**
+ * How far after a session's `startedAt` a recovered pid's own start time may
+ * fall before the pid is treated as REUSED (IM-4).
+ *
+ * The child is spawned shortly after `startedAt`, so a matching process starts
+ * just after it. A pid recycled by an unrelated process starts much later and
+ * must never be `kill(-pid)`'d. The window is deliberately generous because
+ * `ps` reports whole seconds, and a spawn can take a moment under load.
+ */
+const ORPHAN_SPAWN_SLACK_MS = 120_000
+/** Clock skew allowed when comparing the stored start time to the process's. */
+const ORPHAN_CLOCK_SLACK_MS = 5_000
 
 /**
  * Manager-layer default idle window, per protocol family.
@@ -105,8 +129,19 @@ interface LiveSession {
   /** Resolves when `startRun` finished settling this session. */
   readonly settled: Promise<void>
   readonly resolveSettled: () => void
+  /**
+   * Resolves when the terminal state was forced rather than driver-reported.
+   *
+   * `startRun` awaits the DRIVER's `done`, which a wedged driver never settles;
+   * racing it against this lets the run task finish (and its `finally` run)
+   * instead of pinning the session in `live` forever (MI-7 + IM-7).
+   */
+  readonly forced: Promise<void>
+  readonly resolveForced: () => void
   handle: AgentSessionHandle | undefined
   poll: NodeJS.Timeout | undefined
+  /** Process-group leader pid, persisted so a restart can reap the tree (IM-4). */
+  pid: number | undefined
 }
 
 function errorMessage(err: unknown): string {
@@ -148,6 +183,12 @@ function clampIndex(value: number, max: number): number {
  */
 export type ManagerCreateOptions = ManagerOptions & {
   readonly scan?: false | ScanOptions
+  /**
+   * OS seam for the post-restart orphan reap (IM-4). Defaults to the real
+   * `ps`/`kill` implementation; tests inject one so a recovered row can be
+   * observed without spawning a real orphan.
+   */
+  readonly reaper?: ProcessReaper
 }
 
 export function createAgentManager(options: ManagerCreateOptions): AgentManager {
@@ -168,12 +209,75 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
     ...(options.deniedCwd !== undefined ? { deniedCwd: options.deniedCwd } : {}),
     ...(options.allowedAgents !== undefined ? { allowedAgents: options.allowedAgents } : {}),
     ...(options.maxConcurrent !== undefined ? { maxConcurrent: options.maxConcurrent } : {}),
+    logger: childLogger(logger, 'policy'),
   })
+  /** Reaps detached process trees left by a previous host process (IM-4). */
+  const reaper: ProcessReaper = options.reaper ?? createProcessReaper(childLogger(logger, 'reaper'))
 
+  /**
+   * Sessions still RUNNING. Terminal sessions are moved out at settle so this
+   * map cannot grow without bound over a long host life (IM-7).
+   */
   const live = new Map<string, LiveSession>()
+  /**
+   * Recently FINISHED sessions, newest last, capped at {@link FINISHED_LRU_SIZE}.
+   * Keeps the full transcript of the last few runs readable for `output()`
+   * without retaining every run the model ever started.
+   */
+  const finished = new Map<string, LiveSession>()
   /** Sessions from a previous process: metadata only, no transcript. */
   const restored = new Map<string, StoredSession>()
   let disposed = false
+
+  function rememberRestored(record: StoredSession): void {
+    restored.set(record.sessionId, record)
+    // Bounded like the store, so a long-lived host cannot accumulate rows here.
+    while (restored.size > MAX_RESTORED) {
+      const oldest = restored.keys().next()
+      if (oldest.done) break
+      restored.delete(oldest.value)
+    }
+  }
+
+  /**
+   * Kill the process tree a dead host left behind, guarding against PID REUSE.
+   *
+   * The stored `running` row names a pid that belonged to OUR child when it was
+   * written. After a restart that pid may have been recycled by an unrelated
+   * process, so the pid is only a usable identity together with the moment its
+   * process started: signal the group only when the live process really is the
+   * one this session spawned. A reused pid is logged and left strictly alone.
+   */
+  function reapOrphan(record: StoredSession): void {
+    const pid = record.pid
+    if (pid === undefined) return
+    const startTime = reaper.startTimeMs(pid)
+    if (startTime === undefined) {
+      logger.warn('could not establish a recovered process start time; not signalling', {
+        sessionId: record.sessionId,
+        pid,
+      })
+      return
+    }
+    const delta = startTime - record.startedAt
+    const sameProcess =
+      delta >= -ORPHAN_CLOCK_SLACK_MS && delta <= ORPHAN_SPAWN_SLACK_MS
+    if (!sameProcess) {
+      logger.warn('recovered pid was reused by another process; not signalling', {
+        sessionId: record.sessionId,
+        pid,
+        pidStartedAt: startTime,
+        sessionStartedAt: record.startedAt,
+      })
+      return
+    }
+    const signalled = reaper.killGroup(pid)
+    logger.warn('reaped orphaned agent process group from a previous host', {
+      sessionId: record.sessionId,
+      pid,
+      signalled,
+    })
+  }
 
   for (const record of store.reload()) {
     if (record.status === 'running') {
@@ -184,10 +288,11 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
         status: 'failed',
         endedAt: record.endedAt ?? Date.now(),
       }
-      restored.set(record.sessionId, stale)
+      rememberRestored(stale)
       store.upsert(stale)
+      reapOrphan(record)
     } else {
-      restored.set(record.sessionId, record)
+      rememberRestored(record)
     }
   }
 
@@ -207,6 +312,18 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
     if (!handle) return 0
     const added = rec.session.sync(handle.messages)
     if (added > 0) rec.watchdog.touch()
+    // Persist the resume pointer the moment the driver learns it. Deferring the
+    // write to settle loses it permanently if the host restarts mid-run (IM-5),
+    // which makes `agents_send` impossible for that conversation forever.
+    const observed = handle.backendSessionId
+    if (
+      observed !== undefined &&
+      observed !== '' &&
+      observed !== rec.session.pinnedBackendSessionId
+    ) {
+      rec.session.pinBackendSessionId(observed)
+      store.upsert(toStoreRecord(rec))
+    }
     return added
   }
 
@@ -244,17 +361,34 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
 
   function toStoreRecord(rec: LiveSession): StoredSession {
     const snapshot = rec.session.snapshot()
-    const backendSessionId = snapshot.result?.backendSessionId
+    const terminal = snapshot.terminal
+    // Terminal result is authoritative (a refused resume deliberately reports no
+    // id). A run that was CANCELLED or timed out before it could report a result
+    // still falls back to the id observed mid-run — that conversation may be
+    // perfectly resumable, and dropping it is the IM-5 loss. While running,
+    // prefer what the driver has already observed, then the id a resumed run was
+    // started with.
+    const backendSessionId = terminal
+      ? (snapshot.result?.backendSessionId ?? rec.session.pinnedBackendSessionId)
+      : (rec.handle?.backendSessionId ??
+        rec.session.pinnedBackendSessionId ??
+        snapshot.result?.backendSessionId ??
+        rec.options.resumeSessionId)
     return {
       sessionId: snapshot.sessionId,
       agentId: snapshot.agentId,
       status: snapshot.status,
       startedAt: snapshot.startedAt,
       ...(snapshot.endedAt !== undefined ? { endedAt: snapshot.endedAt } : {}),
-      ...(backendSessionId !== undefined ? { backendSessionId } : {}),
+      ...(backendSessionId !== undefined && backendSessionId !== ''
+        ? { backendSessionId }
+        : {}),
       ...(rec.options.cwd !== undefined ? { cwd: rec.options.cwd } : {}),
       ...(rec.options.model !== undefined ? { model: rec.options.model } : {}),
       ...(rec.resumedFrom !== undefined ? { resumedFrom: rec.resumedFrom } : {}),
+      // Only a RUNNING row carries a pid: a terminal row must never invite the
+      // post-restart reaper to signal a pid the OS may since have recycled.
+      ...(rec.pid !== undefined && !terminal ? { pid: rec.pid } : {}),
     }
   }
 
@@ -290,6 +424,14 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
         error: reason !== undefined ? `cancelled: ${reason}` : 'cancelled',
       })
     }
+    // The session is terminal but the run task is still awaiting a driver `done`
+    // that may never come. Release it and stop the poll: otherwise the interval
+    // keeps reading the handle and the record can never leave `live` (MI-7).
+    rec.resolveForced()
+    if (rec.poll !== undefined) {
+      clearInterval(rec.poll)
+      rec.poll = undefined
+    }
   }
 
   function settleFromDriver(rec: LiveSession, outcome: DriverOutcome): void {
@@ -319,6 +461,10 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
       const backend = options.createBackend(descriptor.family, deps)
       const handle = await backend.run(rec.options, deps, rec.abort.signal)
       rec.handle = handle
+      rec.pid = handle.pid
+      // Persist the pid with the `running` row immediately: if the host dies
+      // during the run, recovery needs it to reap the detached tree (IM-4).
+      store.upsert(toStoreRecord(rec))
       syncFromHandle(rec)
       if (session.snapshot().terminal) {
         // Cancelled/timed out while the backend was still starting up: make sure
@@ -330,17 +476,25 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
         return
       }
       rec.poll = setInterval(() => syncFromHandle(rec), POLL_INTERVAL_MS)
-      const outcome: DriverOutcome = await handle.done.then(
-        (result) => result,
-        (err: unknown): DriverOutcome => ({
-          status: 'failed',
-          exitCode: null,
-          text: '',
-          error: errorMessage(err),
-        }),
-      )
-      syncFromHandle(rec)
-      settleFromDriver(rec, outcome)
+      // Race the driver's own settlement against a forced terminal state. A
+      // wedged driver whose `done` never settles would otherwise pin the run
+      // task (and its poll) in `live` forever (MI-7).
+      const outcome: DriverOutcome | undefined = await Promise.race([
+        handle.done.then(
+          (result) => result,
+          (err: unknown): DriverOutcome => ({
+            status: 'failed',
+            exitCode: null,
+            text: '',
+            error: errorMessage(err),
+          }),
+        ),
+        rec.forced.then(() => undefined),
+      ])
+      if (outcome !== undefined) {
+        syncFromHandle(rec)
+        settleFromDriver(rec, outcome)
+      }
     } catch (err) {
       const message = errorMessage(err)
       runLogger.error('run failed to start', { sessionId: session.sessionId, error: message })
@@ -356,8 +510,41 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
         rec.poll = undefined
       }
       rec.watchdog.stop()
-      store.upsert(toStoreRecord(rec))
+      // Persist BEFORE dropping the handle: `toStoreRecord` reads the handle for
+      // the resume pointer observed mid-run.
+      const record = toStoreRecord(rec)
+      store.upsert(record)
+      // Release the driver handle and stop tracking this session as live. The
+      // handle kept the child's closures reachable, and `live` had no bound.
+      rec.handle = undefined
       rec.resolveSettled()
+      retireSession(rec)
+    }
+  }
+
+  /**
+   * Move a settled session out of `live` into the small finished-LRU, spilling
+   * the oldest transcript to a compact (transcript-free) row.
+   *
+   * This is the bound IM-7 adds: before it, every terminal session stayed in
+   * `live` with its full transcript for the life of the host.
+   */
+  function retireSession(rec: LiveSession): void {
+    live.delete(rec.session.sessionId)
+    if (disposed) {
+      // Disposal is tearing the maps down concurrently; the session must stay
+      // readable through a compact row rather than vanish from `status()`
+      // because its `finally` ran after `dispose()` already swept `live`.
+      rememberRestored(toStoreRecord(rec))
+      return
+    }
+    finished.set(rec.session.sessionId, rec)
+    while (finished.size > FINISHED_LRU_SIZE) {
+      const oldest = finished.keys().next()
+      if (oldest.done) break
+      const evicted = finished.get(oldest.value)
+      finished.delete(oldest.value)
+      if (evicted) rememberRestored(toStoreRecord(evicted))
     }
   }
 
@@ -399,13 +586,21 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
     }
 
     // The RESOLVED cwd is what the child is spawned with, so the path that was
-    // checked and the path that is used cannot disagree.
-    const requestedCwd = runOptions.cwd ?? options.defaultCwd
+    // checked and the path that is used cannot disagree. `cwd` is resolved even
+    // when the caller omitted it — falling back to the host default and then to
+    // the bridge's own cwd — so "omit cwd" is not a way to skip the policy
+    // (MI-2).
+    const requestedCwd =
+      (runOptions.cwd ?? '').trim() !== ''
+        ? runOptions.cwd
+        : (options.defaultCwd ?? '').trim() !== ''
+          ? options.defaultCwd
+          : process.cwd()
     const cwd = checkCwd(requestedCwd, policy)
     const model = runOptions.model ?? resolved.model
     const effective: AgentRunOptions = {
       ...runOptions,
-      ...(cwd !== undefined ? { cwd } : {}),
+      cwd,
       ...(model !== undefined ? { model } : {}),
     }
 
@@ -415,6 +610,10 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
     let resolveSettled: () => void = () => {}
     const settled = new Promise<void>((resolve) => {
       resolveSettled = resolve
+    })
+    let resolveForced: () => void = () => {}
+    const forced = new Promise<void>((resolve) => {
+      resolveForced = resolve
     })
 
     const session = createAgentSession({
@@ -456,8 +655,11 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
       watchdog,
       settled,
       resolveSettled,
+      forced,
+      resolveForced,
       handle: undefined,
       poll: undefined,
+      pid: undefined,
       ...(resumedFrom !== undefined ? { resumedFrom } : {}),
     }
 
@@ -487,7 +689,7 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
     },
 
     status(sessionId) {
-      const rec = live.get(sessionId)
+      const rec = live.get(sessionId) ?? finished.get(sessionId)
       if (rec) return liveSnapshot(rec)
       const stored = restored.get(sessionId)
       return stored ? restoredSnapshot(stored) : undefined
@@ -496,15 +698,20 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
     list(): readonly SessionSnapshot[] {
       const snapshots: SessionSnapshot[] = []
       for (const rec of live.values()) snapshots.push(liveSnapshot(rec))
+      for (const [sessionId, rec] of finished) {
+        if (!live.has(sessionId)) snapshots.push(liveSnapshot(rec))
+      }
       for (const [sessionId, stored] of restored) {
-        if (!live.has(sessionId)) snapshots.push(restoredSnapshot(stored))
+        if (!live.has(sessionId) && !finished.has(sessionId)) {
+          snapshots.push(restoredSnapshot(stored))
+        }
       }
       // Newest first: the model almost always wants the run it just started.
       return snapshots.sort((a, b) => b.startedAt - a.startedAt)
     },
 
     output(sessionId, outputOptions): SessionOutput | undefined {
-      const rec = live.get(sessionId)
+      const rec = live.get(sessionId) ?? finished.get(sessionId)
       if (rec) {
         syncFromHandle(rec)
         const messages: readonly AgentMessage[] = rec.session.messages
@@ -521,7 +728,8 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
       }
       const stored = restored.get(sessionId)
       if (!stored) return undefined
-      // Known session from a previous process: metadata yes, transcript no.
+      // Known session from a previous process (or one whose transcript was
+      // spilled from the finished LRU): metadata yes, transcript no.
       return {
         sessionId,
         status: restoredSnapshot(stored).status,
@@ -531,7 +739,7 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
     },
 
     async cancel(sessionId, reason?: string): Promise<boolean> {
-      const rec = live.get(sessionId)
+      const rec = live.get(sessionId) ?? finished.get(sessionId)
       if (!rec) return false
       if (rec.session.snapshot().terminal) return false
       await rec.session.cancel(reason)
@@ -539,7 +747,7 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
     },
 
     async send(sessionId, prompt): Promise<SessionSnapshot> {
-      const rec = live.get(sessionId)
+      const rec = live.get(sessionId) ?? finished.get(sessionId)
       const stored = rec ? undefined : restored.get(sessionId)
       let target: SessionSnapshot | undefined
       if (rec) target = liveSnapshot(rec)
@@ -616,7 +824,7 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
         pending.push(rec.session.cancel('dispose'))
       }
       await Promise.allSettled(pending)
-      for (const rec of live.values()) {
+      for (const rec of [...live.values(), ...finished.values()]) {
         if (rec.poll !== undefined) {
           clearInterval(rec.poll)
           rec.poll = undefined
@@ -624,14 +832,16 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
         rec.watchdog.stop()
         const record = toStoreRecord(rec)
         store.upsert(record)
-        // Keep the session readable after disposal. `live` is dropped below, so
-        // without this a disposed session would vanish from `status()`/`list()`
-        // even though its transcript and terminal state are still meaningful —
-        // the model would be told a session it just cancelled never existed.
-        restored.set(record.sessionId, record)
+        // Keep the session readable after disposal. The maps are dropped below,
+        // so without this a disposed session would vanish from
+        // `status()`/`list()` even though its terminal state is still
+        // meaningful — the model would be told a session it just cancelled never
+        // existed.
+        rememberRestored(record)
       }
       store.flush()
       live.clear()
+      finished.clear()
     },
   }
 }

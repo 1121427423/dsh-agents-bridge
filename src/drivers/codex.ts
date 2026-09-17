@@ -666,6 +666,8 @@ export async function runCodex(
     cwd: opts.cwd,
     env: deps.env,
   })
+  // ABI v6: hand the kernel the pid it persists for the post-restart reap (IM-4).
+  session.attachProcess(child.pid)
 
   deps.logger.debug('driver launched', {
     family: 'codex',
@@ -720,7 +722,12 @@ export async function runCodex(
   }
 
   // Attach the reader before any other work so no early frame is lost.
-  const reader = readLines(child.stdout, (line) => parser.handleLine(line))
+  const reader = readLines(child.stdout, (line) => {
+    parser.handleLine(line)
+    // ABI v6: codex names its thread id in the first events; publish it as soon
+    // as it is seen so the kernel can persist the resume pointer (IM-5).
+    session.pinBackendSessionId(parser.state.threadId)
+  })
   child.stdout.on('error', (err: unknown) => {
     scanError = err
     reader.stop()

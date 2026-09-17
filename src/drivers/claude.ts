@@ -975,6 +975,8 @@ export async function runStreamJsonFamily(
 
   proc = rt.spawn({ command: commandLine.command, args: commandLine.args, cwd: opts.cwd, env })
   const child = proc
+  // ABI v6: hand the kernel the pid it persists for the post-restart reap (IM-4).
+  session.attachProcess(proc.pid)
 
   deps.logger.debug('driver launched', {
     family: dialect.family,
@@ -986,7 +988,12 @@ export async function runStreamJsonFamily(
   // Attach the stdout reader BEFORE writing anything to stdin. The CLI emits a
   // startup banner before its first stdin read; a driver that writes first
   // deadlocks against it (multica claude_deadlock_test.go).
-  const reader = readLines(child.stdout, (line) => parser.handleLine(line))
+  const reader = readLines(child.stdout, (line) => {
+    parser.handleLine(line)
+    // ABI v6: publish the backend session id as soon as the stream names it, so
+    // the kernel can persist the resume pointer before the run settles (IM-5).
+    session.pinBackendSessionId(parser.state.sessionId)
+  })
   child.stdout.on('error', (err: unknown) => {
     scanError = err
     reader.stop()
@@ -1180,6 +1187,10 @@ export async function runStreamJsonFamily(
       status === 'failed',
       texts,
     )
+    // The driver's final answer on resumability overwrites the mid-run pin: a
+    // rejected resume resolves to '' and must CLEAR it, so the kernel does not
+    // persist a dead pointer (IM-5). On a normal completion this is the same id.
+    session.settleBackendSessionId(backendSessionId)
 
     finishOnce({
       sessionId: session.sessionId,
