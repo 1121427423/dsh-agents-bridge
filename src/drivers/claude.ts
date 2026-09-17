@@ -49,6 +49,7 @@ import {
   asRecord,
   asString,
   buildCommandLine,
+  clampTimerDelay,
   errorText,
   event,
   filterCustomArgs,
@@ -1085,7 +1086,11 @@ export async function runStreamJsonFamily(
 
   // Hard wall-clock deadline: 0/undefined means "no deadline" (multica's
   // runContext semantics), in which case only the idle watchdog applies.
-  const hardTimeoutMs = opts.timeoutMs !== undefined && opts.timeoutMs > 0 ? opts.timeoutMs : 0
+  // Caller-supplied windows are clamped to the runtime's timer ceiling: an
+  // over-large delay is silently rewritten to 1 ms by `setTimeout`, which would
+  // turn "no deadline" into an immediate timeout (RR-MI-5).
+  const hardTimeoutMs =
+    opts.timeoutMs !== undefined && opts.timeoutMs > 0 ? clampTimerDelay(opts.timeoutMs) : 0
   const hardTimer =
     hardTimeoutMs > 0
       ? setTimeout(() => {
@@ -1093,7 +1098,7 @@ export async function runStreamJsonFamily(
         }, hardTimeoutMs)
       : undefined
 
-  const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS[dialect.family]
+  const idleTimeoutMs = clampTimerDelay(opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS[dialect.family])
   let idleTimer: NodeJS.Timeout | undefined
   const touchIdle = (): void => {
     if (idleTimeoutMs <= 0 || terminalReason !== 'none') return

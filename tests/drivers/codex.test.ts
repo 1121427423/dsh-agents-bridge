@@ -129,6 +129,20 @@ afterEach(() => {
   clearDriverRuntime()
 })
 
+/**
+ * A child whose `terminate()` records the request but leaves stdout OPEN, so a
+ * test can keep feeding frames after a cancel has been accepted.
+ */
+class ParkedChild extends FakeChild {
+  override terminate(): Promise<void> {
+    this.terminated = true
+    return Promise.resolve()
+  }
+}
+
+/** Let every already-written stdout chunk reach the driver's reader. */
+const tick = (): Promise<void> => new Promise((resolve) => setImmediate(resolve))
+
 function collectSink(): { messages: AgentMessage[]; sink: { emit: (m: AgentMessage) => void } } {
   const messages: AgentMessage[] = []
   return { messages, sink: { emit: (m) => messages.push(m) } }
@@ -844,6 +858,79 @@ describe('run() over a fake child', () => {
     expect(result.status).toBe('timeout')
     expect(result.text).toBe('')
   })
+
+  /**
+   * RR-MI-6 — a cancel is the CALLER's verdict, never a race with the wire.
+   *
+   * `requestTerminal` used to consult `settleFromParsedTerminal()` for every
+   * reason, so a `turn.completed` frame already in hand re-judged an explicit
+   * operator stop as `completed` (with the turn's text). MI-21's rule is
+   * "a finished turn beats a TIMER"; it was never meant to beat a cancel.
+   *
+   * The terminal frame is parsed while the process deliberately lingers — the
+   * exact window MI-21 exists for — and only then is the run cancelled.
+   */
+  it('RR-MI-6: a terminal frame already in hand does not re-judge a cancel', async () => {
+    const child = new FakeChild()
+    const { backend } = harness(child)
+    const handle = await backend.run(
+      { agent: 'codex', prompt: 'x' },
+      makeDeps(),
+      new AbortController().signal,
+    )
+    child.emit(CODEX_SUCCESS)
+    // Let the reader parse the whole turn (answer + `turn.completed`); the child
+    // stays alive, so the only reason the run is not settled is the missing exit.
+    await tick()
+    await handle.cancel('user stopped it')
+    const result = await handle.done
+    expect(result.status).toBe('cancelled')
+    expect(result.error).toBe('user stopped it')
+    // A cancelled run reports no text, exactly like the timer exits.
+    expect(result.text).toBe('')
+    expect(child.terminated).toBe(true)
+    expect(handle.snapshot().status).toBe('cancelled')
+  })
+
+  it('RR-MI-6 negative control: without a cancel the same in-hand terminal frame still settles normally', async () => {
+    const child = new FakeChild()
+    const { backend } = harness(child)
+    const handle = await backend.run(
+      { agent: 'codex', prompt: 'x' },
+      makeDeps(),
+      new AbortController().signal,
+    )
+    child.emit(CODEX_SUCCESS)
+    child.finish(0)
+    const result = await handle.done
+    expect(result.status).toBe('completed')
+    expect(result.text).toBe('OK')
+  })
+
+  /**
+   * The ordering the finding is worded in: cancel ACCEPTED first, terminal frame
+   * only afterwards. Already-correct before the fix (a settled session ignores
+   * later frames), kept so a future "defer the cancel until the wire settles"
+   * change cannot reopen the hole.
+   */
+  it('RR-MI-6: a terminal frame arriving after an accepted cancel cannot revive the run', async () => {
+    const child = new ParkedChild()
+    const { backend } = harness(child)
+    const handle = await backend.run(
+      { agent: 'codex', prompt: 'x' },
+      makeDeps(),
+      new AbortController().signal,
+    )
+    await handle.cancel('operator stopped it')
+    // The child is still alive and its stdout still open, so this frame really is
+    // parsed after the cancel was accepted.
+    child.emit(CODEX_SUCCESS)
+    await tick()
+    const result = await handle.done
+    expect(result.status).toBe('cancelled')
+    expect(result.text).toBe('')
+  })
+
 
   it('passes the interpreter rule and a filtered launch prefix straight to spawn', async () => {
     const child = new FakeChild()

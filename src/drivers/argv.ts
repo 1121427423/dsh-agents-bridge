@@ -72,6 +72,7 @@ import {
   resolveStreamLimits,
   type StreamLimits,
 } from '../kernel/stream-limits.ts'
+import { MAX_TIMER_DELAY_MS } from '../kernel/watchdog.ts'
 import type {
   AgentMessage,
   AgentResult,
@@ -536,6 +537,26 @@ export function asLogLevel(value: unknown): AgentMessage['level'] {
 export function errorText(err: unknown): string {
   if (err instanceof Error) return err.message
   return String(err)
+}
+
+/**
+ * Clamp a caller- or config-supplied timer delay to the runtime's ceiling.
+ *
+ * `setTimeout` does not reject a delay above 2^31-1: it silently rewrites it to
+ * **1 ms** and emits `TimeoutOverflowWarning`. For a run watchdog that turns a
+ * caller's "effectively no deadline" (a very large number) into an immediate
+ * timeout — the child is signalled right after spawn and the run is reported as
+ * a timeout it never had (RR-MI-5). Every driver-side timer whose delay comes
+ * from `AgentRunOptions` or a descriptor env var must pass through here.
+ *
+ * One number for both layers: this is the kernel's own {@link MAX_TIMER_DELAY_MS}
+ * (imported, never re-declared), so the watchdog and the drivers can never drift
+ * onto different ceilings. Non-finite values are left untouched — they are
+ * disarmed by each driver's own `<= 0` guard, and silently turning `NaN` into a
+ * three-week deadline would hide a caller bug.
+ */
+export function clampTimerDelay(ms: number): number {
+  return Number.isFinite(ms) ? Math.min(Math.floor(ms), MAX_TIMER_DELAY_MS) : ms
 }
 
 /** Options for {@link readLines}. */

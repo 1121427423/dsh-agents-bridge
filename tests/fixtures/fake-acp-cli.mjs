@@ -29,6 +29,7 @@
  *    crash the reader.
  */
 import { createInterface } from 'node:readline'
+import { existsSync } from 'node:fs'
 
 const argv = process.argv.slice(2)
 const scenarioAt = argv.indexOf('--scenario')
@@ -428,6 +429,44 @@ async function runOrphanTerminalCancel() {
   return { stopReason: 'cancelled' }
 }
 
+/**
+ * RR-IM-6 — a terminal created BEFORE the handshake fails.
+ *
+ * The engine asks the CLIENT for a terminal (the driver spawns it into its own
+ * process group), then refuses `session/new`. `runAcp`'s pre-prompt failure path
+ * used to skip `dispose()`, so that terminal's group outlived `handle.done`.
+ *
+ * The command writes its own pid to `orphan.pid` in the run cwd and then `exec`s
+ * into a long sleep (same pid, so the pid the test watches IS the pid the driver
+ * must kill). The fixture waits for the file BEFORE failing `session/new`, so the
+ * pid is observable no matter how fast the driver cleans up.
+ */
+async function createTerminalBeforeSession() {
+  await request('terminal/create', {
+    command: 'echo $$ > orphan.pid; exec sleep 300',
+    cwd: '.',
+    sessionId: SESSION_ID,
+  })
+  const deadline = Date.now() + 5_000
+  while (Date.now() < deadline && !existsSync('orphan.pid')) {
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+}
+
+/**
+ * RR-MI-7 — one stdout line past the 16 MB stream cap, during the handshake.
+ *
+ * The driver's reader detaches and rejects the pending `initialize`, but this
+ * engine never exits and never answers: a driver that only rejects promises is
+ * left in `await child.exited` forever. The run must settle on a real terminal
+ * path instead. (The caller cancels it after the assertion in the RED case.)
+ */
+async function runOverflowHandshake() {
+  process.stdout.write('x'.repeat(17 * 1024 * 1024))
+  await new Promise((resolve) => setTimeout(resolve, 30_000))
+  return { stopReason: 'end_turn' }
+}
+
 const SCENARIOS = {
   success: runSuccess,
   tools: runToolCalls,
@@ -451,6 +490,8 @@ const SCENARIOS = {
 
 const rl = createInterface({ input: process.stdin, crlfDelay: Infinity })
 let promptRunning = false
+/** RR-IM-6: the in-flight pre-handshake terminal creation, if armed. */
+let beforeSession = null
 
 rl.on('line', (line) => {
   const trimmed = line.trim()
@@ -479,11 +520,31 @@ rl.on('line', (line) => {
 
   switch (frame.method) {
     case 'initialize':
+      if (scenario === 'overflow-handshake') {
+        // RR-MI-7: a single over-cap line INSTEAD of a response, and then park.
+        void runOverflowHandshake()
+        return
+      }
       respond(frame.id, INIT_RESULT)
+      if (scenario === 'orphan-before-session') beforeSession = createTerminalBeforeSession()
       handshakeNoise()
       idlessRequest()
       return
-    case 'session/new':
+    case 'session/new': {
+      if (beforeSession !== null) {
+        // RR-IM-6: the terminal exists first; only then does the handshake fail.
+        const armed = beforeSession
+        beforeSession = null
+        void (async () => {
+          try {
+            await armed
+          } catch {
+            /* fail the request below either way */
+          }
+          fail(frame.id, -32000, 'session/new refused by the fixture')
+        })()
+        return
+      }
       respond(frame.id, NEW_RESULT)
       notify({
         sessionUpdate: 'usage_update',
@@ -492,6 +553,7 @@ rl.on('line', (line) => {
         _meta: { 'codebuddy.ai/usageByCategory': { systemPrompt: 0, conversation: 0 } },
       })
       return
+    }
     case 'session/resume':
       respond(frame.id, NEW_RESULT)
       return

@@ -65,6 +65,7 @@ import {
   asRecord,
   asString,
   buildCommandLine,
+  clampTimerDelay,
   errorText,
   event,
   filterCustomArgs,
@@ -773,8 +774,12 @@ export async function runCodex(
   ): void {
     if (terminalReason !== 'none') return
     terminalReason = reason
-    // A finished turn outranks the verdict of whatever timer fired (MI-21).
-    if (settleFromParsedTerminal()) return
+    // A finished turn outranks the verdict of whatever TIMER fired (MI-21) — but
+    // never a CANCEL. `settleCancelled` reaches here with a terminal frame
+    // possibly already in hand, and letting the parser state decide would re-judge
+    // an explicit operator stop as `completed` (RR-MI-6). Cancel is the caller's
+    // verdict, not a race with the wire.
+    if (reason !== 'cancelled' && settleFromParsedTerminal()) return
     finishOnce({
       sessionId: session.sessionId,
       agentId: opts.agent,
@@ -821,14 +826,18 @@ export async function runCodex(
   child.stderr.on('error', () => {})
   child.stdin.on('error', () => {})
 
-  const hardTimeoutMs = opts.timeoutMs !== undefined && opts.timeoutMs > 0 ? opts.timeoutMs : 0
+  // Caller-supplied windows are clamped to the runtime's timer ceiling: an
+  // over-large delay is silently rewritten to 1 ms by `setTimeout`, which would
+  // turn "no deadline" into an immediate timeout (RR-MI-5).
+  const hardTimeoutMs =
+    opts.timeoutMs !== undefined && opts.timeoutMs > 0 ? clampTimerDelay(opts.timeoutMs) : 0
   if (hardTimeoutMs > 0) {
     hardTimer = setTimeout(() => {
       requestTerminal('timeout', `codex timed out after ${hardTimeoutMs}ms`)
     }, hardTimeoutMs)
   }
 
-  const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_CODEX_IDLE_TIMEOUT_MS
+  const idleTimeoutMs = clampTimerDelay(opts.idleTimeoutMs ?? DEFAULT_CODEX_IDLE_TIMEOUT_MS)
   const touchIdle = (): void => {
     if (idleTimeoutMs <= 0 || terminalReason !== 'none') return
     if (idleTimer !== undefined) clearTimeout(idleTimer)

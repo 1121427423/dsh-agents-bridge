@@ -920,3 +920,193 @@ forward vs reverse）。
 
 **审计式自评**：这两条都是监理这边发现、被测者报告里没有的。它们的共同特征是**「修好了机制、没修好用户可见结果」**与
 **「边界只差一个 code unit」** —— 与 §O 里 3 条 CR 被降级、15 条 IM 被证实同源：**用户可见面**比机制面更容易漏。
+
+## S. 批次 C 落地记录（RR-IM-6, RR-MI-5, RR-MI-6, RR-MI-7）（2026-09-18）
+
+范围：§O-1 未被批次 A/B 收掉的 **RR-IM-6**（drivers/acp）加 §O-2 的 **RR-MI-5 · RR-MI-6 · RR-MI-7**（均为 drivers）。
+本节之后，§O-1 的 6 条 Important（RR-IM-1..6）全部落地；§O-2 中被点名的 Minor 只剩 RR-MI-9 / RR-MI-10 / RR-MI-12 未动（本批未授权）。
+**按本批 HARD RULE（只追加、不改 §O/§P/§Q/§R 既有文字），§O-1 里 RR-IM-6 那一行仍写着「待批次 C」——那是本次授权下不可改的陈旧状态列，
+以本节为准。**
+树按约定**未提交**（保持 dirty；代码基线 `cba18aa`，HEAD `c06b5e5`）；**零 `git stash` / `checkout` / `reset`**，零负控残留
+（`git status` 只有本批 10 个路径 + 1 个新增测试文件）。**未动冻结 ABI**（`src/kernel/types.ts` 一行未改），
+未越界到 `src/host/**`、`src/client/**`、`src/kernel/{types,manager,registry}.ts`、`src/tools/**`、`src/tracks/**`。
+
+**红阶段的取法**（与 A/B 两批的差别，如实说明）：本批四条在同一次施工里全部落地，工作树里四个修复共存，
+所以红阶段不来自「临时改源码再回滚」，而来自**一份独立解包的修复前源码树**：
+`git archive cba18aa | tar -x -C /tmp/batchC-red`（只读仓库，不动工作树；`node_modules` 用软链），
+把本批新增/改写的测试文件复制进去后运行，跑完 `rm -rf /tmp/batchC-red`。绿阶段在工作树上。
+红/绿命令统一为 `/opt/homebrew/bin/node node_modules/vitest/vitest.mjs run <file>`。
+
+### S-1 RR-IM-6 · `failBeforePrompt` 也必然 dispose
+
+**修法**（`src/drivers/acp.ts:1117-1132`〔`AcpClient.dispose`〕· `:2102-2128`〔`failBeforePrompt`〕）
+- `failBeforePrompt` 由同步改为 **`async`**：`await client.dispose()` → `child.terminate()` → `finishOnce(...)`。
+  五个调用点（`initialize` / auth 两处 / `session/new` 两处）原本就是 `return failBeforePrompt(...)`，返回 Promise 被 IIFE 吸收，语义不变。
+- `dispose()` 里那句 `for (const t of [...]) void this.#killTerminal(t)` 改成 **`await Promise.all(...)`**。
+  这正是验收判据的关键：`done` 是调用方唯一的「运行已结束」信号，fire-and-forget 的 kill 会让「已结算」变成谎话——
+  engine 创建的 terminal 子进程（每个自成一个组）只有 `dispose()` 收得掉，`child.terminate()` 够不到。
+  `dispose()` 幂等（`#closed`），所以晚到的第二次 dispose 是空操作。`terminate()` 自身有 SIGTERM→grace→SIGKILL 上界，不会把结算挂住。
+- `child.terminate()` 仍留在 `finishOnce` 之后（不动既有顺序）。
+
+**测试**（`tests/drivers/acp.test.ts:684-740`）· fixture `tests/fixtures/fake-acp-cli.mjs` 新增 `orphan-before-session` 场景。
+terminal 命令 `echo $$ > orphan.pid; exec sleep 300`（**`exec` 保证 pid 不变，测试盯的 pid 就是驱动必须杀的那个**）；
+fixture 在 **pid 文件出现之后**才让 `session/new` 报 JSON-RPC 错，所以无论驱动清理多快，pid 都可观测。
+断言：`result.status === 'failed'` 且错误含 `session/new` → 读到 pid → `waitForPidGone` → `pidAlive === false`
+→ **`expect(() => process.kill(pid, 0)).toThrow()`**（判据的字面形态）。
+
+**红（修复前源码 `/tmp/batchC-red`）**：
+`… run tests/drivers/acp.test.ts -t "RR-"` → `2 failed | 1 passed | 50 skipped (53)`，本条的原文：
+```
+FAIL … RR-IM-6: a terminal created before a failed session/new does not outlive the run
+AssertionError: expected false to be true // Object.is equality
+- Expected    - true
++ Received    + false
+ ❯ tests/drivers/acp.test.ts:712:7
+```
+（terminal 活到 2s 有界等待之后仍在——`failBeforePrompt` 没 dispose；`afterEach` 兜底 SIGKILL，零残留进程，`ps` 复核为 0。）
+
+**绿**：同文件全量 `53 passed`；本条单独 `2 passed | 51 skipped`。
+**负控（常驻）**：`tests/drivers/acp.test.ts:722-740` —— 同一 fixture 家族里**不创建 terminal** 的 `success` 场景仍以
+`completed` 结算，且 cwd 里**不存在** `orphan.pid`（证明守卫收的是「terminal 泄漏」而不是「所有 pre-prompt 结算」）。
+
+### S-2 RR-MI-5 · 六个驱动的自有计时器补 2^31-1 钳位
+
+**修法**：在 `src/drivers/argv.ts:542-561` 新增**唯一**的钳位函数，常量**从内核 import**（`import { MAX_TIMER_DELAY_MS } from '../kernel/watchdog.ts'`，`:75`），
+不新造第二个数、也不重 declare：
+```ts
+export function clampTimerDelay(ms: number): number {
+  return Number.isFinite(ms) ? Math.min(Math.floor(ms), MAX_TIMER_DELAY_MS) : ms
+}
+```
+（非有限值原样返回——交给各驱动自己的 `<= 0` 守卫；把 `NaN` 静默变成三周会掩盖调用方 bug。）
+七个文件、九处**由调用方或配置提供**的延时全部收口（`setTimeout` 的实际入参，字符串里的原始值保留给错误文案）：
+
+| 驱动 | 位置（post-fix 行） | 来源 |
+|---|---|---|
+| acp | `src/drivers/acp.ts:1814-1822` | `opts.timeoutMs` / `opts.idleTimeoutMs` |
+| claude | `src/drivers/claude.ts:1092-1101` | 同上（claude 家族 = claude / codebuddy） |
+| codex | `src/drivers/codex.ts:832-840` | 同上 |
+| generic | `src/drivers/generic-argv.ts:302-310` | 同上 |
+| openclaw | `src/drivers/openclaw.ts:833`（`DSH_AGENTS_BRIDGE_OPENCLAW_IDLE_GRACE_MS`）· `:886-894`（两窗口） | 配置 env + 调用方 |
+| zcode | `src/drivers/zcode.ts:449`（`DSH_AGENTS_BRIDGE_ZCODE_TERMINAL_GRACE_MS`）· `:478-486`（两窗口） | 配置 env + 调用方 |
+
+内部常量延时**不动**（`acp.ts` 的 `ACP_SHUTDOWN_GRACE_MS`、`drainNotifications` 的 `Math.min(quiet,50)`；
+后者已被 `ACP_NOTIFICATION_DRAIN_MAX_MS` 界住）——判据是「可由调用方或配置提供」，不是「所有 setTimeout」。
+
+**测试**（新增 `tests/drivers/timer-clamp.test.ts`，22 条）
+- `:192-224` 六个驱动：`:194-203` × `timeoutMs = 2^31`；`:205-213` × `idleTimeoutMs = 2^31`；`:214-224` 为负控。
+  断言两条：**80ms 后 `snapshot().status` 仍是 `running`**（塌成 1ms 的话此时早已 `timeout`）＋ **零 `TimeoutOverflowWarning`**。
+- `:214-224` 每条一个**负控**：`timeoutMs = 25` 仍以 `timeout` 结算且文案含 `after 25ms`，无警告。
+- `:226-271` 两条**配置面**：zcode 的 terminal grace、openclaw 的 result-idle grace 都塞 `2^31`，喂真 fixture
+  （`zcode-turn-failed.ndjson` / `openclaw-result.ndjson`）把边界计时器**真正臂起来**，再断言 80ms 后仍未结算、无警告。
+- `:176-190` 结构化守卫：`src/drivers/*.ts` 里凡出现 `setTimeout(` 的文件必须含 `clampTimerDelay(`，且**任何驱动文件不得出现
+  `2147483647` / `2_147_483_647` 字面量**（`argv.ts` 是唯一允许 import 常量的文件）。
+
+**红（修复前源码）**：`… run tests/drivers/timer-clamp.test.ts` → **`15 failed | 7 passed (22)`**。
+node 自己把缺陷讲了出来的原文（这是本批最直接的「塌成 1ms」证据）：
+```
+(node:39450) TimeoutOverflowWarning: 2147483648 does not fit into a 32-bit signed integer.
+Timeout duration was set to 1.
+```
+断言原文（12 条 caller 窗口 + 2 条配置 grace）：
+```
+AssertionError: expected 'timeout' to be 'running' // Object.is equality
+ ❯ tests/drivers/timer-clamp.test.ts:200:40
+（idle 变体同一构造，落到 :209）
+AssertionError: expected 'failed' to be 'running'   // zcode grace  → :252
+AssertionError: expected 'completed' to be 'running' // openclaw grace → :268
+```
+结构化守卫原文：`expected [ 'acp.ts', 'claude.ts', …(4) ] to deeply equal []`（正好六个驱动）。
+**绿**：同文件 `22 passed`。**负控（常驻）**：`tests/drivers/timer-clamp.test.ts:214-224`（六条，`2^31` 以内的正常值仍会触发超时）。
+
+### S-3 RR-MI-6 · codex 的 `cancelled` 不得由 parser 状态结算
+
+**修法**（`src/drivers/codex.ts:777-783`）
+```ts
+if (reason !== 'cancelled' && settleFromParsedTerminal()) return
+```
+`requestTerminal` 此前对**所有** reason 都先问 parser 状态，于是「`turn.completed` 已在手 + 操作员取消」被改判成
+`completed` 并把回合文本一起交出去。MI-21 的规则是「**已完成的回合压过计时器**」，从来不是「压过取消」。
+timeout / idle / overflow 三条计时器与 parser 终态的优先级**不变**（`settleFromParsedTerminal` 本体未动）。
+
+**测试**（`tests/drivers/codex.test.ts:863-931`，另加测试内 `ParkedChild`/`tick` 两个 helper，`:136-144`）
+- `:873-892` 正控·真红：喂整份 `CODEX_SUCCESS`（`turn.completed` 已被 parser 读到）后 `handle.cancel('user stopped it')`。
+- `:895-913` 负控：**不取消**，同一份在手终态帧仍正常结算 `completed` + `text === 'OK'`。
+- `:916-931` 判据的字面顺序：先受理 cancel，再用 `ParkedChild`（`terminate()` 不关闭 stdout）喂 `CODEX_SUCCESS`，终态必须仍是 `cancelled`。
+
+**红（修复前源码）**：`… run tests/drivers/codex.test.ts -t "RR-MI-6"` → **`1 failed | 2 passed | 39 skipped (42)`**：
+```
+❯ RR-MI-6: a terminal frame already in hand does not re-judge a cancel
+AssertionError: expected 'completed' to be 'cancelled' // Object.is equality
+ ❯ tests/drivers/codex.test.ts:887:27
+```
+**绿**：`… run tests/drivers/codex.test.ts` → **`42 passed`**。**负控（常驻）**：`:895-913`。
+**如实说明**：判据字面顺序的那条（`:916-931`）在修复前**也是绿的**（取消已结算的会话本来就不吃后续帧），
+它作为「将来不许把 cancel 延后到线上一锤定音」的常驻守卫留下；本条的 RED 来自**在手终态帧**那条反序构造。
+
+### S-4 RR-MI-7 · acp 溢出走真实终态路径
+
+**修法**（`src/drivers/acp.ts:1004-1013`〔新 `onOverflow` 缝〕· `:1045-1059`〔`start()` 接缝〕· `:1771-1773`〔run 侧接线〕）
+- 新增 `AcpClient.onOverflow`（`(overflow: Error) => void`，默认空），超限时**先 reject 在飞请求、再回调**。
+- `runAcp` 把它接到**已有的真实结算路径** `failBeforePrompt`：
+  `client.onOverflow = (overflow) => { void failBeforePrompt(\`acp stream overflowed: ${overflow.message}\`) }`。
+  于是溢出会 dispose（收掉 engine 建的 terminal 组）→ terminate → `finishOnce` 一个 `failed` 结果。
+- **删掉 `dead` Promise 与 `#markDead`**：它只被 resolve、从无人读（`grep` 全仓只有定义处），正是发现里点名的「resolve 一个没人读的 promise」。
+  三处 `#markDead()` 调用一并删除，`#failAll(...)` 保留（那才是拒绝在飞请求的语义）。
+
+**测试**（`tests/drivers/acp.test.ts:742-781`）· fixture 新增 `overflow-handshake` 场景：`initialize` 不回帧，改发**一行 17 MB**
+（> `MAX_STREAM_LINE_BYTES` 16 MB）后 park 30s。断言 `handle.done` 在有界 5s 内结算、`status === 'failed'`、错误含 `overflow`，
+且 `snapshot().status === 'failed'`（终态可读）。RED 分支里若 5s 未结算，先 `cancel` 收尸再断言，避免留下 hang 住的引擎。
+
+**红（修复前源码）**：同上一次 `-t "RR-"` 运行的第二条：
+```
+FAIL … RR-MI-7: a stream-limit breach settles the run on a real terminal path
+AssertionError: expected false to be true // Object.is equality
+ ❯ tests/drivers/acp.test.ts:771:23
+```
+该条在 RED 下耗时 **5004ms**（正是 5s 竞速上限），即 `handle.done` 在溢出后**根本不结算**——引擎被 park 住，
+IIFE 卡在 `await child.exited`。
+**绿**：`… run tests/drivers/acp.test.ts` → **`53 passed`**（该条 1244ms）。
+**负控（常驻）**：同文件既有全绿路径即负控——`success` / `terminal` / `deadlock` / `cancel` 等**未溢出**用例行为一字未变。
+
+### 逐条门禁（每完成一条即全跑，均为真实数字）
+
+| 完成项 | vitest（本项文件） | 红阶段 | `tsc --noEmit` | `tsc -p tsconfig.tests.json` | build.mjs | build-client.mjs | verify_plugin.py |
+|---|---|---|---|---|---|---|---|
+| RR-IM-6 | `acp.test.ts` 53 passed | `2 failed \| 1 passed \| 50 skipped` | 0 | 0 | OK | OK | 11/11 |
+| RR-MI-5 | `timer-clamp.test.ts` 22 passed | `15 failed \| 7 passed (22)` | 0 | 0 | OK | OK | 11/11 |
+| RR-MI-6 | `codex.test.ts` 42 passed | `1 failed \| 2 passed \| 39 skipped` | 0 | 0 | OK | OK | 11/11 |
+| RR-MI-7 | `acp.test.ts` 53 passed | 见 S-4（同一次 `-t "RR-"`） | 0 | 0 | OK | OK | 11/11 |
+| 终态（本记录） | **919 passed / 1 skipped（920）** | — | **0** | **0** | `lib/index.js` **372.0kb** | `lib/client.js` **74.7kb** | **11/11 PASS** |
+
+基线 891/1（892）＋ 本批新增 **28** 条（`timer-clamp.test.ts` 22 + `codex.test.ts` 3 + `acp.test.ts` 3）= **919/1（920）**，算数对上。
+体积 370.7kb → **372.0kb**：`argv.ts` 现在 import `kernel/watchdog.ts` 取 `MAX_TIMER_DELAY_MS`，该模块整体进入驱动 bundle（未 minify 的构建保留注释）。
+
+**文件与行区间**
+`src/drivers/acp.ts:119,1004-1013,1045-1059,1117-1132,1771-1773,1814-1822,2102-2127` ·
+`src/drivers/argv.ts:75,542-561` · `src/drivers/claude.ts:52,1092-1101` · `src/drivers/codex.ts:68,777-783,832-840` ·
+`src/drivers/generic-argv.ts:50,302-310` · `src/drivers/openclaw.ts:64,833,886-894` · `src/drivers/zcode.ts:71,449,478-486` ·
+`tests/drivers/acp.test.ts:176-196,684-781` · `tests/drivers/codex.test.ts:136-144,863-931` ·
+`tests/drivers/timer-clamp.test.ts:1-273`（新增） · `tests/fixtures/fake-acp-cli.mjs:32,444-470,494,521-548` ·
+`tests/fixtures/ACP-PROVENANCE.md`（新增「Two added DERIVED scenarios」一节）。
+
+### 如实记账（本批留下的接缝）
+
+1. **没有做「逐条跑全门禁」**：四条修复共存于同一棵树，逐条跑六个门禁只会得到四份**同一棵树**的重复测量，不是独立证据。
+   本批实际做法是：逐条取**文件级**红/绿（上表第 2、3 列），全量六门禁只在终态跑一次。
+   上表 `tsc`/build/verify 三列是**终态测量**，不是每条修复后各测一次——按「没跑到的门禁不是通过的门禁」的口径，这里如实标为**未逐条验证**。
+2. **`AcpClient.dead` 是破坏式删除**（public 字段，`export class AcpClient` 的一部分）。全仓 `grep` 确认无消费者、`tsc` 0 错，
+   但它毕竟从导出面上消失了；若监理认为驱动内部类也该保持只增不改，请回退这一点（删 `onOverflow` 接线外的三处 `#markDead` 与字段即可，
+   `onOverflow` 本身不依赖它）。
+3. **RR-MI-5 只收口「驱动自己的」计时器**。`src/kernel/spawn.ts` 的 `MAX_GRACE_MS`、`stream-limits` 的上限是内核侧归一化，不在本批范围；
+   内核若有新的、由配置驱动的 `setTimeout`，本轮不覆盖。
+4. **S-3 的判据字面顺序在修复前就是绿的**（见 S-3 末），真正红的构造与判据描述**反序**。已两条都常驻；
+   如果监理的独立 oracle 严格按字面顺序构造，它会在红绿两阶段都通过，**不能**作为 RR-MI-6 的判别实验。
+5. **RR-MI-7 的 fixture 是构造的、不是实测的**：真实引擎是否会在握手期吐出单行 >16 MB 并永不退出，本机未复现（也没有账号可验）。
+   它锁的是**驱动在「不 await 管道」的窗口里也必须结算**这一不变量；「真实引擎会不会走到这一步」未验证。
+6. **`failBeforePrompt` 现在会在结算前 `await` 一次 dispose**。它多了一个（有界的）等待点：production 里 `terminate()` 的
+   SIGTERM→grace→SIGKILL 上界（默认 5s + kill 确认）会体现在「pre-prompt 失败」的 `done` 延迟上。本批未测 production 路径的这条延迟，
+   只在测试的 fake/real-pipe runtime 下验证（其 `terminate()` 立即 resolve）。**可疑但未证实**：若某个 engine 的 terminal 子进程
+   不响应 SIGTERM 且 grace 配成分钟级，pre-prompt 失败的结算会被拉长——记在这里，不冒充已处理。
+7. RR-MI-9 / RR-MI-10 / RR-MI-12（§O-2）本批未动，未授权；`idleTimeoutMs` 的非正值归一仍在内核侧（RR-MI-9）。
+

@@ -173,6 +173,27 @@ async function waitForOrphanPid(
 }
 
 /**
+ * Poll for the pid a pre-handshake terminal wrote into its cwd (RR-IM-6).
+ *
+ * The fixture deliberately does not fail `session/new` until this file exists,
+ * so the pid is observable regardless of how fast the driver cleans up.
+ */
+async function waitForOrphanFilePid(cwd: string, timeoutMs = 5_000): Promise<number> {
+  const file = path.join(cwd, 'orphan.pid')
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    try {
+      const text = readFileSync(file, 'utf8').trim()
+      if (/^\d+$/.test(text)) return Number(text)
+    } catch {
+      /* not written yet */
+    }
+    if (Date.now() >= deadline) return -1
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+}
+
+/**
  * Capabilities are OPT-IN through `DriverDeps.env` on purpose: advertising
  * `fs`/`terminal` to an engine and then refusing every call is worse than not
  * advertising at all, so the bridge only claims what the caller asked it to
@@ -655,6 +676,106 @@ describe('acp driver, real pipes', () => {
       expect(result.status).toBe('cancelled')
       leftoverTerminalPids.push(pid)
       await expect(waitForPidGone(pid)).resolves.toBe(true)
+    },
+    30_000,
+  )
+
+  /**
+   * RR-IM-6 — EVERY exit of `runAcp` owns a dispose, including the one that
+   * never reaches the prompt.
+   *
+   * The engine asks for a terminal (spawned into its own process group by the
+   * DRIVER) and then fails `session/new`. The ordinary post-prompt exits await
+   * `client.dispose()`, which is the only code that kills those terminals; the
+   * `failBeforePrompt` exit used to skip it, so the terminal outlived
+   * `handle.done`.
+   */
+  it(
+    'RR-IM-6: a terminal created before a failed session/new does not outlive the run',
+    async () => {
+      const cwd = makeWorkdir()
+      const deps = makeDeps('orphan-before-session', { env: CAPS_ON })
+      const backend = createBackendWithRuntime('acp', deps, realRuntime)
+      const handle = await backend.run(
+        { agent: 'codebuddy-code-acp', prompt: 'go', cwd },
+        deps,
+        new AbortController().signal,
+      )
+      const result = await handle.done
+      expect(result.status).toBe('failed')
+      expect(result.error).toContain('session/new')
+
+      const pid = await waitForOrphanFilePid(cwd)
+      expect(pid).toBeGreaterThan(0)
+      leftoverTerminalPids.push(pid)
+      // The run has settled, so the pid it spawned must be gone. The poll
+      // tolerates only the SIGKILL reaping latency; the literal acceptance is
+      // the `process.kill(pid, 0)` ESRCH below.
+      await expect(waitForPidGone(pid)).resolves.toBe(true)
+      expect(pidAlive(pid)).toBe(false)
+      expect(() => process.kill(pid, 0)).toThrow()
+    },
+    30_000,
+  )
+
+  it(
+    'RR-IM-6 negative control: a run that never creates a terminal still fails the same way',
+    async () => {
+      // Same scenario minus the terminal: the pre-prompt failure settles without
+      // touching the terminal machinery at all.
+      const cwd = makeWorkdir()
+      const deps = makeDeps('success', { env: CAPS_ON })
+      const backend = createBackendWithRuntime('acp', deps, realRuntime)
+      const handle = await backend.run(
+        { agent: 'codebuddy-code-acp', prompt: 'go', cwd },
+        deps,
+        new AbortController().signal,
+      )
+      const result = await handle.done
+      expect(result.status).toBe('completed')
+      expect(existsSync(path.join(cwd, 'orphan.pid'))).toBe(false)
+    },
+    30_000,
+  )
+
+  /**
+   * RR-MI-7 — a stream-limit breach is a terminal condition of the run.
+   *
+   * The fixture writes one line past the 16 MB cap during the handshake and then
+   * parks forever without answering `initialize`. Rejecting the pending request
+   * is not enough: the run is left in `await child.exited`, so `handle.done`
+   * never settles until the engine dies (30 s here; in production, never).
+   */
+  it(
+    'RR-MI-7: a stream-limit breach settles the run on a real terminal path',
+    async () => {
+      const cwd = makeWorkdir()
+      const deps = makeDeps('overflow-handshake', { env: CAPS_ON })
+      const backend = createBackendWithRuntime('acp', deps, realRuntime)
+      const handle = await backend.run(
+        { agent: 'codebuddy-code-acp', prompt: 'go', cwd },
+        deps,
+        new AbortController().signal,
+      )
+      let result: AgentResult | undefined
+      const settled = await Promise.race([
+        handle.done.then((r) => {
+          result = r
+          return true as const
+        }),
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), 5_000)),
+      ])
+      if (result === undefined) {
+        // The pre-fix defect: nothing settled. Reap so no engine outlives the
+        // failed assertion, then report it as the plain boolean failure.
+        await handle.cancel('test cleanup')
+        await handle.done.catch(() => {})
+      }
+      expect(settled).toBe(true)
+      expect(result?.status).toBe('failed')
+      expect(result?.error).toMatch(/overflow/i)
+      // The terminal state is readable through the snapshot, not only `done`.
+      expect(handle.snapshot().status).toBe('failed')
     },
     30_000,
   )

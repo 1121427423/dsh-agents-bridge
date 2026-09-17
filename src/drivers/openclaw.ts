@@ -61,6 +61,7 @@ import {
   asRecord,
   asString,
   buildCommandLine,
+  clampTimerDelay,
   errorText,
   event,
   filterCustomArgs,
@@ -828,7 +829,8 @@ export async function runOpenclaw(
     requestTerminal('cancelled', reason === '' ? 'execution cancelled' : reason)
   }
 
-  const idleGraceMs = openclawIdleGraceFromEnv(deps.env)
+  // Config-supplied grace, clamped to the runtime's timer ceiling (RR-MI-5).
+  const idleGraceMs = clampTimerDelay(openclawIdleGraceFromEnv(deps.env))
 
   function finishAtBoundary(): void {
     if (boundaryArmed || terminalReason !== 'none') return
@@ -878,14 +880,18 @@ export async function runOpenclaw(
   child.stderr.on('error', () => {})
   child.stdin.on('error', () => {})
 
-  const hardTimeoutMs = opts.timeoutMs !== undefined && opts.timeoutMs > 0 ? opts.timeoutMs : 0
+  // Caller-supplied windows are clamped to the runtime's timer ceiling: an
+  // over-large delay is silently rewritten to 1 ms by `setTimeout`, which would
+  // turn "no deadline" into an immediate timeout (RR-MI-5).
+  const hardTimeoutMs =
+    opts.timeoutMs !== undefined && opts.timeoutMs > 0 ? clampTimerDelay(opts.timeoutMs) : 0
   if (hardTimeoutMs > 0) {
     hardTimer = setTimeout(() => {
       requestTerminal('timeout', `openclaw timed out after ${hardTimeoutMs}ms`)
     }, hardTimeoutMs)
   }
 
-  const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS.openclaw
+  const idleTimeoutMs = clampTimerDelay(opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS.openclaw)
   const touchIdle = (): void => {
     if (idleTimeoutMs <= 0 || terminalReason !== 'none') return
     if (idleTimer !== undefined) clearTimeout(idleTimer)

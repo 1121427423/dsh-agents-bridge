@@ -116,6 +116,7 @@ import {
   asRecord,
   asString,
   buildCommandLine,
+  clampTimerDelay,
   errorText,
   event,
   filterCustomArgs,
@@ -989,9 +990,6 @@ export class AcpClient {
 
   /** The backend session id, learned from `session/new` (or `session/resume`). */
   sessionId = ''
-  /** Set once the engine has exited or the transport failed. */
-  readonly dead: Promise<void>
-  #markDead: () => void = () => {}
 
   /** Invoked for every accepted `session/update` notification. */
   onUpdate: (type: AcpUpdateType, update: Record<string, unknown>) => void = () => {}
@@ -1003,6 +1001,16 @@ export class AcpClient {
   acceptUpdate: () => boolean = () => true
   /** Invoked when the agent->client permission handler made a decision. */
   onPermission: (selection: PermissionSelection, params: unknown) => void = () => {}
+  /**
+   * Invoked once when the stdout reader crosses a stream limit.
+   *
+   * Rejecting the in-flight requests is not enough on its own: the run may be
+   * between requests (not awaiting the pipe at all), in which case there is
+   * nothing to reject and the session sits until the idle watchdog. A limit
+   * breach is a terminal condition of the RUN, so the driver must settle it on a
+   * real terminal path — this is that trigger, not a bookkeeping flag (RR-MI-7).
+   */
+  onOverflow: (overflow: Error) => void = () => {}
 
   constructor(init: {
     child: SpawnedProcess
@@ -1020,9 +1028,6 @@ export class AcpClient {
     this.#cwd = init.cwd
     this.#env = init.env
     this.#spawn = init.spawn
-    this.dead = new Promise<void>((resolve) => {
-      this.#markDead = resolve
-    })
   }
 
   /**
@@ -1032,7 +1037,8 @@ export class AcpClient {
    *
    * A peer that never emits `\n` (or never stops) would grow this reader's
    * buffer inside the host process, so a limit breach fails every in-flight
-   * request and marks the stream dead (MI-4): the run settles as a failure
+   * request AND reports through {@link onOverflow}, which the run turns into a
+   * real terminal settlement (MI-4 / RR-MI-7): the run settles as a failure
    * naming the overrun, and the shutdown path terminates the group.
    */
   start(): void {
@@ -1042,17 +1048,15 @@ export class AcpClient {
       {
         onOverflow: (overflow) => {
           this.#failAll(overflow)
-          this.#markDead()
+          this.onOverflow(overflow)
         },
       },
     )
     void reader.flushed.then(() => {
       this.#failAll(new Error('ACP engine closed its output stream'))
-      this.#markDead()
     })
     this.#child.stdout.on('error', () => {
       this.#failAll(new Error('ACP engine stdout read error'))
-      this.#markDead()
     })
   }
 
@@ -1110,12 +1114,21 @@ export class AcpClient {
     this.#failAll(new Error(reason))
   }
 
-  /** Stop accepting work and release child processes this client started. */
+  /**
+   * Stop accepting work and release child processes this client started.
+   *
+   * Idempotent. Every terminal's termination is AWAITED (each `terminate()` is
+   * itself bounded by the runtime's SIGTERM→grace→SIGKILL ladder): the run's
+   * `done` is the caller's only signal that nothing outlives the transcript, so
+   * a fire-and-forget kill here would make "settled" a lie — the engine-owned
+   * terminal children are exactly what `child.terminate()` cannot reach
+   * (RR-IM-6).
+   */
   async dispose(): Promise<void> {
     if (this.#closed) return
     this.#closed = true
     this.#failAll(new Error('ACP transport disposed'))
-    for (const t of [...this.#terminals.values()]) void this.#killTerminal(t)
+    await Promise.all([...this.#terminals.values()].map((t) => this.#killTerminal(t)))
   }
 
   /**
@@ -1750,6 +1763,15 @@ export async function runAcp(
   // Attach the reader BEFORE anything is written (see the module header).
   client.start()
 
+  // RR-MI-7: a stream-limit breach is a terminal condition, not bookkeeping.
+  // `dead` is read by nobody and rejecting the pending requests is a no-op when
+  // the run is not awaiting one, so settle through the same failure path the
+  // handshake uses — it disposes the client (engine-owned terminals included)
+  // and kills the group. `failBeforePrompt` is a hoisted declaration below.
+  client.onOverflow = (overflow) => {
+    void failBeforePrompt(`acp stream overflowed: ${overflow.message}`)
+  }
+
   function clearTimers(): void {
     if (hardTimer !== undefined) clearTimeout(hardTimer)
     if (idleTimer !== undefined) clearTimeout(idleTimer)
@@ -1785,14 +1807,19 @@ export async function runAcp(
     requestTerminal('cancelled', reason === '' ? 'execution cancelled' : reason)
   }
 
-  const hardTimeoutMs = opts.timeoutMs !== undefined && opts.timeoutMs > 0 ? opts.timeoutMs : 0
+  // Caller-supplied windows are clamped to the runtime's timer ceiling: an
+  // over-large delay is silently rewritten to 1 ms by `setTimeout`, which would
+  // turn "no deadline" into an immediate timeout that kills the engine and
+  // mislabels the run (RR-MI-5).
+  const hardTimeoutMs =
+    opts.timeoutMs !== undefined && opts.timeoutMs > 0 ? clampTimerDelay(opts.timeoutMs) : 0
   if (hardTimeoutMs > 0) {
     hardTimer = setTimeout(() => {
       requestTerminal('timeout', `acp timed out after ${hardTimeoutMs}ms`)
     }, hardTimeoutMs)
   }
 
-  const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_ACP_IDLE_TIMEOUT_MS
+  const idleTimeoutMs = clampTimerDelay(opts.idleTimeoutMs ?? DEFAULT_ACP_IDLE_TIMEOUT_MS)
   function markActivity(): void {
     if (idleTimeoutMs <= 0 || terminalReason !== 'none') return
     if (idleTimer !== undefined) clearTimeout(idleTimer)
@@ -2072,8 +2099,21 @@ export async function runAcp(
     })
   })()
 
-  function failBeforePrompt(message: string): void {
+  /**
+   * Settle a run that never reached the prompt (initialize / auth / session/new
+   * failure) — and the overflow exit, which takes this path too.
+   *
+   * Every EXIT of `runAcp` disposes the client, and this one used to be the
+   * exception: an engine that created a terminal and then failed `session/new`
+   * left that terminal's process group running past `handle.done` (RR-IM-6).
+   * Disposal is AWAITED before `finishOnce`, so the caller's `done` really does
+   * mean "nothing this run started is still alive". `dispose()` is idempotent,
+   * so an exit that also passes the post-prompt disposal is unaffected.
+   */
+  async function failBeforePrompt(message: string): Promise<void> {
     accepting = true
+    await client.dispose()
+    void child.terminate().catch(() => {})
     finishOnce({
       sessionId: session.sessionId,
       agentId: opts.agent,
@@ -2084,7 +2124,6 @@ export async function runAcp(
       durationMs: now() - startedAt,
       ...(client.sessionId === '' ? {} : { backendSessionId: client.sessionId }),
     })
-    void child.terminate().catch(() => {})
   }
 
   return session

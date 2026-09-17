@@ -167,3 +167,19 @@ Consumer: `tests/drivers/hermes-acp.test.ts` parses both frames with the
 driver's OWN extractors (`extractAuthMethods`, `extractSessionId`,
 `extractCurrentModelId`, `extractEffortOption`) and fails if the descriptor's
 capability flags disagree with these bytes.
+
+## Two added DERIVED scenarios (batch C, 2026-09-18)
+
+Appended by the RR-IM-6 / RR-MI-7 repair batch. Nothing above is changed.
+
+Both live in `fake-acp-cli.mjs` and are **DERIVED — not captured**: they model
+failure shapes the driver must survive, and neither is a transcription of bytes
+seen from a live engine.
+
+| scenario | provenance | shape |
+|---|---|---|
+| `orphan-before-session` | **DERIVED** | `initialize` answered, then the engine asks for a `terminal/create` and only afterwards fails `session/new` with a JSON-RPC error. The refused-handshake shape is a real engine behaviour class (the driver already maps any `session/new` error to a failed run); what is authored here is the ORDER, so the terminal exists before the failure. The terminal's command writes its pid to `orphan.pid` in the run cwd and `exec`s a long sleep, and the fixture waits for that file before failing — so the pid is observable no matter how fast the driver cleans up. |
+| `overflow-handshake` | **DERIVED** | `initialize` is answered with one 17 MB stdout line (past the 16 MB `MAX_STREAM_LINE_BYTES` cap) and then the engine parks without ever exiting. Not a shape any real engine was observed to produce; it is the minimal stream that forces the reader's overflow path while the run is NOT awaiting a response it can reject. |
+
+Consumer: `tests/drivers/acp.test.ts` (RR-IM-6 and RR-MI-7).
+

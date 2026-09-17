@@ -47,6 +47,7 @@ import {
   DEFAULT_IDLE_TIMEOUT_MS,
   DriverSession,
   buildCommandLine,
+  clampTimerDelay,
   errorText,
   event,
   filterCustomArgs,
@@ -295,14 +296,18 @@ export async function runGeneric(
     }
   })()
 
-  const hardTimeoutMs = opts.timeoutMs !== undefined && opts.timeoutMs > 0 ? opts.timeoutMs : 0
+  // Caller-supplied windows are clamped to the runtime's timer ceiling: an
+  // over-large delay is silently rewritten to 1 ms by `setTimeout`, which would
+  // turn "no deadline" into an immediate timeout (RR-MI-5).
+  const hardTimeoutMs =
+    opts.timeoutMs !== undefined && opts.timeoutMs > 0 ? clampTimerDelay(opts.timeoutMs) : 0
   if (hardTimeoutMs > 0) {
     hardTimer = setTimeout(() => {
       requestTerminal('timeout', `generic agent timed out after ${hardTimeoutMs}ms`)
     }, hardTimeoutMs)
   }
 
-  const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS.generic
+  const idleTimeoutMs = clampTimerDelay(opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS.generic)
   const touchIdle = (): void => {
     if (idleTimeoutMs <= 0 || terminalReason !== 'none') return
     if (idleTimer !== undefined) clearTimeout(idleTimer)
