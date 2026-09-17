@@ -1252,6 +1252,13 @@ adapter，于是工具层仍会发出一次注定被拒的注册请求（假 reg
 7. **本节的代码由监理自写**，未经第二方独立复核（workbuddy 当时不可用）。用户晨审时请把 `src/host/jobs.ts`
    与 `tests/host/jobs.test.ts` 当作**待复核**而非已复核。
 
+**监理自审补记（夜班内自己回头查的一处）**：我担心 `manager` 会把**终态会话**从内部 map 淘汰，那样 `waitForTerminal`
+会连续看到 `undefined` 并把一次**成功**的会话报成 `failed`。查证结论：**该担忧不成立** —— `manager.ts:678-681` 把
+被 `FINISHED_LRU_SIZE` 淘汰的 finished 记录转成 `restored`（`rememberRestored(toStoreRecord(evicted))`），而
+`status()` 的查找顺序是 `live → finished → restored`，`restoredSnapshot` 产出的仍是 `terminal` 快照。
+所以 waiter 拿到的是**真实终态**，只损失 `exitCode`（restored 记录里是 `null`）。**不是缺陷**，但记在这里：
+「不变量在别人的实现里」这件事必须查过再声称。
+
 ## W. desktop profile：预演、安装，以及一次**由我自己造成**的事故（2026-09-18 03:00-03:10）
 
 背景：需求 ①（调用记录页签）只有在**服务用户 GUI 的那个宿主**里加载本插件才看得见，而那个宿主是 DSH Desktop app
