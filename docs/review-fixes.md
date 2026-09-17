@@ -101,6 +101,15 @@ IM-3 overflow (timeoutMs=1e12)      : fired after 1ms
 | IM-9 | 真实 `readLines` + generic 的重组方式：`line1\n\nline2\n\n\nline3\n` → `line1\nline2\nline3`（**删掉 3 个空行**） | 驱动 text 与原始 stdout 一致（仅首尾 trim） |
 | IM-3 | 真实 `createWatchdog`：修前 `2147483648` → **2ms 触发**（附 Node 告警 `Timeout duration was set to 1`）、`1e12` → 1ms；**已修**后两者均不触发，正向对照 `50ms` 仍在 51ms 触发 | 保持已修状态 |
 | IM-18 | 真实 `isTrustedApiRequest`：`Origin http://localhost:9999` / `Host localhost:43120` → **true**（应当 false），`127.0.0.1:9999` 同 | 两条翻 `false`；四条对照（同 authority / 无 Origin / cross-site / 外部 Host）保持原值 |
+| IM-15 | `grep -rn "\.dispose()" src/drivers/acp.ts` 与全 `src` 的 acp dispose 调用点均为**空** → 只有定义、没有调用者 | `runAcp` 两条退出路径上都出现调用；且 fixture 的"建了就忘"模式下 `process.kill(pid,0)` 抛 ESRCH |
+| MI-16 | `buildCodebuddyArgs({extraArgs:['--strict-mcp-config']})` → 该 token **原样留存** | 被丢；对照：`--output-format`/`--permission-mode` 仍被丢、无害 extra 仍保留 |
+| MI-17 | `buildClaudeArgs({extraArgs:['-p','/tmp/x']})` → `/tmp/x` **留成位置参数** | 不再出现；`-p=/tmp/x` 形式仍被拦 |
+
+**一次对照写错的记录（同样记账）**：验证 MI-16 时我第一版对照写成"claude 应恰好发出一次
+`--mcp-config`"，结果 false —— 因为 `--mcp-config` 是**由 runner 追加**、不在 args builder 里，
+**我测错了层**。改用"已知会被拦的旗标必须被丢"作为对照后，过滤器行为得到证实，
+从而把结论精确到「泄漏的原因是 blocked 表缺这一项」，而不是"过滤器坏了"。
+**对照写错会给出假信号 —— 与空跑结论同类。**
 
 **复现过程中的自纠（两次）同样记在这里**：IM-6 第一版脚本没建目录 → 磁盘根本没写，却输出
 "DEFECT REPRODUCED"；第二版漏了 `reload()`（store 构造时不读盘）→ 又得出错误中间态。
