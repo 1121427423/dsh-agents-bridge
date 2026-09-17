@@ -75,6 +75,55 @@ function fakeService(initial: { user?: Record<string, unknown>; exposeDescribe?:
   return { service, user, registered, scope }
 }
 
+/**
+ * A fake that copies the REAL provider's two observable behaviours, both read
+ * from `@deepseek-ai/dsh-settings`'s own `lib/index.js`:
+ *
+ *  1. `describe()` OMITS `user` for a namespace whose stored section is absent
+ *     (`...detachedUser === void 0 ? {} : { user: detachedUser }`);
+ *  2. the resolved snapshot is `schema(mergeLayers(base, section))`, so an
+ *     absent `z.array()` key materializes `[]` instead of staying `undefined`.
+ *
+ * `fakeService` above does neither, and that divergence is exactly how the first
+ * live run of this card marked three list fields as "overridden by user" while
+ * the operator's `settings.yaml` held no section for this namespace at all. A
+ * fake that cannot reproduce the provider's shape cannot guard the rule.
+ */
+function fileProviderFake(initial: { user?: Record<string, unknown>; exposeDescribe?: boolean } = {}) {
+  let section: Record<string, unknown> | undefined =
+    initial.user === undefined ? undefined : { ...initial.user }
+  const registered: { ns: string; base: Record<string, unknown> }[] = []
+  const describedWith: unknown[] = []
+  const scope = {
+    get: () => SETTINGS_SCHEMA({ ...(registered[0]?.base ?? {}), ...(section ?? {}) }) as Record<string, unknown>,
+    update: (patch: Record<string, unknown>) => {
+      section = { ...(section ?? {}) }
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === undefined) delete section[key]
+        else section[key] = value
+      }
+    },
+    replace: (next: Record<string, unknown>) => {
+      section = { ...next }
+    },
+  }
+  const service = {
+    register(ns: string, _schema: unknown, options?: { base?: Record<string, unknown> }) {
+      registered.push({ ns, base: options?.base ?? {} })
+      return scope
+    },
+    ...(initial.exposeDescribe === false
+      ? {}
+      : {
+          describe: (options?: unknown) => {
+            describedWith.push(options)
+            return [{ ns: SETTINGS_NAMESPACE, ...(section === undefined ? {} : { user: { ...section } }) }]
+          },
+        }),
+  }
+  return { service, describedWith, section: () => section }
+}
+
 /** A `ctx` whose `inject` fires immediately, as it does on a real host. */
 function wiredContext(service: unknown): SettingsHostContext {
   return {
@@ -247,5 +296,121 @@ describe('the settings namespace', () => {
     }
     const port = installSettings(wiredContext(service), managerOptions(), {})
     expect(port.read().fields.find(field => field.key === 'defaultCwd')?.overridden).toBe(true)
+  })
+
+  it('against the REAL provider shape: an absent section means NOTHING is overridden', () => {
+    // The live defect this guards: the provider omits `user` for a namespace with
+    // no stored section, and resolves absent `z.array()` keys to `[]`. Reading
+    // "no `user` key" as "cannot tell" put `read()` on its fallback, which then
+    // compared a materialized `[]` against an unset composition entry and
+    // reported three fields as "you changed this" on an untouched settings.yaml.
+    const { service } = fileProviderFake()
+    const port = installSettings(wiredContext(service), managerOptions(), {})
+
+    const fields = port.read().fields
+    for (const field of SETTINGS_FIELDS) {
+      expect(fields.find(candidate => candidate.key === field.key)?.overridden, field.key).toBe(false)
+    }
+    // The materialized `[]` is real and is what every surface receives; it is
+    // documented here so nobody "fixes" it by accident.
+    expect(fields.find(candidate => candidate.key === 'allowedCwd')?.value).toEqual([])
+  })
+
+  it('against the REAL provider shape: only the field actually written is overridden', async () => {
+    const fake = fileProviderFake()
+    const port = installSettings(wiredContext(fake.service), managerOptions(), {})
+
+    expect((await port.write({ maxConcurrent: 2 })).ok).toBe(true)
+    expect(port.read().fields.filter(field => field.overridden).map(field => field.key)).toEqual(['maxConcurrent'])
+
+    // A reset must DROP the key (the provider's `replace`), because writing
+    // `undefined` leaves the key present and the card stuck on "overridden".
+    expect((await port.reset('maxConcurrent')).ok).toBe(true)
+    expect(port.read().fields.filter(field => field.overridden)).toEqual([])
+    expect(fake.section()).toEqual({})
+  })
+
+  it('without `describe`, a provider-materialized `[]` is not mistaken for an override', () => {
+    // The fallback's only evidence is value comparison, so it must compare
+    // against what the schema resolves with NO user layer — not against the raw
+    // composition entry, where an absent list key is `undefined` while the
+    // resolved value is `[]`.
+    const { service } = fileProviderFake({ exposeDescribe: false })
+    const port = installSettings(wiredContext(service), managerOptions(), {})
+
+    for (const field of SETTINGS_FIELDS) {
+      expect(port.read().fields.find(candidate => candidate.key === field.key)?.overridden, field.key).toBe(false)
+    }
+    // …while a value that genuinely differs from the resolved baseline is still
+    // flagged, which is the whole point of keeping the fallback at all.
+    const withUser = fileProviderFake({ exposeDescribe: false, user: { allowedCwd: ['/elsewhere'] } })
+    const other = installSettings(wiredContext(withUser.service), managerOptions(), {})
+    expect(other.read().fields.find(field => field.key === 'allowedCwd')?.overridden).toBe(true)
+  })
+
+  it('asks `describe` in the provider\'s own option vocabulary', () => {
+    // `@deepseek-ai/dsh-settings` reads `options?.redactSecrets`, and defaults to
+    // NOT redacting. Asking with a key it does not read (`redact`) would silently
+    // become a request for whatever that provider's default happens to be.
+    const { service, describedWith } = fileProviderFake()
+    const port = installSettings(wiredContext(service), managerOptions(), {})
+    port.read()
+    expect(describedWith[0]).toEqual({ redactSecrets: false })
+  })
+
+  it('awaits the provider write: a REJECTED persist is reported, never called saved', async () => {
+    // The real scope's `update`/`replace` are `async`
+    // (`@deepseek-ai/dsh-settings` `lib/index.js:410,424`). Dropping the returned
+    // promise does two things: a refusal is reported as `ok: true` (the module's
+    // own promise is the opposite), and the rejection is unhandled — which on
+    // Node's default `--unhandled-rejections=throw` takes the HOST PROCESS down.
+    const scope = {
+      get: () => ({}),
+      update: async () => {
+        throw new Error('settings document is read-only')
+      },
+      replace: async () => {
+        throw new Error('settings document is read-only')
+      },
+    }
+    const service = { register: () => scope, describe: () => [{ ns: SETTINGS_NAMESPACE }] }
+    const port = installSettings(wiredContext(service), managerOptions(), {})
+
+    expect(await port.write({ defaultCwd: '/x' })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('read-only'),
+    })
+    expect(await port.reset('defaultCwd')).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('read-only'),
+    })
+  })
+
+  it('reads back AFTER the provider commits, so the card is never shown pre-write state', async () => {
+    // A `read()` issued before an async write settles renders the OLD value and
+    // the OLD `overridden` badge — the card would look like the save did nothing.
+    let user: Record<string, unknown> = {}
+    const scope = {
+      get: () => ({ ...user }),
+      update: async (patch: Record<string, unknown>) => {
+        await Promise.resolve()
+        user = { ...user, ...patch }
+      },
+      replace: async (next: Record<string, unknown>) => {
+        await Promise.resolve()
+        user = { ...next }
+      },
+    }
+    const service = { register: () => scope, describe: () => [{ ns: SETTINGS_NAMESPACE, user: { ...user } }] }
+    const port = installSettings(wiredContext(service), managerOptions(), {})
+
+    const written = await port.write({ defaultCwd: '/from/user' })
+    expect(written.ok).toBe(true)
+    const field = written.ok ? written.value.fields.find(candidate => candidate.key === 'defaultCwd') : undefined
+    expect(field).toMatchObject({ value: '/from/user', overridden: true })
+
+    const cleared = await port.reset('defaultCwd')
+    expect(cleared.ok).toBe(true)
+    expect(cleared.ok ? cleared.value.fields.filter(candidate => candidate.overridden) : 'write failed').toEqual([])
   })
 })

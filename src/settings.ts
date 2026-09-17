@@ -160,11 +160,17 @@ export interface SettingsPort {
   reset(field: string): Promise<SettingsWriteResult>
 }
 
-/** The scope `ctx.settings.register` hands back (structural subset). */
+/**
+ * The scope `ctx.settings.register` hands back (structural subset).
+ *
+ * `update`/`replace` are declared `void | Promise<void>` rather than `void`
+ * because the real provider's are `async` (`dsh-settings` `lib/index.js:410,424`).
+ * A `void`-only declaration hid that the writes must be awaited; see `write`.
+ */
 interface SettingsScopeFace {
   get(): SettingsShape
-  update(patch: Record<string, unknown>): void
-  replace?(section: Record<string, unknown>): void
+  update(patch: Record<string, unknown>): void | Promise<void>
+  replace?(section: Record<string, unknown>): void | Promise<void>
   watch?(callback: () => void): () => void
 }
 
@@ -192,6 +198,15 @@ interface SettingsServiceFace {
     readonly user?: Record<string, unknown>
   }[]
 }
+
+/**
+ * The raw user layer as a THREE-state answer, because two states cannot express
+ * the difference that matters: `known: true, user: {}` is "the provider looked,
+ * and nothing is overridden", while `known: false` is "this provider does not
+ * describe namespaces, so we cannot say". Collapsing them is what made the first
+ * live card call three untouched list fields "overridden by user".
+ */
+type UserLayer = { readonly known: false } | { readonly known: true; readonly user: Record<string, unknown> }
 
 /** Structural equality for setting values, which are scalars or arrays of scalars. */
 function sameValue(left: unknown, right: unknown): boolean {
@@ -308,20 +323,62 @@ export function installSettings(
 
   const sync = (): void => applyTo(options, resolved())
 
-  /** Raw user layer for this namespace, when the service exposes `describe`. */
-  const userLayer = (service: SettingsServiceFace): Record<string, unknown> | undefined => {
-    if (typeof service.describe !== 'function') return undefined
+  /**
+   * What every field resolves to when the user layer holds NOTHING.
+   *
+   * This — not `entry` — is the baseline `read()` must compare against when it
+   * has no raw user layer: the provider resolves `schema(mergeLayers(base,
+   * section))`, and schemastery materializes `[]` for an absent `z.array()` key,
+   * so comparing against `entry` (where such a key is `undefined`) makes a
+   * resolved `[]` look like a change the user made.
+   *
+   * Memoized, and only ever called from that fallback: a provider that describes
+   * its namespaces gives an exact answer and never pays for this.
+   */
+  let baseCache: SettingsShape | undefined
+  const baseline = (): SettingsShape => {
+    if (baseCache !== undefined) return baseCache
     try {
-      const described = service.describe({ redact: false }) ?? []
+      // `entry` is typed readonly; schemastery's input type is mutable, so the
+      // list fields are copied the same way `applyTo` copies them.
+      const source = { ...entry } as Record<string, unknown>
+      for (const field of SETTINGS_FIELDS) {
+        const value = source[field.key]
+        if (field.kind === 'strings' && Array.isArray(value)) source[field.key] = [...value]
+      }
+      baseCache = SETTINGS_SCHEMA(source as unknown as Parameters<typeof SETTINGS_SCHEMA>[0]) as SettingsShape
+    } catch {
+      baseCache = entry
+    }
+    return baseCache
+  }
+
+  /**
+   * The raw user layer, in THREE states rather than two.
+   *
+   * The real provider (`@deepseek-ai/dsh-settings`) OMITS `user` from the
+   * descriptor of a namespace whose stored section is absent. So "no `user`
+   * key" means "this provider describes namespaces, and this one's user layer is
+   * EMPTY" — which is a definite answer, not an missing one. Collapsing it into
+   * `undefined` alongside "the provider cannot describe namespaces at all" is
+   * what put the first live card on its value-comparison fallback and made three
+   * list fields read "overridden by user" on an untouched `settings.yaml`.
+   */
+  const userLayer = (service: SettingsServiceFace): UserLayer => {
+    if (typeof service.describe !== 'function') return { known: false }
+    try {
+      // The provider reads `options.redactSecrets` and defaults to NOT redacting;
+      // asking with a key it does not read would silently defer to that default.
+      // This namespace declares no secret field, and a form needs the raw value.
+      const described = service.describe({ redactSecrets: false }) ?? []
       const found = described.find((item) => {
         const name = item.ns ?? item.namespace ?? item.name
         return name === SETTINGS_NAMESPACE
       })
-      // `undefined` means "this provider does not describe namespaces to us",
-      // which puts `read()` on its conservative fallback — NOT "no overrides".
-      return found?.user
+      if (found === undefined) return { known: false }
+      return { known: true, user: found.user ?? {} }
     } catch {
-      return undefined
+      return { known: false }
     }
   }
 
@@ -357,7 +414,7 @@ export function installSettings(
 
   const read = (): SettingsView => {
     const current = resolved()
-    const user = service === undefined ? undefined : userLayer(service)
+    const user = service === undefined ? { known: false } as const : userLayer(service)
     return {
       namespace: SETTINGS_NAMESPACE,
       writable: scope !== undefined,
@@ -376,14 +433,14 @@ export function installSettings(
         value: current[field.key],
         // Presence in the RAW user layer, not a value comparison: a user who saved
         // the same value the deployment had is still overridden, and must be able
-        // to put it back. Providers that do not describe their namespaces fall back
-        // to "differs from the composition entry" — compared STRUCTURALLY, because
-        // `[] !== []` would otherwise report every list field as overridden (the
-        // bug the first live run of this card found).
-        overridden:
-          user !== undefined
-            ? Object.prototype.hasOwnProperty.call(user, field.key)
-            : current[field.key] !== undefined && !sameValue(current[field.key], entry[field.key]),
+        // to put it back. `known: true` with an empty layer is the provider saying
+        // "nothing is overridden" — an answer, not the absence of one. Only a
+        // provider that does not describe namespaces at all falls back to "differs
+        // from what the schema resolves with no user layer", compared STRUCTURALLY
+        // because `[] !== []` would flag every list field (the live bug).
+        overridden: user.known
+          ? Object.prototype.hasOwnProperty.call(user.user, field.key)
+          : current[field.key] !== undefined && !sameValue(current[field.key], baseline()[field.key]),
       })),
     }
   }
@@ -410,10 +467,16 @@ export function installSettings(
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
     try {
-      scope.update(clean)
+      // AWAITED: the provider's scope methods are `async`, so a refusal arrives as
+      // a rejected promise. Dropping it would report `ok: true` for a write that
+      // stored nothing, and leave the rejection unhandled — which on Node's
+      // default `--unhandled-rejections=throw` kills the host process.
+      await scope.update(clean)
     } catch (error) {
       return { ok: false, error: `could not persist: ${error instanceof Error ? error.message : String(error)}` }
     }
+    // Read back only after the commit, otherwise the caller is handed the
+    // pre-write value and the pre-write `overridden` badge.
     sync()
     return { ok: true, value: read() }
   }
@@ -424,16 +487,18 @@ export function installSettings(
     if (scope === undefined) {
       return { ok: false, error: 'no settings provider is mounted in this deployment; nothing can be persisted' }
     }
-    const user = service === undefined ? undefined : userLayer(service)
+    const user = service === undefined ? { known: false } as const : userLayer(service)
     try {
-      if (scope.replace !== undefined && user !== undefined) {
+      // AWAITED, for the same reason as `write`: these are the provider's `async`
+      // methods, and `replace({})` is its documented "re-inherit everything".
+      if (scope.replace !== undefined && user.known) {
         // Dropping the key from the whole user layer is the only way to stop being
         // "overridden": writing `undefined` would leave the key present.
-        const next: Record<string, unknown> = { ...user }
+        const next: Record<string, unknown> = { ...user.user }
         delete next[field]
-        scope.replace(next)
+        await scope.replace(next)
       } else {
-        scope.update({ [field]: undefined })
+        await scope.update({ [field]: undefined })
       }
     } catch (error) {
       return { ok: false, error: `could not persist: ${error instanceof Error ? error.message : String(error)}` }
