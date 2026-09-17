@@ -17,6 +17,8 @@ import { describe, expect, it } from 'vitest'
 
 import type { BridgeApi } from '../../src/client/api.ts'
 import { ApiError } from '../../src/client/api.ts'
+import { SettingsCard } from '../../src/client/settings.ts'
+import { SETTINGS_NAMESPACE } from '../../src/namespace.ts'
 import { createTranslator, DICTS } from '../../src/client/i18n.ts'
 import { Indicator } from '../../src/client/indicator.ts'
 import { SupervisorPanel, useSupervisor } from '../../src/client/panel.ts'
@@ -408,5 +410,39 @@ describe('component tree shape', () => {
     expect(() => SupervisorPanel({ store, translator: createTranslator('en'), sessionId: undefined })).not.toThrow()
     expect(() => createElement(SupervisorPanel, { store, translator: createTranslator('en') })).not.toThrow()
     store.stop()
+  })
+})
+
+describe('SettingsCard — the card says which plugin it belongs to', () => {
+  /**
+   * The stub renderer has no effects, so this is the card's FIRST state — which
+   * is the point: the identifier is rendered from the shared constant rather
+   * than from data, so it is present before any fetch resolves, and it stays
+   * present when the fetch fails.
+   *
+   * The regression it guards is real and came from the operator: opening
+   * 设置 → 插件 on a real host, they found a card titled `监督桥设置` and had to
+   * ASK whether it was this plugin's. A settings page lists every plugin's card
+   * side by side, so a human name alone cannot answer that; the namespace can,
+   * because the namespace IS the package name.
+   */
+  const cardApi = {
+    async settings() {
+      throw new ApiError('missing', 'not-found', 404, 'no route')
+    },
+  } as unknown as BridgeApi
+
+  it('prints its namespace, so a reader never has to ask whose card this is', () => {
+    const rendered = SettingsCard({ api: cardApi, translator: createTranslator('zh') })
+    const text = textOf(rendered)
+    expect(text).toContain(SETTINGS_NAMESPACE)
+    expect(text).toContain('插件标识')
+  })
+
+  it('prints the same identifier in English, with the package name unchanged', () => {
+    const text = textOf(SettingsCard({ api: cardApi, translator: createTranslator('en') }))
+    expect(text).toContain('Plugin id')
+    // The identifier is data, not copy: it must not be localized.
+    expect(text).toContain(SETTINGS_NAMESPACE)
   })
 })

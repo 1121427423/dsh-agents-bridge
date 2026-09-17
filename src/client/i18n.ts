@@ -86,6 +86,8 @@ export interface Dict {
   readonly instantaneous: string
   /* ── settings card (DSH 设置 → 插件) ─────────────────────────────────── */
   readonly settingsTitle: string
+  /** Printed before the plugin's namespace, under the card title. */
+  readonly settingsNamespaceLabel: string
   readonly settingsIntro: string
   readonly settingsSave: string
   readonly settingsSaving: string
@@ -170,6 +172,7 @@ const zh: Dict = {
   tokens: 'token',
   instantaneous: 'token 未上报',
   settingsTitle: '监督桥设置',
+  settingsNamespaceLabel: '插件标识：',
   settingsIntro: '这些值只影响本插件；留空即跟随内核默认或部署配置。',
   settingsSave: '保存',
   settingsSaving: '保存中…',
@@ -254,6 +257,7 @@ const en: Dict = {
   tokens: 'tokens',
   instantaneous: 'usage not reported',
   settingsTitle: 'Bridge settings',
+  settingsNamespaceLabel: 'Plugin id:',
   settingsIntro: 'These values affect this plugin only; leaving one empty means "follow the kernel default or the deployment config".',
   settingsSave: 'Save',
   settingsSaving: 'Saving…',

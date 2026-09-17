@@ -1,8 +1,11 @@
 /**
  * dsh-agents-bridge client half — the settings card.
  *
- * Mounted in `settings.plugin.item` under the key `agents-bridge` (the settings
- * namespace). WHY a card and not "just register the namespace":
+ * Mounted in `settings.plugin.item` under the key `dsh-agents-bridge` (the
+ * settings namespace — NOT `agents-bridge`, which an earlier comment here said
+ * and which is exactly the kind of drift the card's own identifier line now
+ * prevents a reader from having to guess). WHY a card and not "just register the
+ * namespace":
  *
  *   `ConfigurablePluginsTab` (first-party) ENUMERATES the namespaces the host
  *   serves and dispatches this slot per namespace — "a served namespace no card
@@ -31,6 +34,7 @@ import { createElement, useCallback, useEffect, useMemo, useState } from 'react'
 
 import type { Dict, Translator } from './i18n.ts'
 import type { BridgeApi, ClientSettingField, ClientSettingsView } from './api.ts'
+import { SETTINGS_NAMESPACE } from '../namespace.ts'
 
 /** Props the settings slot render receives. */
 export interface SettingsCardProps {
@@ -65,6 +69,31 @@ const box: Readonly<Record<string, string | number>> = {
  */
 export function SettingsCard({ api, translator }: SettingsCardProps): ReactElement {
   const { t } = translator
+
+  /**
+   * The plugin's own identifier, printed on the card in EVERY state.
+   *
+   * WHY: the first operator to open this card asked "is `监督桥设置` yours?" — a
+   * human name alone cannot answer that, and the settings page lists cards from
+   * every plugin side by side. The namespace IS the package name (see
+   * `src/namespace.ts`), so one monospace line makes the card self-identifying:
+   * the reader can match it against the profile's dependency list without asking
+   * anyone. Rendered from the shared constant rather than from the host's view so
+   * it survives the loading and failure states too.
+   */
+  const identifier = createElement(
+    'p',
+    {
+      style: {
+        margin: '0 0 10px',
+        opacity: 0.6,
+        fontSize: '12px',
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+      },
+    },
+    `${t('settingsNamespaceLabel')} ${SETTINGS_NAMESPACE}`,
+  )
+
   const [view, setView] = useState<ClientSettingsView | undefined>(undefined)
   const [drafts, setDrafts] = useState<Record<string, string>>({})
   const [status, setStatus] = useState<string | undefined>(undefined)
@@ -142,10 +171,20 @@ export function SettingsCard({ api, translator }: SettingsCardProps): ReactEleme
   )
 
   if (failed) {
-    return createElement('div', { style: box }, createElement('p', null, t('settingsLoadFailed')))
+    return createElement(
+      'div',
+      { style: box },
+      identifier,
+      createElement('p', null, t('settingsLoadFailed')),
+    )
   }
   if (view === undefined) {
-    return createElement('div', { style: box }, createElement('p', null, t('settingsIntro')))
+    return createElement(
+      'div',
+      { style: box },
+      identifier,
+      createElement('p', null, t('settingsIntro')),
+    )
   }
 
   const rows = view.fields.map((field) => {
@@ -211,6 +250,7 @@ export function SettingsCard({ api, translator }: SettingsCardProps): ReactEleme
     'div',
     { style: box },
     createElement('h3', { style: { margin: '0 0 6px', fontSize: '15px' } }, t('settingsTitle')),
+    identifier,
     createElement('p', { style: { margin: '0 0 12px', opacity: 0.75 } }, t('settingsIntro')),
     view.writable
       ? null
