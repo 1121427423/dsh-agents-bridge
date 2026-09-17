@@ -37,19 +37,29 @@ import { HELLO_COMMAND_NAME, registerSmokeCommand } from './tools/smoke.ts'
 export const name = 'agents-bridge'
 
 /**
- * Services read at apply time.
+ * Services this plugin's own fiber waits for.
  *
- * Only `tools` and `systemPrompt` are declared. Two more services are resolved
- * LAZILY, and both omissions are load-bearing:
+ * Only `tools` and `systemPrompt` are declared. Two more services are involved
+ * and NEITHER may appear here:
  *
- *  - `commands` — cordis marks a plugin INACTIVE when an inject-listed service
+ *  - `commands` — cordis marks a plugin INACTIVE while an inject-listed service
  *    is unmounted, and a host without a command registry must still get the nine
  *    agent tools. The smoke command resolves `commands` lazily and skips itself
  *    when it is absent (design doc D16).
- *  - `webServer` — same trap, larger blast radius: the HTTP API only powers the
- *    Web client half, so declaring it would cost a headless deployment all nine
- *    tools in exchange for a panel it cannot show. When it is absent the plugin
- *    logs why and registers the tools exactly as before.
+ *  - `webServer` — the same trap with a larger blast radius: the HTTP API only
+ *    powers the Web client half, so declaring it here would cost a headless
+ *    deployment all nine tools in exchange for a panel it cannot show.
+ *
+ * Not declaring `webServer` is necessary but NOT sufficient, and the second half
+ * is the trap this plugin actually fell into: the host's web server is just
+ * another row of the loader tree, so at the moment this plugin applies the
+ * service frequently does not exist YET. A one-shot `ctx.get('webServer')` then
+ * reads `undefined` on a host that very much has a web server — which is what
+ * this entry used to do, and why the supervisor panel never mounted anywhere.
+ *
+ * The mechanism that satisfies both constraints is cordis SCOPE injection
+ * (`ctx.inject`, see `apply` below): the callback runs only while `webServer` is
+ * available, is re-run when it appears, and never gates this plugin's own fiber.
  */
 export const inject = ['tools', 'systemPrompt'] as const
 
@@ -133,12 +143,14 @@ export function apply(ctx: Context, config: Config = {}): void {
     ...Object.keys(config.overrides ?? {}),
   ])]
 
-  // Resolved BEFORE the effect so the log line about a missing service is
-  // emitted once, but consumed INSIDE it — see the note on `inject` above.
-  // A host without a web server simply has no client half; the tools are
-  // unaffected, which is the whole point of not declaring `webServer`.
-  const webServer = ctx.get('webServer') as WebServerFace | undefined
-  const webRuntime = ctx.get('webRuntime') as WebRuntimeFace | undefined
+  /**
+   * Route disposer published by the scope below, closed by this plugin's own
+   * effect so the route always comes off BEFORE the manager is disposed.
+   *
+   * `undefined` while no web server is available — which is a normal state, not
+   * an error: the nine tools above do not need one.
+   */
+  let unmountHostApi: (() => void) | undefined
 
   // Everything registrable goes inside ONE effect so the disposers run in
   // reverse order on unload and nothing is left registered on a half-torn-down
@@ -159,17 +171,6 @@ export function apply(ctx: Context, config: Config = {}): void {
     // Optional: the smoke command needs a command registry, the tools do not.
     const smokeDisposer = registerSmokeCommand(ctx)
 
-    // Optional: the HTTP API serves the Web client half only. `null` when the
-    // host has no web server — the nine tools above are already registered.
-    const apiDisposer = webServer === undefined
-      ? null
-      : attachHostApi({
-          webServer,
-          ...(webRuntime === undefined ? {} : { webRuntime }),
-          manager,
-          logger,
-        })
-
     return () => {
       // Unregister the tools explicitly instead of relying on fiber teardown:
       // `ctx.tools.register` hands back the exact disposer, and releasing the
@@ -179,8 +180,10 @@ export function apply(ctx: Context, config: Config = {}): void {
       smokeDisposer?.()
       sectionDisposer()
       // Before `manager.dispose()`: a route that outlived the manager would
-      // answer `cancel`/`output` against a disposed facade.
-      apiDisposer?.()
+      // answer `cancel`/`output` against a disposed facade. Cordis unloads a
+      // fiber's effects CONCURRENTLY, so the scope below cannot rely on its own
+      // teardown winning that race — the handle is closed here, synchronously.
+      unmountHostApi?.()
       // `void`: the effect disposer is synchronous by contract; disposal of the
       // child process groups continues in the background and is not awaited
       // (awaiting it would make plugin unload wait on a kill grace window).
@@ -188,8 +191,53 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
   }, 'agents-bridge.register()')
 
-  if (webServer === undefined) {
-    logger.info('host has no webServer: the agent supervisor panel is unavailable, the nine tools are unaffected')
+  // The HTTP API is a SEPARATE fiber, not part of the effect above. Cordis runs
+  // this callback only while `webServer` is available and unloads it again if
+  // the service goes away, so the plugin's own fiber is never gated by it:
+  // a host without a web server keeps all nine tools (D16), and a host whose web
+  // server mounts AFTER us — which is the normal case, the web server is just
+  // another loader row — still gets the panel.
+  ctx.inject(['webServer'], (scoped) => {
+    // `webRuntime` is genuinely optional, and read rather than injected: it only
+    // widens the browser-trust fence to the non-loopback authorities this
+    // deployment serves, and the route works without it (loopback only). Making
+    // it a dependency would hold the whole panel back on hosts that never
+    // provide one, and `dsh-web-app` provides it only after `webServer` exists.
+    const webRuntime = scoped.get('webRuntime') as WebRuntimeFace | undefined
+    // Guaranteed present: the scope only runs while `webServer` is available.
+    // Read through `get` rather than `scoped.webServer` because the service
+    // belongs to the host, not to the `Context` interface this plugin compiles
+    // against (`webServer` is not part of the DSH plugin ABI we typecheck on).
+    const webServer = scoped.get('webServer') as WebServerFace
+    const disposeApi = scoped.effect(
+      () =>
+        attachHostApi({
+          webServer,
+          ...(webRuntime === undefined ? {} : { webRuntime }),
+          manager,
+          logger,
+        }),
+      'agents-bridge.host-api()',
+    )
+    unmountHostApi = () => {
+      unmountHostApi = undefined
+      disposeApi()
+    }
+  })
+
+  // Whether the panel is mounted is knowable only as a STATE, never as a claim
+  // about the host. The host's own web server is just another row of the loader
+  // tree and, measured on the standalone web harness, is provided ~800 ms AFTER
+  // this plugin applies — so a line asserting "this host has no web server" here
+  // would be false on a host that has one, which is precisely the lie this
+  // workstream removed. `unmountHostApi` is set synchronously by the scope above
+  // when the service is already up (cordis resolves dependents on the spot) and
+  // stays `undefined` while it is not, so the honest statement is available:
+  // not mounted YET. The definitive line is `host api route mounted` from
+  // `attachHostApi`; this one keeps a deployment where the panel never appears
+  // diagnosable from the host log.
+  if (unmountHostApi === undefined) {
+    logger.info('no webServer available yet: the agent supervisor panel is not mounted (it mounts as soon as the host provides one), the nine tools are unaffected')
   }
 
   // Logged rather than thrown: a deployment that has no agent CLI installed is

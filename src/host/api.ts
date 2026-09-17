@@ -24,12 +24,16 @@
  *
  * THE `webServer` TRAP (design doc D16)
  * -------------------------------------
- * `webServer` is NOT in the plugin's `inject`. Cordis marks a plugin INACTIVE
- * when an inject-listed service is unmounted, so a host without a web server
- * would lose the plugin ENTIRELY — all nine tools included — just because it
- * cannot serve a panel. `attachHostApi` therefore takes the service as an
- * argument, resolved lazily by the entry via `ctx.get('webServer')`; when it is
- * absent this module is never called and the tools register exactly as before.
+ * `webServer` is NOT in the plugin's top-level `inject`. Cordis marks a plugin
+ * INACTIVE while an inject-listed service is unmounted, so a host without a web
+ * server would lose the plugin ENTIRELY — all nine tools included — just because
+ * it cannot serve a panel. `attachHostApi` therefore takes the service as an
+ * argument and the entry reaches it through cordis SCOPE injection
+ * (`ctx.inject(['webServer'], ...)`), which waits for the service without gating
+ * the parent fiber. A one-shot `ctx.get('webServer')` does NOT work here: the
+ * host's web server is another row of the loader tree and is routinely provided
+ * after this plugin applies (measured at ~800 ms on the standalone web harness),
+ * so the read comes back `undefined` on a host that has one.
  *
  * @module dsh-agents-bridge/host/api
  */
@@ -487,10 +491,16 @@ export function createApiHandlers(deps: HostApiDeps): Record<string, (payload: R
  */
 export function createApiRouteHandler(deps: HostApiDeps): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
   const handlers = createApiHandlers(deps)
-  const trustedHosts = deps.webRuntime?.trustedHosts ?? []
 
   return async (req, res) => {
-    if (!isTrustedApiRequest(req, trustedHosts)) {
+    // `trustedHosts` is read PER REQUEST, not snapshotted when the route mounts:
+    // the same late-service trap that made `ctx.get('webServer')` useless applies
+    // to `webRuntime`, which `dsh-web-app` provides only AFTER `webServer` exists
+    // (measured on the standalone web harness: still absent at the moment the
+    // entry's scope fires). A mount-time snapshot would therefore be empty on a
+    // host that DOES have trusted authorities, and the fence would 403 every
+    // non-loopback deployment — silently, since a 403 is a legitimate answer.
+    if (!isTrustedApiRequest(req, deps.webRuntime?.trustedHosts ?? [])) {
       writeJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
       return
     }

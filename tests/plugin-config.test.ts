@@ -38,7 +38,10 @@ interface Registered {
  * A `ctx` just real enough to run `apply()`.
  *
  * `effect` runs its body immediately and records the returned disposer, which is
- * exactly what cordis does on a fresh (non-reloading) fiber.
+ * exactly what cordis does on a fresh (non-reloading) fiber. `inject` is the
+ * scope-injection seam the entry uses for the optional `webServer` service: this
+ * host has none, so the callback is simply never run — which is the whole point
+ * (the nine tools must not depend on it).
  */
 function fakeContext(): { ctx: unknown; registered: Registered } {
   const registered: Registered = { tools: new Map(), sections: [], disposers: [] }
@@ -60,6 +63,7 @@ function fakeContext(): { ctx: unknown; registered: Registered } {
       },
     },
     get: () => undefined,
+    inject: () => undefined,
   }
   return { ctx, registered }
 }

@@ -295,6 +295,29 @@ describe('host API — guards', () => {
     expect(result.status).toBe(200)
   })
 
+  it('picks up a webRuntime that arrives AFTER the route was mounted', async () => {
+    // The same late-service trap as the entry's `webServer` read, one layer down:
+    // `dsh-web-app` provides `webRuntime` only after `webServer` exists, so at the
+    // moment the entry's scope mounts the route there is no runtime yet (measured
+    // on the standalone web harness). A fence that snapshotted `trustedHosts` when
+    // the route mounted would be empty forever on a host that DOES have trusted
+    // authorities — and it would refuse them with a perfectly legitimate 403, so
+    // nothing would look broken.
+    type MutableDeps = { -readonly [K in keyof HostApiDeps]: HostApiDeps[K] }
+    const deps: MutableDeps = {
+      webServer: { register: () => () => {} },
+      manager: fakeManager(),
+      logger: createLogger('test', { sink: () => {} }),
+    }
+    const handler = createApiRouteHandler(deps)
+
+    expect((await call(handler, { headers: { host: 'dsh.internal:5173' }, body: '{}' })).status).toBe(403)
+
+    deps.webRuntime = { trustedHosts: ['dsh.internal:5173'] }
+
+    expect((await call(handler, { headers: { host: 'dsh.internal:5173' }, body: '{}' })).status).toBe(200)
+  })
+
   it('allows a same-origin request and one with no Origin at all', async () => {
     const sameOrigin = await call(makeHandler(fakeManager()), {
       headers: { host: 'localhost:5173', origin: 'http://localhost:5173' },

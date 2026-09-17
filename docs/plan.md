@@ -31,7 +31,7 @@
 | D28 | **argv 所有权切分**：driver 独占「子命令」token（openclaw 的 `agent`、codex 的 `exec`），描述符的 `argsPrefix` 只放 driver 无法知道的全局 token（`--profile autoclaw`、wrappers） | 两个 openclaw 身份都曾在 `argsPrefix` 里重复 driver 的子命令，`spawn.ts` 直接拼接后得到 `… agent agent …`，被 CLI 拒为 "Too many arguments for this command."。既有测试全部只断言**单个字段**（`argsPrefix === ['agent']`），于是每个测试都通过、唯独真正交给操作系统的 argv 是错的。护栏：`tests/integration/argv-shape.test.ts` 对**每一个内置身份**断言最终 argv（通用不变量：无相邻重复 token；openclaw 引擎的 `agent` 恰好出现一次；`--profile` 必须早于 `agent`） | ✅ 已实现 |
 | D29 | **`src/kernel/types.ts` 仅改注释**（冻结 ABI 的例外，纯文档） | `CommandSpec.argsPrefix` 的示例仍写作 `['agent']` —— 正是 D28 那个 bug 的示范值，留着会继续误导下一个读者。**只改注释，不改任何字段、类型或可选性**，故 ABI 不变、无需版本号变更 | ✅ 已改（本工作流唯一触碰 types.ts 之处） |
 | D30 | **client bundle 必须包装成 `window.__ModuleLoader__.load({ id, factory })`**；`id`、slot 注册 `id`、`registrant` 一律从 `package.json#name` 派生（构建期 `define`，源码里不出现字面量） | 宿主**不是** import 产物再读 exports，而是启动时注册 factory；裸 esbuild CJS 产物全文 0 次 `ModuleLoader`，于是**装不上且静默无 UI**（不报错，因为没人去找它）。字面量则会在改包名时静默失配 | ✅ 已实现（`verify_plugin.py` 11/11 PASS） |
-| D31 | **工具的 `output.schema` 必须声明内核实际返回的每一个字段**；护栏：`tests/tools/probe-schema.test.ts` 把**真实返回值**逐键走过**真实声明的 schema** | `ProbeResult.capabilities` 一直是 registry 返回的字段，而 `agents_probe` 的 `output.schema` 没声明它、同时还开着 `additionalProperties: false` → 内核物化输出时对**每一个身份**抛 `value[0].capabilities is not a declared property`：模型在任何会话里的第一个调用就失败，从模型视角看"没有任何东西可驱动"。单测只把 `execute()` 的返回值拿去断言、**不经物化**，所以 704 个全绿用例也照漏（与 D28 同一形状：断言的不是真正交出去的那个对象）。护栏改走运行时那条路——同一份 schema、同一个返回值 | ✅ 已修（+3 用例） |
+| D31 | **工具的 `output.schema` 必须声明内核实际返回的每一个字段**；护栏 `tests/tools/probe-schema.test.ts` 把**真实返回值**逐键走过**真实声明的 schema** | `ProbeResult.capabilities` 一直是 registry 返回的字段，而 `agents_probe` 的 `output.schema` 没声明它、同时开着 `additionalProperties: false` → 内核物化输出时对**每一个身份**抛 `value[0].capabilities is not a declared property`：模型在任何会话里的第一个调用就失败，从模型视角看「没有任何东西可驱动」。单测只把 `execute()` 的返回值拿去断言、**不经物化**，所以 704 个全绿用例照漏（与 D28 同一形状：被断言的不是真正交出去的那个对象）。护栏改走运行时那条路——同一份 schema、同一个返回值 | ✅ 已修（+3 用例） |
 
 ## 任务拆分（3 个并行工作流）
 
@@ -319,10 +319,10 @@ $ python3 /Users/king/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py 
 [verify] PASS: 全部 11 项通过
 ```
 
-`pnpm exec vitest run` → **707 passed / 1 skipped（42 passed | 1 skipped 文件）**
-（工作流 G 交回时 704/1、42 文件；本轮新增 3 个用例，零删除、零跳过）；
-`pnpm exec tsc --noEmit` → 0 错误；
-`pnpm run build` → `lib/index.js` 311.2 KB + `lib/client.js` 59.5 KB（含包装）。
+**工作流 G 落地时的门禁输出（历史值；当前主干见「交付指标」）**：`pnpm exec vitest run` →
+**704 passed / 1 skipped（42 个文件）**（基线 696/1、41 文件；G 新增 8 个用例）；`pnpm exec tsc
+--noEmit` → 0 错误；`pnpm run build` → `lib/index.js` 310.1 KB + `lib/client.js` 59.5 KB（含包装）。
+（此后工作流 H 新增 6 个、D31 新增 3 个，主干现为 **713 passed / 1 skipped**。）
 
 **关于校验器的第 9 项（React 保持 external）**：它 grep 的是 `scripts/build.mjs` 里有没有
 `react` / `react/jsx-runtime` / `react-dom` / `react-dom/client` 四个串，而本仓库的 client
@@ -340,6 +340,103 @@ $ python3 /Users/king/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py 
 见不变量 6）；④ 测试里「产物不存在就 skip」（等于回到测不到）；⑤ 在测试里跑 build
 （慢，且让「产物缺失会失败」这条证明消失——改用 `pretest` + 硬断言）；⑥ 改
 `verify_plugin.py` 或放宽断言（校验器是外部技能，且第 6 项报的是**事实**）。
+
+## 工作流 H — 宿主 API 取不到 `webServer`，监工面板永远不挂载（2026-09-17）
+
+**症状（协调者在真实 web 宿主上实测）。** 独立于桌面应用的 web 宿主加载本插件时打印：
+
+```
+[dsh-agents-bridge:surface] host has no webServer: the agent supervisor panel is unavailable, the nine tools are unaffected
+[dsh-agents-bridge:surface] dsh-agents-bridge loaded {"tools":9,"configuredIds":[]}
+dsh web: http://127.0.0.1:43121/?token=…
+```
+
+9 个工具全在（正确），但**宿主 API 根本没接上**：client half 即使已经带上正确的
+`window.__ModuleLoader__.load` 包装（工作流 G），也拿不到任何数据，监工面板是个空壳。
+
+**根因（实测定位，不是推测）。** `src/index.ts` 用一次性的 `ctx.get('webServer')` 取服务。
+任务书给的判断是「Cordis 不允许访问未声明在 `inject` 里的服务」，**实测不成立**——
+cordis 的 `reflect.get` 文档原文就是 *"Read a service from the store without the inject
+requirement"*，未声明的服务照样取得到。真正的根因是**时序**：
+
+- 用一个最小 cordis 复现脚本（真实 `@deepseek-ai/cordis@4.0.1`）确认：服务**已经**在时
+  `ctx.get` 立刻返回它；服务**稍后**才被 provide 时，`ctx.get` 返回 `undefined`，
+  而 `ctx.inject(['webServer'], cb)` 的回调会在服务出现时被调用，且父 fiber 全程 ACTIVE。
+- 宿主的 web server 只是 loader 树里的**另一行**（`@deepseek-ai/dsh-host-webserver`），
+  在真机 web 宿主上**比本插件晚 ~800 ms** 才 provide（临时打点实测
+  `TIMING scope fired after ms {"ms":785}`）。
+
+所以旧写法在**有** web server 的宿主上读到 `undefined` 并打出「host has no webServer」——
+**谎报**；面板在任何宿主上都挂不上。D16（不把可选服务放进顶层 `inject`）依然正确，
+但它只解决了一半：**不声明还不够，还得有个「等它出现」的机制**。
+
+**修复（`src/index.ts`）。**
+
+1. 工具面 + prompt 段 + smoke command 照旧在**父 fiber 的同一个 effect** 里无条件注册 ——
+   没有 web server 的宿主照样拿到完整 9 个工具（D16 的初衷）。
+2. HTTP API 改由 **`ctx.inject(['webServer'], (scoped) => …)` 作用域注入**挂载：回调只在
+   服务可用时执行，服务出现时自动重跑，服务消失时自动卸载，**父插件从不因它缺席而失活**。
+3. `webRuntime` 保持**真正可选**（`scoped.get('webRuntime')`）：它只把信任围栏放宽到本部署
+   实际服务的非 loopback authority，缺席时降级为「只信 loopback」，**不因此不挂载**。
+   `dsh-web-app` 本身 inject `webServer` 之后才 provide `webRuntime`，所以它必然可能晚到。
+4. 路由 disposer 通过 `unmountHostApi` 发布给父 effect：**cordis 卸载一个 fiber 的 effects 是
+   并发的**（`_unload` 里是 `Promise.all`），作用域不能指望自己的 teardown 赢得这场竞速，
+   所以父 effect 的 disposer 在 `manager.dispose()` **之前**同步把路由摘掉。
+5. 日志如实反映两种情形：挂上时 `host api route mounted {"path":"/agents-bridge/api"}`；
+   没挂上时说明**状态**而不是替宿主下结论（`no webServer available yet: … is not mounted
+   (it mounts as soon as the host provides one) …`）——「这个宿主没有 web server」在 apply
+   那一刻**不可知**（服务可能正在挂），所以那句话不能再说。
+6. **同一类 bug 在信任围栏里也有一个**：`createApiRouteHandler` 原本在**建路由时**快照
+   `webRuntime.trustedHosts`，而实测该服务在作用域挂载的那一刻**仍不存在**
+   （`PROBE webRuntime at mount {"present":false}`）——`dsh-web-app` 要等 `webServer` 才有
+   `webRuntime`。于是绑定到 LAN 地址、配了 `trustedHosts` 的部署会被自己的围栏 403，而且
+   403 本身是合法响应、**看起来什么都不像坏了**。改为**每个请求读一次** `deps.webRuntime`
+   （2 行），并用「后到的 webRuntime」用例把它锁住。
+
+**护栏（扩展既有测试，不另起一套）。** 假 ctx 现在实现了
+`ctx.inject(deps, cb)` 的**双半契约**（依赖齐了就同步跑；`provide()` 之后补跑）以及
+`provide(name, value)`。新增 5 个用例：① 服务**晚到**时路由确实挂上、9 个工具不受影响；
+② 没有 `webRuntime` 也照挂（可选服务降级）；③ 晚挂的路由在插件 effect 被 dispose 时**确实
+被摘掉**（`disposedRoutes === 1`）；④ web server 始终不出现时工具照常注册、零路由；
+⑤ 负向日志只说「尚未挂载」，不得再出现 `host has no webServer`。
+`tests/plugin-config.test.ts` 的假 ctx 补了 `inject`（该宿主没有 web server，回调不跑）；
+`tests/host/api.test.ts` 新增 1 个用例：路由**挂载之后**才出现的 `webRuntime` 必须被围栏
+采纳（先 403，provide 之后 200）。
+
+**证据（本机真跑）。**
+
+```
+# 修复前（协调者留在 43121 上的宿主，日志 logs/web-run2.log）
+[dsh-agents-bridge:surface] host has no webServer: the agent supervisor panel is unavailable, the nine tools are unaffected
+[dsh-agents-bridge:surface] dsh-agents-bridge loaded {"tools":9,"configuredIds":[]}
+
+# 修复后（同一条命令，插件行换成工作树产物：--patch /tmp/wb-h-overlay.yml）
+[dsh-agents-bridge:surface] no webServer available yet: the agent supervisor panel is not mounted (it mounts as soon as the host provides one), the nine tools are unaffected
+[dsh-agents-bridge:surface] dsh-agents-bridge loaded {"tools":9,"configuredIds":[]}
+[dsh-agents-bridge:surface] host api route mounted {"path":"/agents-bridge/api"}
+dsh web: http://127.0.0.1:43121/?token=…
+```
+
+```
+$ curl -s -X POST -d '{}' http://127.0.0.1:43121/agents-bridge/api/status
+{"ok":true,"value":{"sessions":[],"concurrency":{"running":0,"limit":200},"now":1789614075890}}
+$ curl -s -X POST -d '{"refresh":false}' …/api/probe   → {"ok":true,"value":{"available":true,…}}
+$ curl -s -o /dev/null -w '%{http_code}' -X POST -H 'sec-fetch-site: cross-site' …/api/status → 403
+```
+
+**工作流 H 在自己的工作树里的门禁输出**（该树基线 704/1，**不含** D31）：`pnpm exec vitest run`
+→ **710 passed / 1 skipped（42 个文件）**（H 新增 6 个：wiring 5 + api 1，零删除、零跳过）；
+`pnpm exec tsc --noEmit` → 0 错误；`pnpm run build` → `lib/index.js` 310.4 KB + `lib/client.js`
+59.2 KB；`verify_plugin.py` → **11/11 PASS**。
+**合并到主干后同一组门禁的真跑输出**（H + D31 同在树上）：**713 passed / 1 skipped（42 个文件）**、
+`tsc` 0 错误、`lib/index.js` 311.4 KB + `lib/client.js` 59.5 KB。
+
+**被否决的替代方案**：① 把 `webServer` 放进顶层 `inject`（D16：没有该服务的宿主会把**整个
+插件**判为 INACTIVE，9 个工具一起丢）；② 保留 `ctx.get` 只在有服务时挂（就是本 bug）；
+③ 把 `webRuntime` 也写进 `inject`（`dsh-web-app` 晚于 `webServer` provide 它，等于把面板
+赌在一个更晚的服务上）；④ 在 apply 时同步判断「没挂上」并打日志（服务 800 ms 后才到，
+那句话在真机上就是谎报）；⑤ 依赖作用域 fiber 自己的 teardown 摘路由（cordis 并发卸载，
+与 `manager.dispose()` 无先后保证）。
 
 ## 阶段状态
 
@@ -409,7 +506,7 @@ $ python3 /Users/king/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py 
   - **扫描真机实测**：29ms 扫完 `/Applications` 的 64 个 bundle，识别出 AutoClaw 的 gateway（`Resources/gateway/openclaw/openclaw.mjs` + bundle 内 `Resources/node/darwin-arm64/node`），并按内置优先规则正确遮蔽
 - [x] **P2 取消/续接/watchdog 打磨**：三段式取消（SIGTERM → grace → **进程组** SIGKILL）配孤儿证明测试（假 CLI fork 出孙进程 + 故意忽略 SIGTERM，cancel 后断言两个 pid 都 ESRCH）；watchdog 硬超时/idle 各自独立、终态 `timeout`、终态后定时器归零；`send` 对终态会话给可执行错误；`cwd`/agent 白名单（`realpath` 后比较）+ `maxConcurrent`（同步拒绝，不排队）；store 并发写者不再撞临时文件名（原 bug：per-instance 计数器 → 丢记录）。新增 81 个测试
 - [x] **D27 ACP driver 完成**：ABI v4（`ProtocolFamily += 'acp'` + 三个可选字段，纯加法）+ `src/drivers/acp.ts` + CLI 轨道新身份 `codebuddy-code-acp` + `tests/fixtures/fake-acp-cli.mjs`（DERIVED，见 `tests/fixtures/ACP-PROVENANCE.md`）+ 44 个 ACP 测试。**真实端到端**（`DSH_ACP_E2E=1`，`@tencent-ai/codebuddy-code` 2.151.0）：走完 `initialize` → `session/new`（拿到真实 `backendSessionId` `01a0abca-7768-79fd-bb1e-d44abfb0125d`）→ `session/prompt`，通知流被正确归一化成 `status`（`session info update`、`available commands update: 49 commands`/`60 commands`），终态是**鉴权失败**（退出码 0、stderr 空、`stopReason:"refusal"`、401 只在 `result._meta["codebuddy.ai/errorMessage"]` 里）——与 D23 同款最有价值证据，且证明 `refusal`→failed 的映射真的生效（否则会把死凭据报成「模型拒答」）。五个实测发现：帧格式是无头的 NDJSON；对端会发**没有 `id` 的请求**（`_codebuddy.ai/command`）；`refusal` 不是「模型拒答」而是失败态；**引擎是常驻服务、不主动关 stdin 就永不退出**（见 D27 正文）；客户端能力是 multica 没做过的**有意增量**。安全红线：`fs/*`、`terminal/*` 全部限制在 `opts.cwd` 内（含 realpath 反软链穿越），且默认关闭、需 env 显式开启
-- [x] **client half（监工 UI）落地**（工作流 A）：`src/client/**` + `src/host/api.ts` —— 宿主 HTTP 路由 `kind:"prefix"`、POST-only、复用 better-sidebar 的 `fence` 语义；`webServer` 用 `ctx.get` 惰性取而不进 `inject`（否则没有该服务的宿主会把整个插件判为 INACTIVE，D16），取不到只少 UI、工具面照常注册。client 侧按 slot 注册（`conversation.session.header.utilities` 常驻计数 + `sidebar.right.pane.tab` 完整面板，独立降级），增量读取回传 `nextIndex`，无会话时停轮询，中英双语 + 跟随宿主主题变量。`package.json` 加 `dsh.client` 与 `exports["./client"]`，`exports["."]` 保持字符串（D17）。新增 `lib/client.js` 产物与 `vitest.config.ts`（`tests/**` 锚定，避免 vitest 扫到兄弟 worktree——这个坑在合并期真实发生过）
+- [x] **client half（监工 UI）落地**（工作流 A）：`src/client/**` + `src/host/api.ts` —— 宿主 HTTP 路由 `kind:"prefix"`、POST-only、复用 better-sidebar 的 `fence` 语义；`webServer` 用 `ctx.get` 惰性取而不进 `inject`（否则没有该服务的宿主会把整个插件判为 INACTIVE，D16），取不到只少 UI、工具面照常注册。client 侧按 slot 注册（`conversation.session.header.utilities` 常驻计数 + `sidebar.right.pane.tab` 完整面板，独立降级），增量读取回传 `nextIndex`，无会话时停轮询，中英双语 + 跟随宿主主题变量。`package.json` 加 `dsh.client` 与 `exports["./client"]`，`exports["."]` 保持字符串（D17）。新增 `lib/client.js` 产物与 `vitest.config.ts`（`tests/**` 锚定，避免 vitest 扫到兄弟 worktree——这个坑在合并期真实发生过）。**2026-09-17 更正（工作流 H）**：上面「`webServer` 用 `ctx.get` 惰性取」那一半是错的 —— 宿主的 web server 比本插件晚到 ~800 ms，一次性读永远是 `undefined`，面板在**任何**宿主上都挂不上；已改为 `ctx.inject(['webServer'], …)` 作用域注入，详见「工作流 H」。
 - [x] **P4 并行 fan-out（工作流 E）**：工具面 6 → 9。`agents_wait`（有界等待：全部 / 任一（`until:"any"`）终态或超时即返回；**超时是正常返回**，`timedOut: true`，什么都不取消；`timeoutMs` 缺省 20s、上限硬编码 60s、超了**钳位并在 render 里说明**）+ `agents_run_many`（一次起 ≤16 个；**单项被拒不影响其余**，错误带 `runs[i]` 前缀；超 `maxConcurrent` **不排队**、该项直接报错）+ `agents_usage`（逐会话 + 汇总；`reasoningTokens` 单列、**不计入 `totalTokens`**，因为它已被引擎算在 `output` 之内）。同一次交付还收了：**错误文案人因化**（`describeRunFailure` 就地增强 v3 的类型化拒绝、`unknownSessionMessage` 列出已知会话；`tests/tools/error-copy.test.ts` 11 个用例把「说了下一步」锁住）、**系统提示段重写**（何时委派 / prompt 必须自包含 / 先 `agents_wait` 再 `agents_output` 且回传 `nextIndex` / 并行用 `agents_run_many` / 方向错了 `agents_cancel` / 只看得到归一化事件）。**不变量 1 未被触碰**：`agents_run.execute()` 依旧立即返回（`tests/tools/wait.test.ts` 有用例锁住）。**证据**：`pnpm exec vitest run` → **691 passed / 1 skipped（40 个文件）**；`pnpm exec tsc --noEmit` → 0 错误；`pnpm run build` → `lib/index.js` 309.1 KB + `lib/client.js` 59.1 KB。（P4 的另外两件 —— ACP driver 与监工 UI —— 见上面两行，均已合并。）
 
   - [x] **工作流 F · openclaw/autoclaw argv 重复子命令修复（2026-09-17）**：两个身份都跑不起来 —— `buildOpenclawArgs()`（`src/drivers/openclaw.ts:187`）**无条件**把 `agent` 放在 argv 最前，而 `spawn.ts:81` 的 `buildArgv()` 只是把 `argsPrefix` 拼在它前面，于是两个描述符里的 `argsPrefix: ['agent']` 把子命令变成了 `… agent agent …`，CLI 回 `Too many arguments for this command.`（审查者实测 `exit=1 durationMs=1171`）。
@@ -421,19 +518,22 @@ $ python3 /Users/king/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py 
 
   - [x] **工作流 G · client half 补上 ModuleLoader 包装（2026-09-17）**：`lib/client.js` 是裸 esbuild CJS 产物，全文 0 次 `ModuleLoader` → 宿主不注册 → **UI 静默不出现**（Node half 与 9 个工具照常）。修复 = 构建脚本包一层 `window.__ModuleLoader__.load({ id: 包名, factory })`（id 从 `package.json#name` 派生）+ `src/client/identity.ts` 把 slot 的 `id`/`registrant` 也从包名派生（构建期 `define`）+ client external 列表上移为 `scripts/build.mjs` 的唯一声明。**护栏**：`tests/integration/client-bundle.test.ts`（8 个用例）自己扮演宿主，在 `node:vm` 里求值**构建产物**（不 import），断言 `load` 恰好一次 / `id === package.json#name` / factory 形状 / `apply` 后 slot 的 `registrant`·`id` 与包名一致。**两次负向对照都真红**：产物移走 → 8/8 失败；临时改回裸产物 → 8/8 失败。**新门禁**：`pnpm run verify`（`scripts/verify.mjs` 运行时解析校验器路径，找不到就非零退出并给出提示）。**证据**：`verify_plugin.py` **11/11 PASS**；`pnpm exec vitest run` → **704 passed / 1 skipped（42 个文件）**；`tsc --noEmit` → 0 错误；`pnpm run build` → `lib/index.js` 310.1 KB + `lib/client.js` 59.5 KB（含包装）。详见「工作流 G」一节。
 
+  - [x] **工作流 H · 宿主 API 取不到 `webServer`，监工面板永远不挂载（2026-09-17）**：真机 web 宿主上插件打印 `host has no webServer` —— 9 个工具全在，**宿主 API 一个都没接上**（client half 即使已带上 ModuleLoader 包装也拿不到数据）。根因**不是**「未声明就不能取」（cordis `reflect.get` 文档明确写着不需要 inject），而是**时序**：宿主的 web server 是 loader 树的另一行，真机比本插件晚 **~800 ms** 才 provide（临时打点实测 `785`），一次性 `ctx.get('webServer')` 于是在**有** web server 的宿主上读到 `undefined`。修复 = **作用域注入** `ctx.inject(['webServer'], scoped => …)`：只在服务可用时挂路由、服务出现自动重跑、服务消失自动卸载，**父 fiber 从不失活**（D16 的 9 个工具一个不少）；`webRuntime` 保持可选（缺席降级为只信 loopback）；路由 disposer 发布给父 effect，在 `manager.dispose()` 之前同步摘掉（cordis 卸载 effects 是并发的）；日志改为陈述状态而非替宿主下结论。**护栏**：`tests/host/wiring.test.ts` 假 ctx 实现 `ctx.inject` 双半契约 + `provide()`，新增 5 个用例（晚到挂载 / 无 webRuntime 照挂 / 晚挂路由可摘 / 服务永不到场工具照常 / 负向日志不得谎报）。同一类 bug 在信任围栏里也有一处：`createApiRouteHandler` 建路由时快照 `trustedHosts`，而 `webRuntime` 在那一刻**仍不存在**（实测 `present:false`），配了 `trustedHosts` 的 LAN 部署会被自己的围栏 403；改为每请求读一次。**证据**：真机前后对比、`POST /agents-bridge/api/status` 真实响应、跨站 403；`pnpm exec vitest run` → **710 passed / 1 skipped（42 个文件）**；`tsc --noEmit` → 0 错误；`pnpm run build` → `lib/index.js` 310.4 KB + `lib/client.js` 59.2 KB；`verify_plugin.py` **11/11 PASS**。详见「工作流 H」一节。
+
 ## 交付指标（当前）
 
-> 下表所有数字来自工作流 G 落地后**本机真跑**：`pnpm exec vitest run` / `pnpm exec tsc --noEmit` / `pnpm run build` / `verify_plugin.py`。
+> 下表所有数字来自**合并工作流 H 与 D31 之后的树**（主干）**本机真跑**：`pnpm exec vitest run` / `pnpm exec tsc --noEmit` / `pnpm run build` / `verify_plugin.py`。
 
 | 指标 | 值 |
 |---|---|
-| TS 文件 | 93 个（src 43 / tests 46 / scripts 4） |
-| 测试 | **704 个通过 + 1 skipped（42 个文件）** —— 基线 696/1（41 文件）；G 新增 8 个（`tests/integration/client-bundle.test.ts`），零删除、零跳过 |
+| TS 文件 | **91** 个 `.ts`（src 43 / tests 47 / scripts 1；另有 `scripts/*.mjs` 3 个）—— `find src tests scripts -name '*.ts' \| wc -l` |
+| 测试 | **713 个通过 + 1 skipped（42 passed \| 1 skipped 文件）** —— 基线 704/1；工作流 H 新增 6 个（`tests/host/wiring.test.ts` 作用域注入 5 个 + `tests/host/api.test.ts` 后到 webRuntime 1 个）、D31 新增 3 个（`tests/tools/probe-schema.test.ts`），零删除、零跳过 |
 | `tsc --noEmit` | 0 错误 |
-| 构建产物 · `lib/index.js` | 310.1 KB（esbuild，`@deepseek-ai/*` 全部 external） |
+| 构建产物 · `lib/index.js` | 311.4 KB（esbuild，`@deepseek-ai/*` 全部 external） |
 | 构建产物 · `lib/client.js` | 59.5 KB（web platform，`react` 系列 external；带 `window.__ModuleLoader__.load({ id: <包名>, factory })` 包装） |
 | 工具面 | **9 个**（`agents_probe` / `run` / `run_many` / `status` / `wait` / `output` / `usage` / `cancel` / `send`） |
 | 合同校验 | **`verify_plugin.py` 11/11 PASS**（`pnpm run verify`；等价命令 `python3 /Users/king/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py .`，原始输出见「工作流 G」）。另有监理自检 `.wb-harness/check-contract.mjs` **19/19**（工具，不入交付物） |
 | 端到端集成 | `tests/integration/pipeline.test.ts`（真子进程 + 真 stream-json 解析 + 取消 + usage + resume 指针）全绿；`tests/integration/argv-shape.test.ts`（每个内置身份的最终 argv 形状，5 个用例）全绿 |
+| 真机验收 · web 宿主 API | `dsh --profile web`（standalone harness，127.0.0.1:43121）实测：`host api route mounted {"path":"/agents-bridge/api"}`，`loaded` 仍报 `"tools":9`；`POST /agents-bridge/api/status` 与 `/probe` 返回真实数据，跨站请求 403。命令与原始输出见「工作流 H」一节 |
 | 真机验收 · AutoClaw | `status=completed`、`text: AUTOCLAW_OK`、8404 ms（**合并后的树上复跑**，`scripts/acceptance.ts autoclaw`） |
 | 真机验收 · WorkBuddy | 国际版 `workbuddy-ai`：`status=completed`、`text: FINAL_OK`、6273 ms（**合并后的树上复跑**）。国内版 `workbuddy` 上游 ETIMEDOUT，见 `docs/handoff-blockers.md` 记录 1 |
