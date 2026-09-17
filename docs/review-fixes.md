@@ -591,3 +591,47 @@ B5a 按约定只追加 §L、未改旧行（它明确注明"请监理复核后�
 `tests/meta/docs-metrics.test.ts`（新增）。
 
 至此 §A / §E-2 列出的 **41 条主张全部固定**；§M 的「唯一未修（6 条）」已清零。
+
+## O. 修复复核（repair review）的发现与处置
+
+来源：对 `c6666dd..HEAD` 修复变更集的对抗复核（5 透镜 + 10 复核 agent，只读；未改代码）。
+编号前缀 **RR-** 以便与 §A 的原始发现区分。
+
+### O-1 accepted · Important（6 条，分 3 批）
+
+| ID | 位置 | 修复动作 | 验收 |
+|---|---|---|---|
+| RR-IM-1 | `session.ts:141-152,212-215` + `manager.ts:725-733` | 让游标**绝对化**：`SessionOutput` 带 `dropped`/`firstIndex`，`messages` 不再内嵌合成 marker（或映射时扣除），`output()` 把绝对 `sinceIndex` 映射进保留窗口并返回绝对 `nextIndex` | 背板发 700 事件、循环按 `nextIndex` 轮询：每个保留事件恰好读一次，不漏不重；游标 ≥500 不再卡死 |
+| RR-IM-2 | `manager.ts:289-304` + `store.ts` 的 running 行 | 持久化**所有者证据**（写行宿主的 pid + 该进程启动时间，或 boot-unique id）；只在所有者确证已死时回收进程组 | 管理器 A 跑真进程（行含活 pid）→ 于同目录起管理器 B → 断言 A 的子进程仍活、行仍 `running` |
+| RR-IM-3 | `manager.ts:378-379` | 区分「从未见过」与「被驱动清掉」：驱动侧置 cleared 标志并在终态传播，管理器**不得**回退到 pin | 假 handle 运行中给 `live-A`、终态省略该字段 → 断言 store 无指针 |
+| RR-IM-4 | `spawn.ts:434-454,494-501` | drain 路径上「管道仍被持有」应视为「组可能仍活」：结算前 SIGKILL 进程组；或不要因 `exit!==undefined` 短路 `cancel()` | `sh -c 'sleep 30 & exit 0'` 记录后代 pid → `done` 后 `processGone(pid)` 为真 |
+| RR-IM-5 | `scan.ts:886/768/730` → probe `path=` | executable 保留原值，在**输出端**做 `oneLine` + 截断 + `redactSecrets` | 目录名含 `\n` 的假 bundle → 渲染行数不增加 |
+| RR-IM-6 | `acp.ts:2075-2088` | `failBeforePrompt` 也 `await client.dispose()`（幂等），或收敛为单一 `settleAndDispose()` | fixture 先 `terminal/create` 再让 `session/new` 报错 → `done` 后 `process.kill(pid,0)` 抛 ESRCH |
+
+批次：**A = RR-IM-1..4（kernel，一个模块）** · **B = RR-IM-5（tracks+tools）** · **C = RR-IM-6（drivers/acp）**。
+
+### O-2 accepted · Minor（8 条）
+
+RR-MI-1（`registry.ts:450-454,686-689`：`invalidate()` 清 scan memo，恢复唯一重扫触发器）·
+RR-MI-2（`scan.ts:433-441`：先 sort readdir 名再取前 64，使身份集合稳定）·
+RR-MI-5（六个驱动的自有计时器补 2^31-1 钳位）·
+RR-MI-6（`codex.ts:777`：`cancelled` 不走 parser 状态结算，避免取消被改判 completed）·
+RR-MI-7（`acp.ts:1043-1046`：溢出时走真实终态路径，而不是 resolve 一个无人读的 promise）·
+RR-MI-9（`definitions.ts:551-558,600,776-779`：`idleTimeoutMs` 加 `minimum: 1` 并在内核侧归一非正值）·
+RR-MI-10（`client/store.ts:443,287,371`：补粘性标志两处重置点的测试）·
+RR-MI-12（`spawn.ts:266-282`：孤儿回收不要依赖本地化的 `ps` 输出解析）。
+
+### O-3 deferred（4 条，记录不修）
+
+RR-MI-3 / RR-MI-8 / RR-MI-11（`docs/plan.md:790` 指标行陈旧 · 新 meta 门禁钉散文不钉数字 · 门禁无 CI 入口）
+—— 属**文档与门禁装配**，与代码缺陷不同类；由监理在文档侧统一处理（或明确标注为历史基线）。
+RR-MI-4（`registry.ts:460-467`：scanNote 无人可见）—— 与 RR-MI-1 同一区域，若 RR-MI-1 落地后仍需要，再并入。
+
+### O-4 rejected（1 条，不动）
+
+`client/store.ts:287,437-450`「MI-10 的停止是单向的」—— 复核已驳回：`agents_send` 从不把会话变回
+`running`（新 id、旧行保持终态），该路径不存在。
+
+### O-5 needs-confirmation：无
+
+RR-IM-2 的所有者令牌是**附加字段**、不改既有语义；RR-MI-9 的 schema `minimum` 亦是附加约束。均无需业务裁决。
