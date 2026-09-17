@@ -99,7 +99,15 @@ export interface Dict {
   readonly settingsEffectReload: string
   readonly settingsReadOnly: string
   readonly settingsLoadFailed: string
+  /** Shown inside the expanded card before the first read lands. */
+  readonly settingsLoading: string
   readonly settingsListsHint: string
+  /** Accessible name of the card header while the body is closed/open. */
+  readonly settingsExpand: string
+  readonly settingsCollapse: string
+  /** Marker on the header while the draft differs from what is stored. */
+  readonly settingsUnsaved: string
+  readonly settingsDiscard: string
   readonly settingsFieldDefaultCwd: string
   readonly settingsFieldMaxConcurrent: string
   readonly settingsFieldAllowedCwd: string
@@ -184,7 +192,12 @@ const zh: Dict = {
   settingsEffectReload: '下次加载生效',
   settingsReadOnly: '本部署未挂载设置服务，无法保存',
   settingsLoadFailed: '读取设置失败',
+  settingsLoading: '读取中…',
   settingsListsHint: '多个值用换行或逗号分隔',
+  settingsExpand: '展开',
+  settingsCollapse: '收起',
+  settingsUnsaved: '未保存',
+  settingsDiscard: '放弃修改',
   settingsFieldDefaultCwd: '默认工作目录',
   settingsFieldMaxConcurrent: '最大并发会话数',
   settingsFieldAllowedCwd: '允许的工作目录白名单',
@@ -269,7 +282,12 @@ const en: Dict = {
   settingsEffectReload: 'takes effect on next load',
   settingsReadOnly: 'this deployment mounted no settings service, so nothing can be saved',
   settingsLoadFailed: 'could not read settings',
+  settingsLoading: 'Loading…',
   settingsListsHint: 'separate values with newlines or commas',
+  settingsExpand: 'Expand',
+  settingsCollapse: 'Collapse',
+  settingsUnsaved: 'Unsaved',
+  settingsDiscard: 'Discard',
   settingsFieldDefaultCwd: 'Default working directory',
   settingsFieldMaxConcurrent: 'Max concurrent sessions',
   settingsFieldAllowedCwd: 'Allowed working directories',

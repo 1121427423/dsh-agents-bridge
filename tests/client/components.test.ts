@@ -15,9 +15,9 @@
 
 import { describe, expect, it } from 'vitest'
 
-import type { BridgeApi } from '../../src/client/api.ts'
+import type { BridgeApi, ClientSettingsView } from '../../src/client/api.ts'
 import { ApiError } from '../../src/client/api.ts'
-import { SettingsCard } from '../../src/client/settings.ts'
+import { SettingsCard, SettingsFields } from '../../src/client/settings.ts'
 import { SETTINGS_NAMESPACE } from '../../src/namespace.ts'
 import { createTranslator, DICTS } from '../../src/client/i18n.ts'
 import { Indicator } from '../../src/client/indicator.ts'
@@ -444,5 +444,96 @@ describe('SettingsCard — the card says which plugin it belongs to', () => {
     expect(text).toContain('Plugin id')
     // The identifier is data, not copy: it must not be localized.
     expect(text).toContain(SETTINGS_NAMESPACE)
+  })
+
+  /**
+   * The section renders a `<ul>`, and every other card in it is one `<li>` with a
+   * header button that expands the body. The operator asked for exactly that
+   * after finding this card laid out as a permanently-open form.
+   */
+  it('is one <li> card that starts COLLAPSED — no inputs until it is expanded', () => {
+    const rendered = SettingsCard({ api: cardApi, translator: createTranslator('zh') })
+    expect(rendered.type).toBe('li')
+    expect(JSON.stringify(rendered)).toContain('"aria-expanded":false')
+    // The header carries the title and the identity…
+    const text = textOf(rendered)
+    expect(text).toContain('监督桥设置')
+    expect(text).toContain(SETTINGS_NAMESPACE)
+    // …and the BODY is absent: not one field label is rendered while collapsed.
+    expect(text).not.toContain('默认工作目录')
+    expect(text).not.toContain('最大并发会话数')
+  })
+})
+
+describe('SettingsFields — the expanded body keeps every field', () => {
+  /** Two rows is enough: one scalar (live) and one list (reload + overridden). */
+  const view: ClientSettingsView = {
+    namespace: SETTINGS_NAMESPACE,
+    writable: true,
+    fields: [
+      {
+        key: 'defaultCwd',
+        kind: 'string',
+        effect: 'live',
+        reason: 'read on every run',
+        value: undefined,
+        overridden: false,
+      },
+      {
+        key: 'allowedCwd',
+        kind: 'strings',
+        effect: 'reload',
+        reason: 'snapshotted when the manager is built',
+        value: [],
+        overridden: true,
+      },
+    ],
+  }
+
+  const fields = (overrides: Partial<Parameters<typeof SettingsFields>[0]> = {}) =>
+    SettingsFields({
+      view,
+      drafts: {},
+      busy: false,
+      translator: createTranslator('zh'),
+      onEdit: () => {},
+      onReset: () => {},
+      ...overrides,
+    })
+
+  it('labels each control and states when the change takes effect', () => {
+    const text = textOf(fields())
+    expect(text).toContain('默认工作目录')
+    expect(text).toContain('立即生效')
+    expect(text).toContain('跟随部署配置')
+    expect(text).toContain('允许的工作目录白名单')
+    expect(text).toContain('下次加载生效')
+    // Only the overridden row offers a way back.
+    expect(text).toContain('已被用户覆盖')
+    expect(text).toContain('恢复默认')
+  })
+
+  it('renders an unknown field by its raw key rather than dropping it', () => {
+    // The Node half can add a field before this half ships copy for it; losing
+    // the row entirely would be the silent failure.
+    const text = textOf(
+      fields({
+        view: {
+          ...view,
+          fields: [
+            {
+              key: 'brandNewKnob',
+              kind: 'natural',
+              effect: 'reload',
+              reason: 'added by the Node half',
+              value: undefined,
+              overridden: false,
+            },
+          ],
+        },
+      }),
+    )
+    expect(text).toContain('brandNewKnob')
+    expect(text).toContain('added by the Node half')
   })
 })
