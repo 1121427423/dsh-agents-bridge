@@ -90,6 +90,22 @@ IM-3 overflow (timeoutMs=1e12)      : fired after 1ms
 合计**新增 10 条成立项**（IM-10…IM-19）与 14 条降级项（MI-9…MI-22）。
 即：原始报告的 33 条 CR/IM 主张中，**最终只有 15 条以 IM 级成立**，其余降级或驳回。
 
+## H. 监理亲手复现清单（= 修复验收 oracle）
+
+脚本都在 `/tmp`（`repro-review.ts`、`repro-store3.ts`、`repro-readlines.ts`、`repro-origin.ts`、`repro-wd2.ts`），
+**只读仓库、只写 /tmp**。这些不是"复核者说"，是我自己跑出来的判据。
+
+| 项 | 复现要点 | 修复后判据 |
+|---|---|---|
+| IM-6 | 真实 `createSessionStore` 含 `reload()` 流程：`A` → `A,B` → 写 C 后磁盘变 `A,C`，**B 永久消失** | 三次写后磁盘含 A、B、C |
+| IM-9 | 真实 `readLines` + generic 的重组方式：`line1\n\nline2\n\n\nline3\n` → `line1\nline2\nline3`（**删掉 3 个空行**） | 驱动 text 与原始 stdout 一致（仅首尾 trim） |
+| IM-3 | 真实 `createWatchdog`：修前 `2147483648` → **2ms 触发**（附 Node 告警 `Timeout duration was set to 1`）、`1e12` → 1ms；**已修**后两者均不触发，正向对照 `50ms` 仍在 51ms 触发 | 保持已修状态 |
+| IM-18 | 真实 `isTrustedApiRequest`：`Origin http://localhost:9999` / `Host localhost:43120` → **true**（应当 false），`127.0.0.1:9999` 同 | 两条翻 `false`；四条对照（同 authority / 无 Origin / cross-site / 外部 Host）保持原值 |
+
+**复现过程中的自纠（两次）同样记在这里**：IM-6 第一版脚本没建目录 → 磁盘根本没写，却输出
+"DEFECT REPRODUCED"；第二版漏了 `reload()`（store 构造时不读盘）→ 又得出错误中间态。
+**空跑结论比没有结论更危险** —— 与"没跑到的门禁不是通过的门禁"是同一条纪律。
+
 **串行纪律**：批次不并行 —— 两个 workbuddy 同时跑 `scripts/build.mjs` 会互相覆写
 `lib/index.js`，并发 vitest 会让门禁数字失去意义。
 
@@ -154,6 +170,48 @@ client 4 条）待 §D-2 的复核结论并入后派工。
 把「输出 schema 物化」护栏从只有 `agents_probe` 推广到全部 9 个工具；给 `scripts/verify.mjs`
 一个 CI 入口（缺本地 skill 路径时应 fail 而不是 exit 2 静默溜过）；修掉
 `manager-resume.test.ts:76-87` 的条件断言真空通过。
+
+**F-补遗 · 裁定新增项的修复方向**（并入 B3/B4/B5）
+
+- **IM-15（B3）ACP 终端孤儿**：在 `runAcp` 的两条退出路径（cancel 早返回 ~`acp.ts:1957`、正常 settle ~`:2005`）
+  上都 `await client.dispose()`。测试：给 `tests/fixtures/fake-acp-cli.mjs` 加一个「建长驻终端且从不释放、
+  并回报其 pid」的模式 → 断言 `handle.done` 后 `process.kill(pid,0)` 抛 ESRCH。负控：现有释放路径仍绿。
+- **MI-16（B3）`--strict-mcp-config`**：把 `'--strict-mcp-config': 'standalone'` 加进 `CLAUDE_BLOCKED_ARGS`
+  （`codebuddy` 自动继承该表）。测试：`buildCodebuddyArgs({mcpConfigPath, extraArgs:['--strict-mcp-config']})`
+  → 断言 args 不含它。负控：删掉该表项 → 红。
+- **MI-17（B3）`-p` 吞值**：`CLAUDE_BLOCKED_ARGS['-p']` 由 `standalone` 改 `optionalValue`
+  （`argv.ts:268-271` 已支持吃掉后随非旗标 token）。**这是对 multica 规格的有意偏离**，必须写进
+  `docs/driver-pitfalls.md`。测试：`buildClaudeArgs({extraArgs:['-p','/tmp/x']})` 不含 `/tmp/x`；
+  负控：`-p=/tmp/x` 仍被拦。
+- **MI-18（B3）abort 监听器**：把 `removeEventListener` 移进 `finishOnce`（`generic-argv.ts:209`，
+  同理 `openclaw.ts:766`、`zcode.ts:386`）。测试：记录 add/remove 的假 signal，取消后断言已移除。
+  注意它的另一半就是 IM-7（`live` 不修剪），别重复实现。
+- **MI-19（B3）ACP 输出上限**：`#createTerminal` 里 `Math.min(engineLimit, ACP_MAX_OUTPUT_BYTE_LIMIT)`
+  （新常量放 `acp.ts:167` 附近的默认值旁）。测试：`outputByteLimit:1e12` + fixture 打印超限 → 断言保留长度 ≤ 上限。
+- **MI-20（B3）codex resume id**：`codex.ts:194` 处拒绝空值或以 `-` 开头的 resume id（报命名错误），
+  不要把它当位置参数塞进去。测试：`buildCodexArgs({resumeSessionId:'--sandbox'})` 不得出现在位置槽。
+- **MI-21（B3）codex 超时丢弃已完成回合**：`requestTerminal`（`codex.ts:706`）在
+  `sawTurnCompleted/sawTurnFailed` 已为真时**从 parser 状态结算**再终止 —— 照抄 zcode 的边界结算。
+  测试：发 `turn.completed` 后让假子进程活过 `timeoutMs` → 断言 `completed` 且带正文；负控：不发终态帧仍是 `timeout`。
+
+- **IM-16（B5）settings 清空假保存**：`write()`（`settings.ts:459-482`）按 `coerceField === undefined`
+  分区：有值的走 `scope.update`，无值的走 `scope.replace({...userLayer 去掉这些键})`（与 `reset` 同一惯用法），
+  **绝不再发 `update({k: undefined})`**；也可直接 `ok:false` 点名该字段。测试：镜像真 provider 语义的 scope 假件
+  （`update` 丢 undefined、`replace` 换 section）→ `write({defaultCwd:''})` 后断言该键 `overridden === false`。
+  负控：`write({maxConcurrent:4})` 仍能持久化并置 `overridden === true`。
+- **IM-17（B5）`agents_output` nextIndex 越界**：`execute` 里**总是**传
+  `limit: Math.min(args.limit ?? MAX_RENDERED_MESSAGES, MAX_RENDERED_MESSAGES)`，使 `nextIndex ≡ sinceIndex + rendered`。
+  测试：200 条消息的假 manager → 断言首读 `nextIndex === 80`，且以 80 续读能拿到第 80 条（无空洞）。
+  负控：显式 `limit:5` 时 `nextIndex = sinceIndex+5`。
+- **IM-18（B5）Origin 丢端口**：`isTrustedApiRequest`（`api.ts:194`）改为比 **authority**：
+  `new URL(origin).host === hostUrl.host`（两侧都会把缺省/缺失端口归一为 `''`，故裸 `Host: localhost` 仍匹配）。
+  **验收判据（监理已亲手复现，见 §H）**：`Origin http://localhost:9999` 与 `127.0.0.1:9999` 必须翻成 `false`；
+  同 authority、无 Origin、`sec-fetch-site: cross-site`、外部 Host 四条对照必须保持原值。
+- **IM-19（B5）渲染粘连**：`renderEventBlocks`（`definitions.ts:375-400`）把粘性 `textSeen` 换成
+  `previousWasText`（每轮非 join 分支末尾按 `isText` 赋值），并把它放进 join 条件。
+  测试：`[text a, tool_use Bash, text b]` → 3 个 block，第三个以 `#2 [text]` 开头；负控：`[text a, text b]` 仍合并为 1 块。
+- **MI-22（B5）probe 无单飞**：`registry.probe`（`registry.ts:617`）保住 in-flight promise，
+  并发调用者拿到同一个；测试：计数的 `probeVersion` 假件 + 两次并发 `refresh:true` → 总调用数等于身份数而非 2×。
 
 ## G. 待复核主张的裁定（滚动更新）
 
