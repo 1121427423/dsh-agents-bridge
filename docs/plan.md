@@ -30,6 +30,7 @@
 | D25 | P3 端口指纹**默认期望表为空**，且**永不影响 `available`** | 本机没有已验证的 gateway 端口，猜一个就是往探测输出塞假事实；且"没在监听"是桌面应用的常态（应用没开），不能因此把可启动的身份判为不可用——`available` 只回答"能不能真启动" | ✅ 已定 |
 | D28 | **argv 所有权切分**：driver 独占「子命令」token（openclaw 的 `agent`、codex 的 `exec`），描述符的 `argsPrefix` 只放 driver 无法知道的全局 token（`--profile autoclaw`、wrappers） | 两个 openclaw 身份都曾在 `argsPrefix` 里重复 driver 的子命令，`spawn.ts` 直接拼接后得到 `… agent agent …`，被 CLI 拒为 "Too many arguments for this command."。既有测试全部只断言**单个字段**（`argsPrefix === ['agent']`），于是每个测试都通过、唯独真正交给操作系统的 argv 是错的。护栏：`tests/integration/argv-shape.test.ts` 对**每一个内置身份**断言最终 argv（通用不变量：无相邻重复 token；openclaw 引擎的 `agent` 恰好出现一次；`--profile` 必须早于 `agent`） | ✅ 已实现 |
 | D29 | **`src/kernel/types.ts` 仅改注释**（冻结 ABI 的例外，纯文档） | `CommandSpec.argsPrefix` 的示例仍写作 `['agent']` —— 正是 D28 那个 bug 的示范值，留着会继续误导下一个读者。**只改注释，不改任何字段、类型或可选性**，故 ABI 不变、无需版本号变更 | ✅ 已改（本工作流唯一触碰 types.ts 之处） |
+| D30 | **client bundle 必须包装成 `window.__ModuleLoader__.load({ id, factory })`**；`id`、slot 注册 `id`、`registrant` 一律从 `package.json#name` 派生（构建期 `define`，源码里不出现字面量） | 宿主**不是** import 产物再读 exports，而是启动时注册 factory；裸 esbuild CJS 产物全文 0 次 `ModuleLoader`，于是**装不上且静默无 UI**（不报错，因为没人去找它）。字面量则会在改包名时静默失配 | ✅ 已实现（`verify_plugin.py` 11/11 PASS） |
 
 ## 任务拆分（3 个并行工作流）
 
@@ -235,6 +236,109 @@ v3 那一批）。配套新增 `RunRejectionCode` 联合与 `AgentRunRejectedErr
 不同文案」（调用方没有稳定契约，测试只能锁散文）；③ 超并发时**排队**等一个槽位
 （会先耗尽工具调用自己的超时预算，最后失败得更难解释）。
 
+## 工作流 G — client half 补上 ModuleLoader 包装（D30，2026-09-17）
+
+**症状。** `dsh-plugin-studio` 技能自带的合同校验器
+（`/Users/king/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py`，stdlib-only，
+本机就有）对合并后的树给出 `[FAIL] client 合同（dsh.client + exports + ModuleLoader id）
+— lib/client.js 未以正确的 ModuleLoader id 注册（id 必须等于包名）`，**1/11 未通过**。
+
+**这不是校验器的洁癖，是真的装不上。** 宿主侧的客户端加载契约（DSH 自带文档原文）：
+
+> 浏览器插件包在其 `package.json` 中以 `platform: 'web'` 声明 `dsh.client`，导出
+> `./client` bundle……**application combo 脚本在启动时注册插件 factory**；模块主体仍保持
+> 惰性，只在首次 import 或物化时运行。
+
+即宿主不会 `import('./client.js')` 然后读 exports —— 它靠
+`window.__ModuleLoader__.load({ id, factory })` 在启动时注册。而我们的 `lib/client.js`
+是**裸 esbuild CJS 产物**（`"use strict"; var __defProp = …`），**全文 `ModuleLoader`
+出现 0 次**：宿主永远不注册它。Node half 与 9 个工具照常工作，**UI 静默消失**——连错误
+都没有，因为没有任何一方在找这个 bundle。本机参照物是
+`~/.dsh/profiles/desktop/node_modules/dsh-history/lib/client.js`（bundle 形态，`id` 等于
+包名）与同目录的 `lib/client-registry.js`（同 bundle，`id` 为 `dsh-external/<name>`）：
+**我们是 `dsh.bundle.patch` 的 bundle 形态，所以 `id` 必须等于包名。**
+
+**修复（三处，缺一不可）。**
+
+1. `scripts/build-client.mjs` 改为两段式：esbuild 以 `write: false` 出内存 CJS，再由脚本
+   把 `window.__ModuleLoader__.load({ id, factory: (require) => { … }});` 的头尾拼上去。
+   `id` 来自 `package.json#name`（**不是字面量**）。CJS 主体**原样插入、不重新缩进**——
+   重新缩进会把 `styles.ts` 里模板字符串的内嵌换行改成带 tab 的 CSS，那是改运行时行为。
+   `factory` 的参数 `module`/`exports`/`require` 正是 CJS 主体需要的三个名字，所以主体的
+   `require("react")` 落到**宿主的** `require` 上（react 仍 external，见不变量 6）。
+2. `src/client/identity.ts`：包名经构建期 `define`（`__PACKAGE_NAME__`）注入，
+   `PANEL_ID` / `INDICATOR_ID` / `registrant` 全部由它派生。三个名字都是宿主侧契约
+   （模块表 key、slot 去重 key、归属插件名），写死任何一个都会在改包名后**静默**失配。
+   **故意不留运行时 fallback**：define 缺失就该在 import 时抛 `ReferenceError`，那是最响的
+   失败方式。`vitest.config.ts` 用**同一个** `package.json#name` 设同一个 define，所以单测
+   里的值永远等于出厂的値。
+3. `scripts/build.mjs` 成为「宿主提供哪些模块」的**唯一**声明处（`CLIENT_EXTERNALS`），
+   `build-client.mjs` import 它而不是各写一份——第二个 React 不是体积问题，是**正确性**
+   问题（自带 hooks dispatcher：轻则 invalid hook call，重则静默状态错乱）。
+
+**护栏（本工作流最重要的产出）。** 既有 client 测试都把 `src/client/**` 当模块 import
+进来测纯函数，**永远测不到「宿主能不能装上」**。新增
+`tests/integration/client-bundle.test.ts`（8 个用例）自己扮演宿主：造假的
+`window.__ModuleLoader__` → 在 `node:vm` 的隔离 realm 里**求值构建产物**
+（**不 import**，import 会绕过包装，正是被测对象）→ 断言 `load` 恰好一次、
+`entry.id === require('package.json').name`（**不写死字符串**）、`factory` 是函数、
+用假 `require` 调 `factory` 后 `apply`/`inject` 就位、`apply(fakeCtx)` 的
+`registrant`/`id` 与包名一致。
+
+- **它必须依赖产物**：产物缺失时 `clientBundleSource()` 直接抛错并打印该跑哪条命令，
+  **绝不静默跳过**（跳过 = 又变回测不到）。`package.json` 的 `pretest` 保证 `pnpm test`
+  先 build。
+- **已证明它真的会红**（两次负向对照）：① 把 `lib/client.js` 移走 → **8/8 失败**，
+  失败信息是「lib/client.js is missing — … Run `pnpm run build` first」；
+  ② 临时把构建脚本改回裸产物（`writeFileSync(outfile, output.text)`）→ **8/8 失败**
+  （这正是本工作流要消灭的那个回归）。两次都恢复并复跑 8/8 通过。
+
+**新门禁。** `package.json` 加 `"verify": "node scripts/verify.mjs"`。`scripts/verify.mjs`
+在运行时**解析**校验器位置（`$DSH_PLUGIN_STUDIO_VERIFIER` → `$DSH_PLUGIN_STUDIO` →
+`~/.agents/skills/…` → `~/.codebuddy/skills/…`），**不把绝对路径写进 package.json**
+（那是把某台机器的 home 目录焊进构建配置）；找不到时列出所有尝试过的路径并给出设置
+环境变量的方法、退出码非零 —— **校验器缺席是「门禁没跑」，不是「门禁通过」**。
+
+**证据（本机真跑）。**
+
+```
+$ python3 /Users/king/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py .
+  [PASS] package.json 存在且为合法 JSON
+  [PASS] package.json 名称合法（小写连字符）
+  [PASS] package.json 基础字段（type/main/exports）
+  [PASS] 禁止声明 @deepseek-ai/* 依赖
+  [PASS] bundle 合同（dsh.bundle.patch + exports + patch 文件）
+  [PASS] client 合同（dsh.client + exports + ModuleLoader id）
+  [PASS] 构建产物存在（lib/index.js / lib/client.js）
+  [PASS] React 保持 external（client 形态）
+  [PASS] 必需文件齐备（README/LICENSE/tsconfig/src）
+  [PASS] inject 覆盖 ctx.* 服务调用（启发式）
+  [PASS] 名称一致性：package name / patch id / client id 一致
+
+[verify] PASS: 全部 11 项通过
+```
+
+`pnpm exec vitest run` → **704 passed / 1 skipped（42 个文件）**（基线 696/1、41 文件；
+新增 8 个用例，零删除、零跳过）；`pnpm exec tsc --noEmit` → 0 错误；
+`pnpm run build` → `lib/index.js` 310.1 KB + `lib/client.js` 59.5 KB（含包装）。
+
+**关于校验器的第 9 项（React 保持 external）**：它 grep 的是 `scripts/build.mjs` 里有没有
+`react` / `react/jsx-runtime` / `react-dom` / `react-dom/client` 四个串，而本仓库的 client
+构建在 `scripts/build-client.mjs` —— 这一项**只有**在 client 合同先通过（`has_client`
+置位）之后才会执行，所以修好第 6 项之前它一直是**空过**。修好第 6 项后它立刻变成真实
+断言。为避免「为过校验而摆一串注释」，client 的 external 列表被上移到 `scripts/build.mjs`
+并成为 `build-client.mjs` 真正 import 的唯一来源（见上面修复第 3 条）：第 9 项现在是**事实
+断言**，不是字符串摆设。产物侧的证据同在工作流 G 的测试里
+（`keeps react external — the factory asks the host for it`：factory 确实向宿主
+`require('react')`，且产物不含 `__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED`）。
+
+**被否决的替代方案**：① 把 `id` 写成字面量（改包名即静默失配，且校验器有专门一条查
+「package name / patch id / client id 一致」）；② 用 `dsh-external/<name>` 那个 id（那是
+`client-registry.js` 的分发形态，我们不是）；③ 把 `react` 打进 client bundle（第二个 React，
+见不变量 6）；④ 测试里「产物不存在就 skip」（等于回到测不到）；⑤ 在测试里跑 build
+（慢，且让「产物缺失会失败」这条证明消失——改用 `pretest` + 硬断言）；⑥ 改
+`verify_plugin.py` 或放宽断言（校验器是外部技能，且第 6 项报的是**事实**）。
+
 ## 阶段状态
 
 - [x] 仓库创建 + git init + 骨架（package.json / tsconfig / cordis.patch.yml / build.mjs / types.ts）
@@ -242,15 +346,19 @@ v3 那一批）。配套新增 `RunRejectionCode` 联合与 `AgentRunRejectedErr
 - [x] **C · 工具面完成**：入口 + 6 个 defineTool（E 之前；现为 9 个）+ 冒烟命令 + README；`tsc` 零错误；`pnpm run build` → `lib/index.js`
 - [x] **B · drivers**：4 个方言 driver + argv 工具 + fixtures；两个遗留断言（`generic-argv` 的 argv、`openclaw` 无输出时的错误文案）已由后续工作流收敛 —— 当前 `vitest run` 全绿（见「交付指标」）
 - [x] 集成：入口已接线 `installDriverRuntime()`；**端到端集成测试 5/5 通过**（真子进程 + 真 stream-json 解析 + 取消 + usage + resume 指针）
-- [~] 合同校验：**旧记的 `verify_plugin.py` 11/11 PASS 无法复现** —— 该脚本不在本仓库也不在本机
-  （`find ~/.dsh ~/BigModel/LLM/tools -name 'verify_plugin*'` 零命中），那一行是上一轮的转述，
-  本轮不再当作证据引用。取而代之，协调者写了**可复现**的合同自检
-  （`.wb-harness/check-contract.mjs`，监理工具、不入交付物），在**合并后的树**上 **18/18 通过**，
-  覆盖且逐条标注所依赖的决策：`exports['.']` 必须是字符串（D17）、`exports['./client']` 存在、
-  `dsh.bundle.patch` 指向真实文件、`dsh.client.{inject,platform}`、两个 build 产物**同时**出现在
-  `files[]` 与磁盘上、`types` 入口、两个 bundle 都保持 `@deepseek-ai/*` external（不变量 4）、
-  注册都在 `ctx.effect()` 内（不变量 3）、`agents_run` 不 await 会话结束（不变量 1）。
-  **仍未核验**（需宿主侧校验器，本机没有）：DSH 版本兼容区间、插件 id 注册表规则、cordis schema 一致性
+- [x] 合同校验：**`verify_plugin.py` 11/11 PASS（2026-09-17，工作流 G）**。更正上一轮的记录：
+  脚本本机就有，只是当时的 `find` 只搜了 `~/.dsh` 与 `~/BigModel/LLM/tools`，**没搜 `~/.agents`**
+  —— 真实位置是 `/Users/king/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py`
+  （`dsh-plugin-studio` 技能自带，stdlib-only）。它对本仓库给出 1/11 FAIL，且**报的是事实**：
+  `lib/client.js` 没有 `window.__ModuleLoader__.load({ id: "<包名>" … })` 包装，宿主根本不会注册
+  这个 client half（详见「工作流 G」）。修复后 **11/11 PASS**，命令与原始输出见该节。
+  仍然保留协调者的可复现自检（`.wb-harness/check-contract.mjs`，监理工具、不入交付物，
+  合并后的树上 18/18），覆盖且逐条标注所依赖的决策：`exports['.']` 必须是字符串（D17）、
+  `exports['./client']` 存在、`dsh.bundle.patch` 指向真实文件、`dsh.client.{inject,platform}`、
+  两个 build 产物**同时**出现在 `files[]` 与磁盘上、`types` 入口、两个 bundle 都保持
+  `@deepseek-ai/*` external（不变量 4）、注册都在 `ctx.effect()` 内（不变量 3）、
+  `agents_run` 不 await 会话结束（不变量 1）。
+  **仍未核验**（需宿主侧实机安装）：DSH 版本兼容区间、插件 id 注册表规则、cordis schema 一致性
   —— 这三项不得当作已通过。
 - [ ] 安装冒烟：装进 `desktop` profile → 重启 DSH → `/agents-bridge-hello` 与 `agents_probe` 可见（**待用户确认，因为需重启正在运行的会话**）
 - [ ] **P1 验收：WorkBuddy 跑通一次真实任务（证据：agents_output 事件流）** — 前置已证：codebuddy headless 实测可跑（findings §5.1）。**注**：国内版 `workbuddy` 的上游当时 ETIMEDOUT（见 `docs/handoff-blockers.md` 记录 1）；国际版 `workbuddy-ai` 已用同一命令栈跑通（`status=completed`，`text: OK1`，11.6s，证据见 handoff-blockers §1.2）。两者是不同身份/不同上游，不能互相顶替，故国内版这一条仍留未勾。
@@ -307,19 +415,21 @@ v3 那一批）。配套新增 `RunRejectionCode` 联合与 `AgentRunRejectedErr
     - **真机验收通过**：`scripts/acceptance.ts autoclaw "Reply with exactly: AUTOCLAW_OK"` → `status=completed exit=0 durationMs=6827`，`text: AUTOCLAW_OK`（原始输出见上方 P1 验收条目）。
     - **证据**：`pnpm exec vitest run` → **696 passed / 1 skipped（41 个文件）**；`tsc --noEmit` → 0 错误；`pnpm run build` → 见交付指标。
 
+  - [x] **工作流 G · client half 补上 ModuleLoader 包装（2026-09-17）**：`lib/client.js` 是裸 esbuild CJS 产物，全文 0 次 `ModuleLoader` → 宿主不注册 → **UI 静默不出现**（Node half 与 9 个工具照常）。修复 = 构建脚本包一层 `window.__ModuleLoader__.load({ id: 包名, factory })`（id 从 `package.json#name` 派生）+ `src/client/identity.ts` 把 slot 的 `id`/`registrant` 也从包名派生（构建期 `define`）+ client external 列表上移为 `scripts/build.mjs` 的唯一声明。**护栏**：`tests/integration/client-bundle.test.ts`（8 个用例）自己扮演宿主，在 `node:vm` 里求值**构建产物**（不 import），断言 `load` 恰好一次 / `id === package.json#name` / factory 形状 / `apply` 后 slot 的 `registrant`·`id` 与包名一致。**两次负向对照都真红**：产物移走 → 8/8 失败；临时改回裸产物 → 8/8 失败。**新门禁**：`pnpm run verify`（`scripts/verify.mjs` 运行时解析校验器路径，找不到就非零退出并给出提示）。**证据**：`verify_plugin.py` **11/11 PASS**；`pnpm exec vitest run` → **704 passed / 1 skipped（42 个文件）**；`tsc --noEmit` → 0 错误；`pnpm run build` → `lib/index.js` 310.1 KB + `lib/client.js` 59.5 KB（含包装）。详见「工作流 G」一节。
+
 ## 交付指标（当前）
 
-> 下表所有数字来自工作流 F 合并后**本机真跑**：`pnpm exec vitest run` / `pnpm exec tsc --noEmit` / `pnpm run build`。
+> 下表所有数字来自工作流 G 落地后**本机真跑**：`pnpm exec vitest run` / `pnpm exec tsc --noEmit` / `pnpm run build` / `verify_plugin.py`。
 
 | 指标 | 值 |
 |---|---|
-| TS 文件 | 90 个（src 42 / tests 45 / scripts 3） |
-| 测试 | **696 个通过 + 1 skipped（41 个文件）** —— 基线 691/1（40 文件）；F 新增 5 个（`tests/integration/argv-shape.test.ts`），零删除、零跳过 |
+| TS 文件 | 92 个（src 43 / tests 46 / scripts 4） |
+| 测试 | **704 个通过 + 1 skipped（42 个文件）** —— 基线 696/1（41 文件）；G 新增 8 个（`tests/integration/client-bundle.test.ts`），零删除、零跳过 |
 | `tsc --noEmit` | 0 错误 |
 | 构建产物 · `lib/index.js` | 310.1 KB（esbuild，`@deepseek-ai/*` 全部 external） |
-| 构建产物 · `lib/client.js` | 59.1 KB（web platform，`react` external） |
+| 构建产物 · `lib/client.js` | 59.5 KB（web platform，`react` 系列 external；带 `window.__ModuleLoader__.load({ id: <包名>, factory })` 包装） |
 | 工具面 | **9 个**（`agents_probe` / `run` / `run_many` / `status` / `wait` / `output` / `usage` / `cancel` / `send`） |
-| 合同校验 | **18/18 PASS**（可复现：`.wb-harness/check-contract.mjs`，覆盖清单见「阶段状态」那一行）。旧记的 `verify_plugin.py` 11/11 已不再引用——脚本不在本机，无法复现 |
+| 合同校验 | **`verify_plugin.py` 11/11 PASS**（`pnpm run verify`；等价命令 `python3 /Users/king/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py .`，原始输出见「工作流 G」）。另有监理自检 `.wb-harness/check-contract.mjs` 18/18（工具，不入交付物） |
 | 端到端集成 | `tests/integration/pipeline.test.ts`（真子进程 + 真 stream-json 解析 + 取消 + usage + resume 指针）全绿；`tests/integration/argv-shape.test.ts`（每个内置身份的最终 argv 形状，5 个用例）全绿 |
 | 真机验收 · AutoClaw | `status=completed`、`text: AUTOCLAW_OK`、8404 ms（**合并后的树上复跑**，`scripts/acceptance.ts autoclaw`） |
 | 真机验收 · WorkBuddy | 国际版 `workbuddy-ai`：`status=completed`、`text: FINAL_OK`、6273 ms（**合并后的树上复跑**）。国内版 `workbuddy` 上游 ETIMEDOUT，见 `docs/handoff-blockers.md` 记录 1 |

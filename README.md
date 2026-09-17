@@ -63,7 +63,7 @@ export PATH=/opt/homebrew/bin:$PATH
 cd /Users/king/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge
 
 pnpm install          # 首次
-pnpm run build        # 产出 lib/index.js（必须成功）
+pnpm run build        # 产出 lib/index.js + lib/client.js（必须成功；client 产物带 ModuleLoader 包装）
 
 # 装进 web profile（本机 DSH 是 web profile）
 dsh plugin --profile web add .
@@ -92,7 +92,8 @@ cd /Users/king/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge
 
 pnpm exec tsc --noEmit    # 类型检查（strict + verbatimModuleSyntax，类型导入必须 import type）
 pnpm run build            # esbuild → lib/index.js，@deepseek-ai/* 全部 external
-pnpm exec vitest run      # 单测
+pnpm exec vitest run      # 单测（client 的集成用例断言构建产物，先跑一次 build）
+pnpm run verify           # 合同门禁：dsh-plugin-studio 的 verify_plugin.py，目标 11/11 PASS
 ```
 
 **文件所有权**（并行工作流，越界即冲突）
@@ -105,6 +106,8 @@ pnpm exec vitest run      # 单测
 | `src/kernel/types.ts` | **冻结 ABI** | 任何一方都不要改；要改先改 `docs/plan.md` |
 
 **`lib/index.js` 的构建规则**：`@deepseek-ai/*` 必须保持 external。把 `@deepseek-ai/dsh-tools` 打进 bundle 会产生**第二个工具注册表**，表现是工具静默丢失（见 `scripts/build.mjs` 注释）。
+
+**`lib/client.js` 的构建规则**：产物**必须带 ModuleLoader 包装** —— `window.__ModuleLoader__.load({ id, factory })`，`id` 由 `package.json#name` 派生。宿主是在启动时**注册 factory**（模块主体保持惰性），**不是** import 产物后读 exports；丢了包装的表现是 **UI 静默不出现**：不报错，因为没有任何一方在找这个 bundle。`react` / `react-dom` 系列同样必须保持 external（打进 bundle 就是第二个 React，等于第二个 hooks dispatcher）。改 `scripts/build-client.mjs` 时别丢这两条；护栏是 `tests/integration/client-bundle.test.ts`（在 `node:vm` 里求值**构建产物**、自己扮演宿主），合同门禁是 `pnpm run verify`。
 
 ---
 

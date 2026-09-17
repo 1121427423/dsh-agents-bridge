@@ -41,6 +41,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ReactElement } from 'react'
 import { createElement } from 'react'
 import { createBridgeApi } from './api.ts'
+import { PACKAGE_NAME } from './identity.ts'
 import { createTranslator, DICTS, detectLocaleTag, LOCALE_NS, localeTagOf, type Translator } from './i18n.ts'
 import { Indicator } from './indicator.ts'
 import { SupervisorPanel } from './panel.ts'
@@ -52,9 +53,15 @@ import { injectStyles } from './styles.ts'
 export const PANEL_SLOT = 'sidebar.right.pane.tab'
 export const INDICATOR_SLOT = 'conversation.session.header.utilities'
 
-/** Registration ids (stable across reloads; the host dedupes on them). */
-export const PANEL_ID = 'dsh-agents-bridge'
-export const INDICATOR_ID = 'dsh-agents-bridge:indicator'
+/**
+ * Registration ids (stable across reloads; the host dedupes on them).
+ *
+ * Derived from the package name (`./identity.ts`), never spelled out: the same
+ * string is the ModuleLoader id of this bundle, and the host keys both the
+ * module table and the slot registry on it.
+ */
+export const PANEL_ID = PACKAGE_NAME
+export const INDICATOR_ID = `${PACKAGE_NAME}:indicator`
 
 /**
  * Services required before mounting.
@@ -193,7 +200,7 @@ export function apply(ctx: Context): void {
 
       const disposePanel = slots.inject(PANEL_SLOT, () =>
         slots.register(
-          { name: PANEL_SLOT, id: PANEL_ID, order: 30, registrant: 'dsh-agents-bridge' },
+          { name: PANEL_SLOT, id: PANEL_ID, order: 30, registrant: PACKAGE_NAME },
           ((props: { sessionId?: string | undefined }) =>
             createElement(SupervisorPanel, {
               store,
@@ -205,7 +212,7 @@ export function apply(ctx: Context): void {
 
       const disposeIndicator = slots.inject(INDICATOR_SLOT, () =>
         slots.register(
-          { name: INDICATOR_SLOT, id: INDICATOR_ID, order: 40, registrant: 'dsh-agents-bridge' },
+          { name: INDICATOR_SLOT, id: INDICATOR_ID, order: 40, registrant: PACKAGE_NAME },
           ((props: { sessionId?: string | undefined }) =>
             createElement(Indicator, {
               store,
