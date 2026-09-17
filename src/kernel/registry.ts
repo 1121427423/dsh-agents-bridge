@@ -30,6 +30,7 @@ import type {
   ProbeResult,
 } from './types.ts'
 import { childLogger } from './logger.ts'
+import { buildCommandLine } from './command-line.ts'
 import { BUILTIN_DESCRIPTORS, policyFor, type TrackPolicyOptions } from '../tracks/index.ts'
 import { credentialStatusFor, type CredentialReaderOptions } from '../tracks/health.ts'
 import { modelFieldsFor, modelsFor, type ModelReaderOptions } from '../tracks/models.ts'
@@ -75,6 +76,13 @@ export interface ResolvedIdentity {
   /** Merged child environment (host env + descriptor env). */
   readonly env: Record<string, string>
   readonly executablePath?: string
+  /**
+   * Absolute path of the DESCRIPTOR-pinned `command.interpreter`, when it was
+   * found. `undefined` for a CLI-track shim that `launch()` repaired — that
+   * repair lands in `command.interpreter` instead, which is why NOTHING may
+   * build an argv from this field alone. Use `buildCommandLine(command, args)`;
+   * see `docs/findings-node-shim.md`.
+   */
   readonly interpreterPath?: string
   /** `<PREFIX>_MODEL` override, when set. The manager uses it as a run default. */
   readonly model?: string
@@ -88,8 +96,30 @@ export interface VersionProbeInput {
   readonly timeoutMs: number
 }
 
-/** Injectable so tests never spawn a process while probing. */
-export type VersionProbe = (input: VersionProbeInput) => Promise<string | undefined>
+/**
+ * What one `<exe> --version` attempt actually produced.
+ *
+ * The split exists because the two halves are NOT interchangeable, and merging
+ * them is how this bridge came to report a spawn failure as a version number:
+ * `version` comes from STDOUT only, `diagnostic` is the child's own explanation
+ * (stderr, a spawn error, a timeout) and is surfaced as an explained probe
+ * `notes` line, never as a version.
+ */
+export interface VersionProbeOutcome {
+  /** Parsed version, from the child's STDOUT. */
+  readonly version?: string
+  /** Why no version was obtained — one line, for the probe row. */
+  readonly diagnostic?: string
+}
+
+/**
+ * Injectable so tests never spawn a process while probing.
+ *
+ * A bare `string | undefined` is still accepted (and is what every existing
+ * injector returns), so widening this did not move a single test.
+ */
+export type VersionProbeResult = string | VersionProbeOutcome | undefined
+export type VersionProbe = (input: VersionProbeInput) => Promise<VersionProbeResult>
 
 export interface RegistryOptions {
   readonly logger?: BridgeLogger
@@ -233,13 +263,33 @@ function parseVersion(text: string): string | undefined {
   return firstLine ? firstLine.slice(0, 120) : undefined
 }
 
+/** First non-blank line of a diagnostic, bounded so a stack cannot reach a row. */
+function firstDiagnosticLine(text: string): string | undefined {
+  const line = text.split('\n').map((part) => part.trim()).find((part) => part.length > 0)
+  return line === undefined ? undefined : line.slice(0, 200)
+}
+
+/** One-line text for a spawn failure, without leaking a stack into a probe row. */
+function probeErrorText(err: unknown): string {
+  return firstDiagnosticLine(err instanceof Error ? err.message : String(err)) ?? 'spawn failed'
+}
+
 /**
- * `<exe> --version` with a hard deadline. Any failure (missing binary, hang,
- * non-zero exit) yields `undefined` — an unknown version is not an error, and
- * probe must never surface a spawn failure as a bridge failure.
+ * `<exe> --version` with a hard deadline.
+ *
+ * Any failure (missing binary, hang, non-zero exit) yields no version — an
+ * unknown version is not an error, and probe must never surface a spawn failure
+ * as a bridge failure.
+ *
+ * STDOUT and STDERR are kept apart on purpose. They used to be concatenated and
+ * fed to `parseVersion`, whose "no semver → first non-empty line" fallback then
+ * published the child's ERROR TEXT as the engine's version: a GUI-launched host
+ * with no `node` on PATH reported `version: "env: node: No such file or
+ * directory"` for `claude`, `codex` and `codebuddy-code` while marking all three
+ * available. A diagnostic is now a diagnostic (see `VersionProbeOutcome`).
  */
 export const defaultVersionProbe: VersionProbe = ({ argv, env, timeoutMs }) =>
-  new Promise<string | undefined>((resolve) => {
+  new Promise<VersionProbeResult>((resolve) => {
     const file = argv[0]
     if (!file) {
       resolve(undefined)
@@ -247,7 +297,7 @@ export const defaultVersionProbe: VersionProbe = ({ argv, env, timeoutMs }) =>
     }
     let settled = false
     let timer: NodeJS.Timeout | undefined
-    const finish = (value: string | undefined): void => {
+    const finish = (value: VersionProbeResult): void => {
       if (settled) return
       settled = true
       if (timer) clearTimeout(timer)
@@ -259,29 +309,38 @@ export const defaultVersionProbe: VersionProbe = ({ argv, env, timeoutMs }) =>
         env: { ...env },
         stdio: ['ignore', 'pipe', 'pipe'],
       })
-    } catch {
-      finish(undefined)
+    } catch (err) {
+      finish({ diagnostic: probeErrorText(err) })
       return
     }
-    const chunks: string[] = []
+    const stdout: string[] = []
+    const stderr: string[] = []
     let collected = 0
-    const collect = (buf: Buffer): void => {
+    const collect = (into: string[]) => (buf: Buffer): void => {
       if (collected >= MAX_VERSION_CHARS) return
       const text = buf.toString('utf8')
       collected += text.length
-      chunks.push(text)
+      into.push(text)
     }
-    child.stdout?.on('data', collect)
-    child.stderr?.on('data', collect)
-    child.on('error', () => finish(undefined))
-    child.on('close', () => finish(parseVersion(chunks.join(''))))
+    child.stdout?.on('data', collect(stdout))
+    child.stderr?.on('data', collect(stderr))
+    child.on('error', (err) => finish({ diagnostic: probeErrorText(err) }))
+    child.on('close', () => {
+      const version = parseVersion(stdout.join(''))
+      if (version !== undefined) {
+        finish({ version })
+        return
+      }
+      const diagnostic = firstDiagnosticLine(stderr.join(''))
+      finish(diagnostic === undefined ? undefined : { diagnostic })
+    })
     timer = setTimeout(() => {
       try {
         child.kill('SIGKILL')
       } catch {
         /* already gone */
       }
-      finish(undefined)
+      finish({ diagnostic: `timed out after ${timeoutMs}ms` })
     }, timeoutMs)
   })
 
@@ -506,20 +565,42 @@ export function createRegistry(options: RegistryOptions = {}): AgentRegistry {
         ...modelFieldsFor(discovery),
       }
     }
-    const argv = [...(resolved.interpreterPath ? [resolved.interpreterPath] : []), resolved.executablePath ?? '', '--version']
+    // The probe argv comes from the SAME constructor the run path uses, applied
+    // to the SAME `CommandSpec` the manager hands the driver. Building it by
+    // hand out of `interpreterPath` was the defect: that field is set only when
+    // the DESCRIPTOR pins an interpreter, so a CLI-track shim repaired by
+    // `createCliPolicy().launch()` (which writes `command.interpreter`) was
+    // probed bare and died with `env: node: No such file or directory`.
+    const line = buildCommandLine(resolved.command, ['--version'])
+    const argv = [line.command, ...line.args]
     let version: string | undefined
+    let diagnostic: string | undefined
     try {
-      version = await probeVersion({ argv, env: resolved.env, timeoutMs: versionTimeoutMs })
+      const outcome = await probeVersion({ argv, env: resolved.env, timeoutMs: versionTimeoutMs })
+      if (typeof outcome === 'string') {
+        version = outcome
+      } else if (outcome !== undefined) {
+        version = outcome.version
+        diagnostic = outcome.diagnostic
+      }
     } catch {
       // A probe implementation must never be able to fail probe().
       version = undefined
     }
+    // An identity can resolve and still not answer `--version`. That is not an
+    // error, but it is not silent either: the reason goes in `notes`, where it
+    // is explained, rather than into `version`, where it was a lie.
+    const probeNote =
+      version === undefined && diagnostic !== undefined ? `[probe] --version failed: ${diagnostic}` : undefined
+    const notes =
+      probeNote === undefined ? combinedNotes : combinedNotes === undefined ? probeNote : `${combinedNotes} ${probeNote}`
     return {
       ...identity,
       ...(capabilities !== undefined ? { capabilities } : {}),
       available: true,
       ...(resolved.executablePath !== undefined ? { executable: resolved.executablePath } : {}),
       ...(version !== undefined ? { version } : {}),
+      ...(notes !== undefined ? { notes } : {}),
       health: { launch: 'ok', ...credentialStatusFor(descriptor.id, hostOptions) },
       ...modelFieldsFor(discovery),
     }

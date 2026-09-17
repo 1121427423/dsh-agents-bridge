@@ -21,18 +21,29 @@
  * is required (or consulted).
  */
 
-import { describe, expect, it } from 'vitest'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+
+import { afterAll, describe, expect, it } from 'vitest'
 
 import { BUILTIN_DESCRIPTORS, createRegistry } from '../../src/kernel/registry.ts'
 import { buildArgv } from '../../src/kernel/spawn.ts'
 import type { AgentDescriptor, CommandSpec, ProtocolFamily } from '../../src/kernel/types.ts'
 
+import { buildCommandLine } from '../../src/drivers/argv.ts'
 import { buildAcpArgs } from '../../src/drivers/acp.ts'
 import { buildClaudeArgs } from '../../src/drivers/claude.ts'
 import { buildCodebuddyArgs } from '../../src/drivers/codebuddy.ts'
 import { buildCodexArgs } from '../../src/drivers/codex.ts'
 import { buildGenericArgs } from '../../src/drivers/generic-argv.ts'
 import { buildOpenclawArgs } from '../../src/drivers/openclaw.ts'
+
+const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-bridge-argv-shape-'))
+
+afterAll(() => {
+  fs.rmSync(tmpRoot, { recursive: true, force: true })
+})
 
 /** The argv the driver contributes for one family (everything after the prefix). */
 function driverArgs(family: ProtocolFamily, command: CommandSpec): string[] {
@@ -183,5 +194,115 @@ describe('assembled argv for every built-in identity', () => {
     expect(interpreter).toBe('/fake/bin/node')
     expect(executable).toBe('/fake/bin/openclaw.mjs')
     expect(argv.slice(2, 5)).toEqual(['--profile', 'autoclaw', 'agent'])
+  })
+})
+
+/**
+ * The VERSION PROBE must spawn the command line a RUN would spawn.
+ *
+ * Why this file (and why capturing the argv matters): the probe once built its
+ * argv by hand out of `ResolvedIdentity.interpreterPath`, which is set ONLY when
+ * the DESCRIPTOR pins an `interpreter`. The CLI track's node-shim repair writes
+ * `command.interpreter` instead — so `claude`, `codex` and `codebuddy-code` were
+ * probed as BARE shims on a host with no `node` on PATH, died with
+ * `env: node: No such file or directory`, and the bridge published that stderr
+ * line as their version. See `docs/findings-node-shim.md`.
+ *
+ * The assertion has teeth because the probe argv is CAPTURED from a real
+ * `probe()` call and compared against what the run path's own constructor
+ * derives from the same `CommandSpec`. A hand-rolled probe argv cannot satisfy
+ * it; deriving the expectation from the same command the probe was given is what
+ * makes the comparison meaningful, not circular.
+ */
+describe('the version probe and the run path build the same argv', () => {
+  /** A node that exists OFF the child's PATH — never spawned, only prepended. */
+  const FAKE_NODE = '/fake/bin/node'
+
+  /**
+   * Fixture shims that really are `#!/usr/bin/env node` files on disk, so the
+   * CLI track's shebang repair actually fires. A resolver that invented paths
+   * would leave the repair untested and this whole guard vacuous.
+   */
+  function shimBin(): string {
+    const binDir = path.join(tmpRoot, 'probe-argv-bin')
+    fs.mkdirSync(binDir, { recursive: true })
+    for (const name of ['claude', 'codex', 'openclaw', 'openclaw.mjs', 'codebuddy-code', 'agent-cli', 'codebuddy', 'node']) {
+      const file = path.join(binDir, name)
+      fs.writeFileSync(file, '#!/usr/bin/env node\n', { mode: 0o755 })
+      fs.chmodSync(file, 0o755)
+    }
+    return binDir
+  }
+
+  it('probes exactly the command line a run would spawn, for every launchable identity', async () => {
+    const binDir = shimBin()
+    const captured: string[][] = []
+    const registry = createRegistry({
+      env: { PATH: '' },
+      scan: false,
+      portProbe: false,
+      trackPolicyOptions: { searchPath: [binDir], resolveNode: () => FAKE_NODE },
+      // Maps every descriptor path into the fixture bin dir. `codebuddy` is a
+      // fixture too: the two WorkBuddy bundles share the basename.
+      resolveExecutable: (raw) => path.join(binDir, path.basename(raw)),
+      probeVersion: async ({ argv }) => {
+        captured.push([...argv])
+        return '1.2.3'
+      },
+    })
+
+    const results = await registry.probe({ refresh: true })
+    const launchable = BUILTIN_DESCRIPTORS.filter((descriptor) => descriptor.unsupported === undefined)
+    // Guard against a vacuous pass.
+    expect(launchable.length).toBeGreaterThanOrEqual(5)
+
+    for (const descriptor of launchable) {
+      const resolved = registry.resolve(descriptor.id)
+      expect(resolved.reason, `${descriptor.id} must resolve with an injected resolver`).toBeUndefined()
+      const command = resolved.command
+
+      // What the RUN path derives from the SAME `CommandSpec` the manager hands
+      // the driver: one constructor, the driver's own per-family args.
+      const runArgv = buildArgv(command, driverArgs(descriptor.family, command))
+      // What the probe should have spawned: the same head, then `--version`.
+      const expected = (() => {
+        const line = buildCommandLine(command, ['--version'])
+        return [line.command, ...line.args]
+      })()
+
+      expect(captured, `${descriptor.id}: the probe must spawn the run path's command line`).toContainEqual(expected)
+      // …and the captured vector really carries the run path's head (a probe
+      // that dropped the interpreter would be short by one token here).
+      const probeArgv = captured.find((vector) => vector.at(-1) === '--version' && vector.includes(command.executable))
+      expect(probeArgv, `${descriptor.id} must have been probed`).toBeDefined()
+      const head = (probeArgv ?? []).slice(0, -1)
+      expect(
+        runArgv.slice(0, head.length),
+        `${descriptor.id}: probe head ${head.join(' ')} vs run argv ${runArgv.join(' ')}`,
+      ).toEqual(head)
+
+      const result = results.find((entry) => entry.id === descriptor.id)
+      expect(result?.available, `${descriptor.id} must be available`).toBe(true)
+      expect(result?.version).toBe('1.2.3')
+    }
+
+    // The exact pre-fix vector, asserted absent. Before the fix the probe spawned
+    // the bare shim for every CLI-track identity, which is what produced
+    // `env: node: No such file or directory` as a "version".
+    const claudeShim = path.join(binDir, 'claude')
+    expect(captured).not.toContainEqual([claudeShim, '--version'])
+    // …and the repaired interpreter is present instead.
+    expect(captured).toContainEqual([FAKE_NODE, claudeShim, '--version'])
+
+    // The desktop identities keep the DESCRIPTOR-pinned interpreter (resolved to
+    // a real path), so they were never affected — the same constructor is simply
+    // applied to their command, `argsPrefix` and all.
+    expect(captured).toContainEqual([
+      path.join(binDir, 'node'),
+      path.join(binDir, 'openclaw.mjs'),
+      '--profile',
+      'autoclaw',
+      '--version',
+    ])
   })
 })

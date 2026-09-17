@@ -32,6 +32,8 @@
 | D29 | **`src/kernel/types.ts` 仅改注释**（冻结 ABI 的例外，纯文档） | `CommandSpec.argsPrefix` 的示例仍写作 `['agent']` —— 正是 D28 那个 bug 的示范值，留着会继续误导下一个读者。**只改注释，不改任何字段、类型或可选性**，故 ABI 不变、无需版本号变更 | ✅ 已改（本工作流唯一触碰 types.ts 之处） |
 | D30 | **client bundle 必须包装成 `window.__ModuleLoader__.load({ id, factory })`**；`id`、slot 注册 `id`、`registrant` 一律从 `package.json#name` 派生（构建期 `define`，源码里不出现字面量） | 宿主**不是** import 产物再读 exports，而是启动时注册 factory；裸 esbuild CJS 产物全文 0 次 `ModuleLoader`，于是**装不上且静默无 UI**（不报错，因为没人去找它）。字面量则会在改包名时静默失配 | ✅ 已实现（`verify_plugin.py` 11/11 PASS） |
 | D31 | **工具的 `output.schema` 必须声明内核实际返回的每一个字段**；护栏 `tests/tools/probe-schema.test.ts` 把**真实返回值**逐键走过**真实声明的 schema** | `ProbeResult.capabilities` 一直是 registry 返回的字段，而 `agents_probe` 的 `output.schema` 没声明它、同时开着 `additionalProperties: false` → 内核物化输出时对**每一个身份**抛 `value[0].capabilities is not a declared property`：模型在任何会话里的第一个调用就失败，从模型视角看「没有任何东西可驱动」。单测只把 `execute()` 的返回值拿去断言、**不经物化**，所以 704 个全绿用例照漏（与 D28 同一形状：被断言的不是真正交出去的那个对象）。护栏改走运行时那条路——同一份 schema、同一个返回值 | ✅ 已修（+3 用例） |
+| D32 | **argv 规则 `[interpreter, executable, ...argsPrefix, …]` 全树只有一份实现**：`src/kernel/command-line.ts#buildCommandLine`；**版本探测与跑路径必须用同一个构造函数、喂同一份 `CommandSpec`**。`drivers/argv.ts` 再导出、`kernel/spawn.ts#buildArgv` 委托，二者都不再实现规则 | 探测曾自己拼 argv，只读 `ResolvedIdentity.interpreterPath`（**仅描述符钉了 interpreter 时才有值**，即桌面轨道），而 CLI 轨道的 shim 修复写的是 `command.interpreter` → `claude`/`codex`/`codebuddy-code` 被当**裸 shim** 探测，子进程以 `env: node: No such file or directory` 退出；桌面三个身份**同一行代码**却正常。规则放在 `kernel/` 是因为 `kernel/**` 不许 import `drivers/**`（D3），反向依赖早已存在 | ✅ 已实现（真机复验 + `tests/integration/argv-shape.test.ts` 新 describe，已验证会真红） |
+| D33 | **版本号只能是版本号**：`defaultVersionProbe` 分开收 stdout / stderr，版本只从 **stdout** 解析；stderr / spawn 失败 / 超时成为 `diagnostic`，由 `probeOne` 落到 `notes` 的自解释行 `[probe] --version failed: …`。**不占用 `health.detail`**（那里已承载凭据说明） | 原实现把 stdout 与 stderr 一起喂给 `parseVersion`，其「无 semver → 取第一行非空文本」的回退**把子进程的错误信息当成了版本号**，同时该身份仍是 `available: true` / `launch: 'ok'` —— 操作员看到的正是这一行。契约不变：探测实现永不能让 `probe()` 失败，未知版本不是错误 | ✅ 已实现（`tests/kernel/registry-node-shim.test.ts` 已验证会真红） |
 
 ## 任务拆分（3 个并行工作流）
 
@@ -322,7 +324,7 @@ $ python3 /Users/king/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py 
 **工作流 G 落地时的门禁输出（历史值；当前主干见「交付指标」）**：`pnpm exec vitest run` →
 **704 passed / 1 skipped（42 个文件）**（基线 696/1、41 文件；G 新增 8 个用例）；`pnpm exec tsc
 --noEmit` → 0 错误；`pnpm run build` → `lib/index.js` 310.1 KB + `lib/client.js` 59.5 KB（含包装）。
-（此后工作流 H 新增 6 个、D31 新增 3 个，主干现为 **713 passed / 1 skipped**。）
+（此后工作流 H 新增 6 个、D31 新增 3 个、工作流 `node-shim-note` 新增 6 个，主干现为 **719 passed / 1 skipped**。）
 
 **关于校验器的第 9 项（React 保持 external）**：它 grep 的是 `scripts/build.mjs` 里有没有
 `react` / `react/jsx-runtime` / `react-dom` / `react-dom/client` 四个串，而本仓库的 client
@@ -438,6 +440,87 @@ $ curl -s -o /dev/null -w '%{http_code}' -X POST -H 'sec-fetch-site: cross-site'
 那句话在真机上就是谎报）；⑤ 依赖作用域 fiber 自己的 teardown 摘路由（cordis 并发卸载，
 与 `manager.dispose()` 无先后保证）。
 
+## 工作流 `node-shim-note` — claude / codex / codebuddy-code 行上的 `env: node: No such file or directory`（D32–D33，2026-09-17）
+
+**症状。** GUI 启动的宿主里（子进程 PATH = `…/runtime-commands/generations/<hash>/bin:/usr/bin:/bin:/usr/sbin:/sbin`，
+**没有任何 node**），`claude` / `codex` / `codebuddy-code` 三个身份行上各带一句
+`env: node: No such file or directory`；桌面轨道三个身份（`workbuddy` / `workbuddy-ai` / `autoclaw`）没有。
+
+**结论：那不是一句日志，是一个被塞进 `version` 字段的错误文本。** 两个缺陷叠加，缺一不可：
+
+1. **探测自己拼 argv。** `registry.ts:509`（修复前）
+   `[...(resolved.interpreterPath ? [resolved.interpreterPath] : []), resolved.executablePath ?? '', '--version']`
+   —— `interpreterPath` **只在描述符自己钉了 `interpreter` 时才有值**（桌面轨道，`registry.ts:437`），
+   而 CLI 轨道对 `#!/usr/bin/env node` shim 的修复写的是 `command.interpreter`
+   （`tracks/cli/index.ts:177-193`）。于是探测把**裸 shim** 交给内核。跑路径没这个问题：
+   `manager.ts:316` 传 `resolved.command`，`drivers/argv.ts#buildCommandLine` 读的正是
+   `command.interpreter`。
+2. **stdout 与 stderr 被拼在一起再解析。** 子进程 stdout 全空、stderr 是那句错误；
+   `parseVersion` 找不到 semver 就回退到「第一行非空文本」→ **错误信息成为版本号**，
+   而该身份仍是 `available: true` / `health.launch: 'ok'`。这是操作员**看到**它的直接原因。
+
+**桌面身份为什么免疫**：它们的描述符**自己钉了** `interpreter: '/opt/homebrew/bin/node'`
+（`tracks/desktop/catalog.ts:61,72,90`），`interpreterPath` 有值，同一行手工 argv 恰好是对的
+—— **同一行代码、两条轨道命运不同**，正是「冻结规则被实现两次」的症状。
+
+**全树 spawn 站点审计（任务书假设 H3）。** 重推导 `[interpreter, executable, …]` 的只有两处：
+`registry.ts:509`（缺陷本体）与 `kernel/spawn.ts:79` 的 `buildArgv`（第二份实现，当时未出错但就是该 bug 类）。
+其余全部合规：五个 driver（claude `:892` / codex `:632` / openclaw `:703` / acp `:1595` /
+generic `:170`）都走 `buildCommandLine`；`integrate.ts:62` 传裸 `CommandSpec`（上游已折叠 interpreter）；
+`acp.ts:1386` 是 ACP `terminal/*` 回调，替**被驱动的 agent** 起进程，根本没有 `CommandSpec`，不适用。
+
+**修复。** ① 新增 `src/kernel/command-line.ts`，**唯一**的 `buildCommandLine`；放在 `kernel/`
+是因为 `kernel/**` 不许 import `drivers/**`（D3），而反向依赖早已存在。`drivers/argv.ts:181`
+改为再导出（五个 driver 与既有单测一行未改），`kernel/spawn.ts:88` 的 `buildArgv` 改为委托。
+`registry.ts:574` 的探测改为 `buildCommandLine(resolved.command, ['--version'])` ——
+探测本来就在 `resolve()` 之后跑，所以 CLI 轨道的修复**先于**探测生效，不必抄第二遍。
+② `VersionProbeOutcome{version?, diagnostic?}`（纯放宽，既有注入器照旧编译）；
+`defaultVersionProbe` 分开收 stdout/stderr，**版本只从 stdout 解析**；失败时 `probeOne`
+往 `notes` 写一行自解释的 `[probe] --version failed: …`（沿用 `[scan] …` 前缀约定）。
+**不占用 `health.detail`**（那里已承载凭据说明，覆盖会丢掉真正的解释）。契约不变：
+探测实现永不能让 `probe()` 失败；**未知版本不是错误**。
+
+**H2 · 操作员在哪看到它。** 在 `agents_probe` 的工具输出（`tools/definitions.ts:198-200`
+渲染 `… path=<exe> v<version>`，`version` 也在 `output.schema` 里）。**监工 UI 已排除**：
+`ClientProbeResult`（`client/util.ts:57-69`）**没有 `version` 字段**，`engineRow()`
+（`client/panel.ts:70-86`）只渲染 track / credential / models 数 / `reason`。
+**也没有被吞掉** —— 失败没有变成 `version: undefined`，而是变成一句看起来像版本号的错误文本，
+所以「不留没人解释的 caveat」是必须做的（D33）。
+
+**真机证据（同一段脚本，注入无 node 的 PATH，真实 registry）。**
+修复前 `claude`/`codex`/`codebuddy-code`/`codebuddy-code-acp` 的 `version` 全是
+`"env: node: No such file or directory"`；修复后分别是 `2.8.4` / `0.154.0` / `2.151.0` / `2.151.0`，
+桌面三个身份 `2.137.1` / `2.137.1` / `2026.6.8` **前后一致**（免疫的直接证据）。
+裸 shim 的 stderr 逐字复现（退出码 **127** 而非 spawn 失败 —— `/usr/bin/env` 存在，
+exec 成功，是 `env` 找不到 `node`，所以 `child.on('error')` 不触发，这才让错误文本有机会被当版本解析）：
+
+```
+$ env -i PATH='/usr/bin:/bin:/usr/sbin:/sbin' /usr/local/bin/claude --version
+env: node: No such file or directory      # exit=127
+```
+
+**护栏（两个新文件 / 一个新 describe，都验证过「会真红」）。**
+
+- `tests/kernel/registry-node-shim.test.ts`（5 个用例）：夹具 shim
+  `tests/fixtures/node-shim-cli.mjs`（`#!/usr/bin/env node`，打印 `9.9.9 (fixture-node-shim)`）
+  + 无 node 的 PATH + **真** `defaultVersionProbe`，断言版本**必须**读得到；
+  另一条断言不可修复的 shim **不会**把 stderr 当版本，而是给出解释过的 `notes`。
+  **负向对照**：`git stash` 掉 `src/` 改动后 **4/5 失败**，关键两条正是
+  `expected 'env: node: No such file or directory' to be '9.9.9'` 与 `… to be undefined`。
+- `tests/integration/argv-shape.test.ts` 新 describe：**捕获**一次真实 `probe()` 实际 spawn 的 argv，
+  与「跑路径用同一份 `CommandSpec` 推出来的向量」逐元素比对。手工拼 argv 的实现**不可能**满足它。
+  **负向对照**：同样 stash 后 **1/6 失败**，收到的向量是 `[<tmp>/claude, --version]`（缺解释器）。
+- 夹具与测试**不碰本机真实 CLI**：解释器用 `process.execPath`（跑测试的那个 node）注入。
+- **没有 ABI 变更**：`src/kernel/types.ts` 一行未改（只动了 `registry.ts` 自己的注释与
+  `ResolvedIdentity.interpreterPath` 的说明，提醒「不要只拿它拼 argv」）。
+
+**被否决的替代方案**：① 只修 argv、不管 stderr（换个失败形态继续骗人，且操作员看到的字仍在）；
+② 把 stderr 直接丢掉（等于吞掉原因，违反「不留无人解释的 caveat」）；
+③ 把 diagnostic 塞进 `health.detail`（会覆盖凭据说明，那是该字段现在的唯一用途）；
+④ 改宿主 PATH / 动 `~/.dsh/**`（任务书非目标；且 CLI 轨道的 shim 修复本来就是为此存在的）；
+⑤ 把 CLI 轨道的 `detail` 接到 `CommandSpec`（需要 ABI 变更，本工作流不动冻结 ABI ——
+  同一事实已由 `[probe]` 行覆盖，见 `docs/findings-node-shim.md` §6.3）。
+
 ## 阶段状态
 
 - [x] 仓库创建 + git init + 骨架（package.json / tsconfig / cordis.patch.yml / build.mjs / types.ts）
@@ -522,18 +605,19 @@ $ curl -s -o /dev/null -w '%{http_code}' -X POST -H 'sec-fetch-site: cross-site'
 
 ## 交付指标（当前）
 
-> 下表所有数字来自**合并工作流 H 与 D31 之后的树**（主干）**本机真跑**：`pnpm exec vitest run` / `pnpm exec tsc --noEmit` / `pnpm run build` / `verify_plugin.py`。
+> 下表所有数字来自**合并工作流 H、D31 与工作流 `node-shim-note` 之后的树**（主干）**本机真跑**：`pnpm exec vitest run` / `pnpm exec tsc --noEmit` / `pnpm run build` / `verify_plugin.py`。
 
 | 指标 | 值 |
 |---|---|
-| TS 文件 | **91** 个 `.ts`（src 43 / tests 47 / scripts 1；另有 `scripts/*.mjs` 3 个）—— `find src tests scripts -name '*.ts' \| wc -l` |
-| 测试 | **713 个通过 + 1 skipped（42 passed \| 1 skipped 文件）** —— 基线 704/1；工作流 H 新增 6 个（`tests/host/wiring.test.ts` 作用域注入 5 个 + `tests/host/api.test.ts` 后到 webRuntime 1 个）、D31 新增 3 个（`tests/tools/probe-schema.test.ts`），零删除、零跳过 |
+| TS 文件 | **93** 个 `.ts`（src 44 / tests 48 / scripts 1；另有 `scripts/*.mjs` 3 个）—— `find src tests scripts -name '*.ts' \| wc -l` |
+| 测试 | **719 个通过 + 1 skipped（43 passed \| 1 skipped 文件）** —— 基线 704/1；工作流 H 新增 6 个（`tests/host/wiring.test.ts` 作用域注入 5 个 + `tests/host/api.test.ts` 后到 webRuntime 1 个）、D31 新增 3 个（`tests/tools/probe-schema.test.ts`）、工作流 `node-shim-note` 新增 6 个（`tests/kernel/registry-node-shim.test.ts` 5 个 + `tests/integration/argv-shape.test.ts` 新 describe 1 个），零删除、零跳过 |
 | `tsc --noEmit` | 0 错误 |
-| 构建产物 · `lib/index.js` | 311.4 KB（esbuild，`@deepseek-ai/*` 全部 external） |
+| 构建产物 · `lib/index.js` | 312.5 KB（esbuild，`@deepseek-ai/*` 全部 external） |
 | 构建产物 · `lib/client.js` | 59.5 KB（web platform，`react` 系列 external；带 `window.__ModuleLoader__.load({ id: <包名>, factory })` 包装） |
 | 工具面 | **9 个**（`agents_probe` / `run` / `run_many` / `status` / `wait` / `output` / `usage` / `cancel` / `send`） |
 | 合同校验 | **`verify_plugin.py` 11/11 PASS**（`pnpm run verify`；等价命令 `python3 /Users/king/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py .`，原始输出见「工作流 G」）。另有监理自检 `.wb-harness/check-contract.mjs` **19/19**（工具，不入交付物） |
 | 端到端集成 | `tests/integration/pipeline.test.ts`（真子进程 + 真 stream-json 解析 + 取消 + usage + resume 指针）全绿；`tests/integration/argv-shape.test.ts`（每个内置身份的最终 argv 形状，5 个用例）全绿 |
 | 真机验收 · web 宿主 API | `dsh --profile web`（standalone harness，127.0.0.1:43121）实测：`host api route mounted {"path":"/agents-bridge/api"}`，`loaded` 仍报 `"tools":9`；`POST /agents-bridge/api/status` 与 `/probe` 返回真实数据，跨站请求 403。命令与原始输出见「工作流 H」一节 |
+| 真机验收 · **无 node 的宿主 PATH**（本缺陷的原始症状） | 协调者在**合并后**的树上复跑：`env PATH=/usr/bin:/bin:/usr/sbin:/sbin ./bin/dsh --profile web --no-open` → `claude` 2.8.4 / `codex` 0.154.0 / `codebuddy-code` 2.151.0 / `codebuddy-code-acp` 2.151.0（修复前这四行是 `version: "env: node: No such file or directory"`），桌面三身份 `workbuddy` 2.137.1 / `workbuddy-ai` 2.137.1 / `autoclaw` 2026.6.8 前后一致；同一宿主上 `host api route mounted` 照常 |
 | 真机验收 · AutoClaw | `status=completed`、`text: AUTOCLAW_OK`、8404 ms（**合并后的树上复跑**，`scripts/acceptance.ts autoclaw`） |
 | 真机验收 · WorkBuddy | 国际版 `workbuddy-ai`：`status=completed`、`text: FINAL_OK`、6273 ms（**合并后的树上复跑**）。国内版 `workbuddy` 上游 ETIMEDOUT，见 `docs/handoff-blockers.md` 记录 1 |

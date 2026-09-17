@@ -16,6 +16,7 @@ import { spawn as nodeSpawn } from 'node:child_process'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 
 import type { BridgeLogger, CommandSpec } from './types.ts'
+import { buildCommandLine } from './command-line.ts'
 import { redactArgs } from './logger.ts'
 
 /** SIGTERM → grace → SIGKILL window (multica's `claudeTerminateGrace`). */
@@ -75,10 +76,17 @@ export interface SpawnHandle {
 /**
  * `[interpreter, executable, ...argsPrefix, ...args]`, or
  * `[executable, ...argsPrefix, ...args]` when no interpreter is needed.
+ *
+ * A delegate, deliberately: the rule has ONE implementation
+ * (`kernel/command-line.ts`) and this is the kernel-side spelling of it, kept
+ * because `tests/integration/argv-shape.test.ts` and `tests/kernel/spawn.test.ts`
+ * assert on the vector the OS actually receives. If this body ever grows an
+ * `if (command.interpreter)` again, the probe and the run path can drift apart —
+ * which is exactly the bug in `docs/findings-node-shim.md`.
  */
 export function buildArgv(command: CommandSpec, args: readonly string[] = []): string[] {
-  const head = command.interpreter ? [command.interpreter, command.executable] : [command.executable]
-  return [...head, ...(command.argsPrefix ?? []), ...args]
+  const line = buildCommandLine(command, args)
+  return [line.command, ...line.args]
 }
 
 /**

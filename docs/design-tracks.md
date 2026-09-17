@@ -27,6 +27,7 @@ driven through the app's profile. Same dialect, different implementation.
 ## 2. Layout
 
 ```
+src/kernel/command-line.ts   THE argv rule: buildCommandLine(spec, args)
 src/tracks/
   types.ts             TrackPolicy, LaunchInput, notFoundReason
   index.ts             BUILTIN_DESCRIPTORS = cli ++ desktop; policyFor(track)
@@ -37,10 +38,12 @@ src/tracks/
 ```
 
 The kernel stays the single mechanism: it resolves `<PREFIX>_PATH` overrides,
-calls `policyFor(descriptor.track).launch(...)`, and probes `<exe> --version`.
-It never branches on an agent id, and the two policies never import each other.
-`notFoundReason()` is shared so probe output has one shape — the model must not
-have to learn two vocabularies.
+calls `policyFor(descriptor.track).launch(...)`, and probes `<exe> --version`
+**through the same argv constructor a run uses** (`buildCommandLine` applied to
+the resolved `CommandSpec`), so a track's launch decision cannot be honoured by
+`run` and ignored by `probe`. It never branches on an agent id, and the two
+policies never import each other. `notFoundReason()` is shared so probe output has
+one shape — the model must not have to learn two vocabularies.
 
 ## 3. Verified host facts that shaped the code
 
@@ -61,6 +64,36 @@ All observed on the target machine, 2026-09-16. Each one has a test.
    `env: node: No such file or directory` before any output. → the CLI policy
    reads the shebang and prepends a resolved node, but *only* for a file that is
    literally a `#!…node` script (a NUL byte in the first block means a binary).
+   Exit code is **127, not a spawn failure** — `/usr/bin/env` exists, so `exec`
+   succeeds and it is `env` that cannot find `node`; `child.on('error')` never
+   fires, which is why this reaches a parser instead of an error path.
+
+   **The repair is only as good as the argv that carries it (2026-09-17).** The
+   version probe used to build its own argv out of
+   `ResolvedIdentity.interpreterPath` — a field set ONLY when the *descriptor*
+   pins an `interpreter` (the desktop track). The CLI repair writes
+   `command.interpreter` instead, so `claude`, `codex` and `codebuddy-code` were
+   probed as BARE shims and died with the string above, while `workbuddy` /
+   `workbuddy-ai` / `autoclaw` were unaffected *by the same line*. Two lessons,
+   both now load-bearing:
+
+   1. `[interpreter, executable, ...argsPrefix, …]` has **one** implementation,
+      `src/kernel/command-line.ts#buildCommandLine`, and BOTH the run path and
+      the version probe call it with the SAME `CommandSpec` the manager hands the
+      driver. It lives in `kernel/` because `kernel/**` may not import
+      `drivers/**` (D3) while `drivers/**` already imports `kernel/types.ts`.
+      `drivers/argv.ts` re-exports it and `kernel/spawn.ts#buildArgv` delegates to
+      it; neither re-implements it. Guard:
+      `tests/integration/argv-shape.test.ts` ("the version probe and the run path
+      build the same argv") **captures** the argv a real `probe()` spawned and
+      compares it against what the run path derives — a hand-rolled probe argv
+      cannot satisfy that.
+   2. A probe failure is a probe failure. `defaultVersionProbe` used to feed
+      stdout **and stderr** to `parseVersion`, whose "no semver → first non-empty
+      line" fallback published the child's error text as the engine's `version`
+      (while the identity stayed `available: true`). Version now comes from
+      **stdout only**; a diagnostic goes to `notes` as
+      `[probe] --version failed: …`. See `docs/findings-node-shim.md`.
 4. **A bundle engine may be mode 644.** AutoClaw's
    `.../gateway/openclaw/openclaw.mjs` is `-rw-r--r--` and runs as
    `node openclaw.mjs`. → when a descriptor declares an interpreter, the target

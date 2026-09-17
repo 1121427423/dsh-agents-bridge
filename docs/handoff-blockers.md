@@ -161,3 +161,74 @@ text: OK1
   ```
 - **人工待办**：无。**若今后再看到同类报错，请先看最终 argv，不要去查 key。**
   本文件的第一条（国内版 `workbuddy` 上游 ETIMEDOUT）**仍然未解决**，那条才是真的上游问题。
+
+---
+
+## 记录 5 — 宿主子进程 PATH 里没有 `node`（**仓库外**事实，桥侧已补偿，无需人工处理）
+
+- **时间**：2026-09-17（工作流 H 排查 `env: node: No such file or directory` 时复验）
+- **性质**：**仓库外**的宿主环境事实。它不是本次缺陷的根因（根因全在仓库内，已修），
+  但它是那条症状之所以成立的**前提**，且无法在本仓库里消除，故按任务书要求留痕。
+- **事实（本机复验，逐字）**：
+  ```bash
+  ls "/Users/king/Library/Application Support/DSH Desktop/runtime-commands/generations/"
+  # → 68c24b0a32d4571ebb18d44b97380d522c67e885d64dae302ad011c1ab5f3123-c688fb67-32c9-438a-a7c9-4ca17095609d
+
+  ls -l /usr/bin/node
+  # → ls: /usr/bin/node: No such file or directory
+
+  env -i PATH='/usr/bin:/bin:/usr/sbin:/sbin' sh -c 'command -v node; echo "exit=$?"'
+  # → exit=1
+  ```
+  即 GUI 启动的 DSH 宿主给子进程的 PATH 是
+  `…/runtime-commands/generations/<hash>/bin:/usr/bin:/bin:/usr/sbin:/sbin`，
+  里面**没有 node**（node 只存在于 `/opt/homebrew/bin`、`/usr/local/bin`、
+  `~/.nvm/versions/node/*/bin` 这些**不在该 PATH 上**的位置）。
+- **后果**：任何 `#!/usr/bin/env node` shim（`claude`、`codex`、`codebuddy-code` 三个身份
+  都是，见 `docs/findings-node-shim.md` §2.2）被**裸执行**时，会以退出码 127 失败并输出
+  `env: node: No such file or directory`。注意退出码是 127 **不是** spawn 失败：
+  shebang 里的 `/usr/bin/env` 存在，exec 成功，是 `env` 自己找不到 `node`。
+- **桥这一侧的处置（已完成，不是绕过）**：这正是 **CLI 轨道 shim 修复**存在的理由
+  （D7、`design-tracks.md` §3.3）—— 读 shebang，用 `CLI_SEARCH_PATH` 里解析出的绝对路径 node
+  去拉起脚本；桌面轨道则一律由描述符**钉死** `interpreter`。本次修的是**这条修复没能到达
+  版本探测**（探测自己拼 argv），不是 PATH 本身。修复后**无 node 的 PATH 下能取到真版本**：
+  协调者在**合并后的树**上用 `env PATH=/usr/bin:/bin:/usr/sbin:/sbin ./bin/dsh --profile web --no-open`
+  实测 `claude` 2.8.4 / `codex` 0.154.0 / `codebuddy-code` 2.151.0 / `codebuddy-code-acp` 2.151.0
+  （修复前这四行是 `version: "env: node: No such file or directory"`），桌面三身份
+  `workbuddy` 2.137.1 / `workbuddy-ai` 2.137.1 / `autoclaw` 2026.6.8 **前后一致**；
+  受控对照（同一段脚本、注入无 node 的 PATH、修复前 → 修复后）见
+  `docs/findings-node-shim.md` §2.5，摘要进 `docs/plan.md` 交付指标。
+- **未做（有意为之）**：没有改宿主 PATH、没有改 DSH 启动顺序、没有碰 `~/.dsh/**`、
+  没有安装任何东西、没有往桥里塞 node 路径常量。宿主不给子进程 node，是**宿主的设计选择**，
+  桥只能（且已经能）自己解析。
+- **人工待办**：**无。** 留痕的目的只有一个：下次再看到 `env: node: No such file or directory`
+  时，先判断它是「桥没有把解释器带上」（仓库内，看 `docs/findings-node-shim.md`）
+  还是「有人绕过桥裸执行了 shim」（环境事实，本条），**不要去查 key、不要去改 PATH**。
+  若将来宿主改为在 PATH 上暴露自带 node，CLI 轨道的修复会自动不再触发
+  （`createCliPolicy().launch()` 只在 `lookupOnPath('node', env.PATH) === undefined` 时才修），
+  本记录随之作废 —— 届时删掉即可。
+
+---
+
+## 记录 6 — 免费模型配额用尽，两条工作流各死一次（**配额故障，只记录、不绕过**）
+
+- **时间**：2026-09-17 11:56（本机 CST）
+- **现象**：两个 workbuddy 工作流分别以 `result.subtype = error_during_execution` 结束，
+  最终 assistant 文本是服务端的一句话（逐字）：
+  `429 usage exceeds frequency limit, but don't worry, your usage will reset at
+  2026-09-18 02:36:49 UTC+8, alternatively, you can switch to the other models to continue using it.`
+- **用量（`node-shim-note` 的 `result` 帧，逐字）**：`input_tokens` 15,223,873 /
+  `output_tokens` 70,428 / `cache_creation_input_tokens` 169,921 /
+  `cache_read_input_tokens` 15,053,952，`duration_ms` 2,659,279（44 分钟）。
+- **影响**：
+  - `node-shim-note`：死在**产出已经写完**之后（代码、测试、文档都在工作树里），只是没跑完门禁、
+    没交 `## WORKBUDDY REPORT`、`state.status` 因此是 `failed`。产物由协调者**独立复核**
+    （719 passed / 1 skipped、`tsc` 0 错误、`verify_plugin.py` 11/11、无 node 宿主 PATH 真机验收）后
+    合并 —— 这一条**不构成人工待办**。
+  - `settings-surface`：死在 65 次工具调用处，**零产出**（工作树里只有 `node_modules` 软链）。
+    会话 id 已存进 `.wb-harness/state/settings-surface.json`，配额恢复后
+    `dispatch.mjs --task settings-surface --resume` 即可接着跑，**不必重写任务书**。
+- **未做（有意为之）**：没有改模型、没有改配额、没有重试刷量。「用哪个模型 / 要不要为它花钱」
+  是操作员的决定，不是工作流能自行绕过的东西。
+- **人工待办**：**只有一个选择** —— 等配额重置（2026-09-18 02:36 +08:00）后 `--resume`，
+  或明确改用另一个模型重派。**不要把 `429` 当成代码缺陷去查。**

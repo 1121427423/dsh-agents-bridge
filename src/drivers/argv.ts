@@ -73,7 +73,6 @@ import type {
   AgentRunStatus,
   AgentSessionHandle,
   BridgeLogger,
-  CommandSpec,
   SessionSnapshot,
 } from '../kernel/types.ts'
 
@@ -170,26 +169,16 @@ export function resolveRuntime(explicit?: DriverRuntime): DriverRuntime {
 // ── Command line assembly ───────────────────────────────────────────────────
 
 /**
- * Expand a `CommandSpec` + per-run args into a concrete command line.
+ * The ONE argv constructor — `[interpreter, executable, ...argsPrefix, ...args]`
+ * (frozen rule, `docs/design.md` §4).
  *
- * The `interpreter` rule is frozen in `docs/design.md` §4 and exists because
- * WorkBuddy's `cli/bin/codebuddy` is a `#!/usr/bin/env node` script while
- * `node` is not on PATH (verified on this machine):
- * `[interpreter, executable, ...argsPrefix, ...args]`.
+ * Re-exported, not re-implemented: the canonical body lives in
+ * `kernel/command-line.ts` because the kernel's version probe and the drivers'
+ * run path MUST agree on the head of this vector, and the kernel may not import
+ * `drivers/**` (see `src/integrate.ts`). The drivers keep importing it from
+ * here so no call site had to move.
  */
-export function buildCommandLine(
-  spec: CommandSpec,
-  args: readonly string[],
-): { command: string; args: string[] } {
-  const prefix = spec.argsPrefix ?? []
-  if (spec.interpreter !== undefined && spec.interpreter !== '') {
-    return {
-      command: spec.interpreter,
-      args: [spec.executable, ...prefix, ...args],
-    }
-  }
-  return { command: spec.executable, args: [...prefix, ...args] }
-}
+export { buildCommandLine } from '../kernel/command-line.ts'
 
 // ── Blocked flags (multica `blockedArgMode` + `filterCustomArgs`) ───────────
 
