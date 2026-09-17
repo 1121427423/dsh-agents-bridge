@@ -36,6 +36,14 @@
  *    `session/update` notification stream during `session/prompt`). The wire
  *    protocol is pinned in `command.protocolArgs`, never inferred from the
  *    binary name; see tests/fixtures/ACP-PROVENANCE.md.
+ *  - `hermes` → ~/.local/bin/hermes (a `#!/bin/sh` shim into
+ *    ~/.hermes/hermes-agent/venv) → `hermes-agent` 0.21.3, a Python CLI. Its
+ *    ACP face (`hermes acp`, headerless NDJSON JSON-RPC) rides the SAME `acp`
+ *    family, so it is a descriptor, not a dialect (D27/D39). Its capabilities
+ *    were pinned from a live `initialize` + `session/new` probe, and they are
+ *    NOT the codebuddy ones: `session/new` advertises a 252-entry model list
+ *    but ignores a model passed in params, and answers no `configOptions`, so
+ *    `model`/`effort` are declared false (see the entry below).
  *
  * @module dsh-agents-bridge/tracks/cli/catalog
  */
@@ -127,5 +135,53 @@ export const CLI_TRACK_DESCRIPTORS: readonly AgentDescriptor[] = [
     capabilities: { resume: true, model: true, effort: true, mcpConfig: true, clientTools: false },
     notes:
       'The ACP face of the SAME binary as `codebuddy-code` (family `codebuddy`); the two ids are distinct identities and the argv differs only by --acp. Verified 2026-09-17 (2.151.0): headerless NDJSON JSON-RPC on stdio — `initialize` answers protocolVersion/authMethods/agentCapabilities, `session/new` answers sessionId + models.availableModels + configOptions (incl. thought_level), and `session/prompt` streams session/update notifications. NOT verified: a completed turn — this host is not signed in, and the engine answers with exit code 0 plus stopReason "refusal" carrying a 401 only in _meta (the bridge maps that to a failed run, never a "model declined" answer).',
+  },
+  {
+    // DIFFERENT ENGINE, SAME WIRE. `hermes acp` is a Python CLI whose ACP face
+    // is headerless NDJSON JSON-RPC, so it rides the existing `acp` family
+    // (D27) exactly as `codebuddy-code-acp` does. NO `searchPath` is declared:
+    // the install is `~/.local/bin/hermes` (a `#!/bin/sh` shim into the venv)
+    // and `~/.local/bin` is ALREADY an entry in `CLI_SEARCH_PATH`
+    // (src/tracks/cli/index.ts:48), so a GUI host with a truncated PATH still
+    // resolves the bare name.
+    id: 'hermes',
+    track: 'cli',
+    family: 'acp',
+    displayName: 'Hermes Agent CLI over ACP (hermes acp)',
+    // [proven] `hermes acp --version` prints exactly `0.21.3` on this host, and
+    // the argv `hermes acp` ALONE reaches the full handshake (both probes used
+    // exactly those two tokens). [inferred, from findings-hermes-acp.md §3] the
+    // subcommand takes no model/permission flags at all — all turn control is
+    // ACP-over-wire, which is why the acp family exists; no flag is passed here
+    // either way, so the inference cannot change the argv.
+    command: { executable: 'hermes', protocolArgs: ['acp'] },
+    envPrefix: 'HERMES',
+    // PINNED TO A LIVE PROBE, not copied from the codebuddy-code-acp row above.
+    // `initialize` + `session/new` were driven against hermes-agent 0.21.3 on
+    // this host (2026-09-17); the raw frames are checked in as
+    // tests/fixtures/hermes-acp-handshake.ndjson and parsed back in
+    // tests/drivers/hermes-acp.test.ts, which fails if these flags drift from
+    // the capture.
+    //  - resume [proven]: `initialize` advertises agentCapabilities.loadSession
+    //    plus sessionCapabilities.resume, and a live `session/resume` returned a
+    //    normal result (models + modes) with no JSON-RPC error.
+    //  - model: FALSE [proven]: `session/new` ADVERTISES
+    //    models.availableModels (252 entries) + currentModelId, but the model
+    //    was never applied when passed through `session/new` params — both the
+    //    `model` and the `modelId` spelling were silently ignored and
+    //    currentModelId came back unchanged. The driver's ONLY model lever on
+    //    this family is that param, so `model: true` would promise a knob this
+    //    engine does not honour.
+    //  - effort: FALSE [proven]: `session/new` (and `session/resume`) answer NO
+    //    `configOptions` at all, so the driver's effort selector (id/category
+    //    in effort|thought_level|reasoning_effort) resolves to nothing.
+    //  - clientTools: FALSE [proven for this handshake]: no `fs/*` or
+    //    `terminal/*` request was observed from the engine.
+    //  - `mcpConfig` is deliberately NOT claimed: `mcpServers: []` was accepted
+    //    without error but never exercised with a real server, so there is no
+    //    evidence either way.
+    capabilities: { resume: true, model: false, effort: false, clientTools: false },
+    notes:
+      'ACP face of the Hermes Agent CLI (hermes-agent 0.21.3, probed 2026-09-17): `hermes acp` speaks headerless NDJSON JSON-RPC on stdio, stdout clean (adapter INFO logs go to stderr). `initialize` answers protocolVersion 1 + agentInfo + agentCapabilities + authMethods (openrouter, hermes-setup); `session/new` answers sessionId + models (252 availableModels, currentModelId) + modes, and NO configOptions. Two MEASURED negatives keep the capabilities honest: a model passed in session/new params is accepted but ignored (currentModelId never moved), and there is no effort dial — so `model` and `effort` are false rather than copied from `codebuddy-code-acp`. ACCEPTANCE 2026-09-17 (`node --experimental-strip-types scripts/acceptance.ts hermes "Reply with exactly: OK"`): probe available=true version=0.21.3, and the run reached a clean PARSED TERMINAL in 18.7s (no hang) with backendSessionId eeac6539-f93a-4a48-8222-7acd1258e467 — but it is NOT a working turn: status=completed while the only text is the engine\'s own provider failure, "OpenRouter didn\'t answer after 3 attempts … HTTP 404: This model is unavailable for free. The paid version is available now - use this slug instead: minimax/minimax-m3", delivered as an ordinary assistant chunk under a normal end-of-turn. The configured free model slug is refused upstream, and because the ACP layer carries no failure signal the bridge reports `completed`. Do not read that as a working turn — see docs/handoff-blockers.md record 9 and docs/plan.md D39. Known UNPROBED risk: plain `hermes --help` can print lazy-venv-repair banners to stdout on some hosts; the `acp` path was clean here, so the ACP line reader (tryParseJson-per-line) has not been exercised against a real banner. `hermes -z/--oneshot` (final text only) exists as a text fallback and is deliberately NOT the integration — no events.',
   },
 ]

@@ -39,6 +39,7 @@
 | D36 | **设置卡片必须自证身份**：卡片**在每一个渲染状态**（加载中 / 只读 / 失败 / 表单）都打印一行等宽标识 `插件标识： dsh-agents-bridge`，取自**共享常量**（`src/namespace.ts`）而不是宿主返回的数据 —— 所以它在任何状态下都带着身份。标识是**数据不是文案**，两种语言都不翻译 | 操作员在真机浏览器里看到了卡片，却必须**来问我「监督桥设置 这个是你的吗」**。设置页把每个插件的卡片并排列出，一个人类名字（「监督桥设置」/「Bridge settings」）**无法**回答「这是哪个插件」—— 只有命名空间能，而命名空间**就是包名**。同一处还有第二个证据：`src/client/settings.ts` 的模块注释把 key 写成 `agents-bridge`（漏 `dsh-`），**源码自己都在暗示一个错的标识**。这是"人因"缺陷而非功能缺陷：功能全对，只是使用者无法核对 | ✅ 已实现（2 条用例在桩渲染器可触及的首屏状态断言标识；把标识移出该状态后 2/2 真红） |
 | D37 | **设置卡片长得和这一节里其他卡片一样**：一个 `<li>` 卡片 + 一个全宽 header `<button>`（`aria-expanded`、标题、插件标识、未保存 pill、chevron）**默认收起**，点开才渲染表单体（字段 + 放弃/保存）；**读失败时自动展开**（看不见的错误状态不算错误状态），**保存成功后自动收起**（与其他卡片一致）。**不引入宿主的 UI kit** | 操作员第二次反馈：「设置卡片展示修改跟其他的一致, 一个卡片,点击展开,在输入配置框」—— 我原来那张卡片是一个永久展开的表单，和同节其他卡片都不一样。核对宿主源码后确认：那张卡片的观感来自**它自己包内的私有 CSS module**（`PluginCard.module.css`），第三方半边**寻址不到**；共享的 `@deepseek-ai/dsh-client-ui-primitives` 只能借到 `IconChevronDownOutline14` 与 `Tag`，却要让**整个 client half** 多背一个硬模块依赖（缺了它，我的指示器与面板会一起消失）。所以 chevron 用自写 inline SVG、pill 用 `<span>`，chrome 用 inline 样式逼近，卡片保持除 `react` 之外自足 | ✅ 已实现（3 条用例：`<li>` 且默认 `aria-expanded:false` 且**体内一个字段标签都不渲染**；`SettingsFields` 逐字段标注生效时机 / 未知字段按原始 key 渲染。把默认值改成 `true` 后该用例真红） |
 | D38 | **zcode 成为第 7 个方言**：它借用 claude 的**旗标词汇**（`-p/--prompt`、`--output-format stream-json`）但**不共享任何线格式** —— 事件是 ZCode Protocol 信封 `{eventId,seq,sessionId,turnId,type,payload}`，生命周期名带点（`turn.failed`…）；`turn.completed/turn.failed` 事件本身就是协议边界（实测引擎失败后可能**永不退出**），终态一到宽限即杀进程组；prompt 走 argv（它没有 stream-json 输入），`--model`/`--max-turns` 是「help 有、解析器拒」的旗标，既不传也拦；包内 CLI 裸启必挂，`ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` 是官方逃生门 —— descriptor 携带 + driver 从 executable 相对推导兜底 | 桌面端捆绑 CLI 的第三种形状（codebuddy 直接可跑、openclaw 要 profile、zcode 要 env 逃生门）。真机全栈验收已把它推到诚实上限：`scripts/acceptance.ts zcode` 在 1053ms 内落地干净的 `failed`（引擎自己的 CONFIGURATION_ERROR 消息）+ `sess_` 前缀的 `backendSessionId`，**没有挂住**；happy path 被记录 8（账号无模型授权）挡住，测试一律不伪造成功回合（fixtures 分 proven/derived 两档，provenance 文件注明） | ✅ 已实现（18 条新用例；两条负控真红：拆掉边界结算 → 挂起用例超时红；把无终态退出改成 completed → 静默失败用例红。argv-shape 穷尽护栏在注册 case 前自己先红 —— 新方言接线的证据） |
+| D39 | **hermes 成为 ACP 家族的第二个引擎身份**：`hermes acp` 复用既有 `acp` family（D27），描述符 `id: hermes` / `protocolArgs: ['acp']` / `envPrefix: HERMES`，**描述符不声明 `searchPath`**（安装位 `~/.local/bin/hermes` 已在 `CLI_SEARCH_PATH`）。**能力必须从真机 `session/new` 探针逐字段钉死，不许抄 `codebuddy-code-acp` 那一行**：`resume: true`（`initialize` 声明 `sessionCapabilities.resume` + `loadSession`，且实测 `session/resume` 正常返回）、`model: false`（引擎**广播** 252 个模型却**忽略** `session/new` 的模型参数）、`effort: false`（`session/new` 根本不回 `configOptions`）、`clientTools: false`；`mcpConfig` **不声明**（拿真 server 验过才算） | 同一根线上第二个引擎 = 一条描述符而不是一个方言：这正是 D27 存在的理由。抄邻居那一行的代价在这一家是**可见的错**：codebuddy 有能力行里是 `model/effort/mcpConfig: true`，而 hermes 这三项分别被真机探针否掉（模型参数被忽略、没有 `configOptions`、没拿真 MCP server 验过）。**验收（真机，2026-09-17）**：`scripts/acceptance.ts hermes` 干净落地终态（18.7s，非挂起），但形态必须如实记为「`status=completed` 却**没有任何模型输出**」—— 引擎把自己上游的 404 当成普通 assistant 文本 + 正常 end-of-turn 发出。按协议判 completed 是**对的**，因此**不改驱动映射**、不加启发式；上游模型档位问题按 §0 记入 `docs/handoff-blockers.md` 记录 9，人工处置 | ✅ 已实现（`hermes` 描述符 + 11 条 `tests/drivers/hermes-acp.test.ts` + cli/registry/argv-shape 枚举更新 + 真机握手 fixture；**6 条负控全部真红**：`effort→true`、`model→true`、`resume→false`、`argsPrefix:['acp']`（argv 出现相邻重复 token）、身份移出 catalog（11 条红）、把手握手 fixture 写成 node shim（「不修复 node shim」断言红）） |
 
 ## 任务拆分（3 个并行工作流）
 
@@ -603,6 +604,98 @@ schema 库拖进浏览器包（实测客户端产物 0 次 `schemastery` / `node
   2/2 真红（`expected '这些值只影响本插件…' to contain 'dsh-agents-bridge'`）。
 - **仍未由眼睛验证的**：在浏览器里**保存/重置一次**（写路径本身在隔离开与单测里都已证，但没人点过「保存」按钮）。
 
+## 工作流 D39 — Hermes Agent CLI（`hermes acp`）接入为 ACP 身份（2026-09-17）
+
+任务书 `docs/findings-hermes-acp.md`（含本机 live `initialize` 抓包）是权威依据。本节记录**实测到的**、
+以及**如实记录的负面结果**。
+
+### 1. 命中的事实（全部本机实测，`hermes-agent` 0.21.3）
+
+- `hermes` → `~/.local/bin/hermes` → symlink → `~/.hermes/hermes-agent/venv/bin/hermes`，
+  是一个 `#!/bin/sh` 的 shim（**不是** `#!/usr/bin/env node`），所以 CLI 轨道的 node-shim 修复
+  **必须不触发** —— 这一条由 `tests/tracks/cli.test.ts` 的「without repairing anything」用例钉住
+  （把 fixture 改成 node shim 后该断言真红，见负控 F）。
+- `hermes acp --version` **精确输出 `0.21.3`**（`exit=0`），与 `hermes acp` 的 run argv 只差一个
+  `--version`，所以 §D32 的「探测 argv == 跑路径 argv」护栏按构造成立（argv-shape 的通用遍历覆盖）。
+- `hermes acp` = 无头 NDJSON JSON-RPC；**stdout 干净**（适配器体积很大的 INFO 日志全部走 stderr）。
+  这意味着 `findings-hermes-acp.md` §2 里那条「boot 噪声可能落在 stdout」的风险在 ACP 路径上
+  **没有被观察到** —— 因此**不**去伪造一条 banner fixture 假装验证过（如实登记为 UNPROBED 风险）。
+- **`session/new` 探针（本次的关键动作，throwaway 脚本在 `/tmp/hermes-acp-probe.mjs`）**：
+  - `initialize` 回 `protocolVersion: 1`、`agentInfo{name:"hermes-agent",version:"0.21.3"}`、
+    `authMethods = ["openrouter","hermes-setup"]`、
+    `agentCapabilities = {loadSession:true, promptCapabilities:{image:true}, sessionCapabilities:{fork,list,resume}}`；
+  - `session/new` 回 `sessionId` + `models.{availableModels(252), currentModelId}` + `modes`，
+    **完全没有 `configOptions`**。
+- **模型参数被忽略（决定了 `model: false`）**：`session/new` **广播** 252 个模型，但把模型塞进
+  `session/new` 参数（`model` 与 `modelId` 两种拼法都试过）**被静默忽略** ——
+  `currentModelId` 前后都是 `openrouter:minimax/minimax-m3:free`（探针 `/tmp/hermes-acp-model-probe.mjs`、
+  `/tmp/hermes-acp-probe3.mjs`）。驱动的**唯一**模型杠杆就是这个参数，所以抄 codebuddy 的
+  `model: true` 会承诺一个引擎根本不认的旋钮。
+- **`session/resume` 真的可用（决定了 `resume: true`）**：实测返回正常结果（`models`+`modes`，无 JSON-RPC 错误），
+  但结果里**没有 `sessionId`**；驱动的 `extractSessionId(resumed) || opts.resumeSessionId` 回退路径
+  正好接住它。
+- **`effort: false`**：`session/new` 不回 `configOptions`，所以 `extractEffortOption` 在真字节上返回
+  `undefined`（这也是 `tests/drivers/hermes-acp.test.ts` 里与抓包**联动**的那条断言）。
+- **`mcpConfig` 不声明**：`mcpServers: []` 被接受但不报错**不等于**支持 —— 没拿真 server 验过就不声明。
+
+### 2. 交付物
+
+- `src/tracks/cli/catalog.ts`：新增 `hermes`（`family: acp`、`protocolArgs: ['acp']`、
+  `envPrefix: HERMES`、无 `searchPath`），能力行 `{resume:true, model:false, effort:false, clientTools:false}`，
+  `notes` 里写明版本+日期、两个实测负面、验收如实形态、以及 UNPROBED 风险。
+- `tests/fixtures/hermes-acp-handshake.ndjson`：**真机抓包**（`initialize` + `session/new` 两帧；
+  **唯一被节流的字段**是 `models.availableModels` 252→6，其余逐字），
+  provenance 记在 `tests/fixtures/ACP-PROVENANCE.md` 的**追加**小节，既有内容一字未改。
+- `tests/drivers/hermes-acp.test.ts`（11 条）：用**驱动自己的** `extractAuthMethods` /
+  `extractSessionId` / `extractCurrentModelId` / `extractEffortOption` 解析真帧，并断言描述符的
+  能力位与抓包**一致**（`resume` 由 `sessionCapabilities.resume` 派生、`effort` 由
+  `extractEffortOption !== undefined` 派生）。里面还有一条**反向自证**：手写一个带 `thought_level` 的
+  `configOptions` 时 `extractEffortOption` 必须找得到 —— 否则「找不到」这个断言就是空跑的。
+- 枚举型测试更新：`tests/tracks/cli.test.ts`（新增 hermes describe：身份字段、HERMES 命名空间唯一、
+  `~/.local/bin` 已在 `CLI_SEARCH_PATH`、`#!/bin/sh` **不被修复**、HERMES_PATH/INTERPRETER 逃生门、
+  能力行逐字段）、`tests/kernel/registry.test.ts`（必备 id 列表加 `hermes`）、
+  `tests/integration/argv-shape.test.ts`（fixture bin 里加一个 `#!/bin/sh` 的 `hermes`；
+  通用穷尽遍历自动覆盖新身份）。
+
+### 3. 真机验收（`scripts/acceptance.ts hermes`，一次，逐字）
+
+```
+probe  hermes: track=cli available=true
+       executable=/Users/king/.local/bin/hermes version=0.21.3 reason=-
+run    session=sess_756d58a0-4ada-4fbf-be18-968762c57554 status=running
+
+events (6):
+  [status] engine requires authentication; it accepts: openrouter, hermes-setup. Set DSH_AGENTS_BRIDGE_ACP_AUTH_METHOD to one of these to have the bridge authenticate.
+  [status] session eeac6539-f93a-4a48-8222-7acd1258e467 ready
+  [status] running
+  [status] available commands update: 9 commands
+  [status] session info update
+  [text] OpenRouter didn't answer after 3 attempts — it looks temporarily unavailable. Wait a minute and send /retry, or switch models with /model. To avoid this in future, add a backup provider with `hermes fallback add`.  Provider said: HTTP 404: This model is unavailable for free. The paid version is available now - use this slug instead: minimax/minimax-m3
+
+result status=completed exit=0 durationMs=18739
+backendSessionId: eeac6539-f93a-4a48-8222-7acd1258e467
+```
+
+**如实的结论（不美化）**：这是一次**落地干净的解析终态**（18.7s、`exit=0`、拿到 `backendSessionId`、
+**没有挂起**），但**不是一个成功的回合** —— 唯一的文本是引擎自己转述的上游 404，**模型的回答一个 token 都没有**。
+形态上它属于任务书警告的那一类「假的成功」：`status=completed` 而实际没有模型输出。
+根因在引擎侧（把上游失败当普通 assistant 文本 + 正常 end-of-turn），驱动的 `stopReason` 映射**按协议是对的**，
+因此本次**不改驱动、不加启发式**；上游模型档位（免费 slug 已失效）按 §0 记入
+`docs/handoff-blockers.md` **记录 9**，人工在 hermes 自己的配置里处置。
+桥在这个身份上**没有换模型的杠杆**（`session/new` 忽略模型参数），这正是描述符声明
+`model: false` 的意义 —— 不向模型/使用者承诺一个做不到的旋钮。
+
+### 4. 负控（每条都真的先红后绿）
+
+| # | 移除的行为 | 结果 |
+|---|---|---|
+| A | `capabilities.effort: false` → `true` | `hermes-acp.test.ts` 1 红 + `cli.test.ts` 1 红 |
+| B | `capabilities.model: false` → `true` | 同上 2 红 |
+| C | `capabilities.resume: true` → `false` | `hermes-acp.test.ts` 1 红 |
+| D | 给描述符加 `argsPrefix: ['acp']` | `argv-shape.test.ts` 红：`hermes: argv repeats "acp" at positions 1 and 2: /fake/bin/hermes acp acp` |
+| E | 把身份移出 catalog（id 改名模拟未注册） | `hermes-acp.test.ts` + `cli.test.ts` 共 **11 红** |
+| F | 把「不修复 node shim」用例的 fixture 改成 `#!/usr/bin/env node` | 该断言红：`expected '/opt/homebrew/bin/node' to be undefined` |
+
 ## 阶段状态
 
 - [x] 仓库创建 + git init + 骨架（package.json / tsconfig / cordis.patch.yml / build.mjs / types.ts）
@@ -685,17 +778,19 @@ schema 库拖进浏览器包（实测客户端产物 0 次 `schemastery` / `node
 
   - [x] **工作流 H · 宿主 API 取不到 `webServer`，监工面板永远不挂载（2026-09-17）**：真机 web 宿主上插件打印 `host has no webServer` —— 9 个工具全在，**宿主 API 一个都没接上**（client half 即使已带上 ModuleLoader 包装也拿不到数据）。根因**不是**「未声明就不能取」（cordis `reflect.get` 文档明确写着不需要 inject），而是**时序**：宿主的 web server 是 loader 树的另一行，真机比本插件晚 **~800 ms** 才 provide（临时打点实测 `785`），一次性 `ctx.get('webServer')` 于是在**有** web server 的宿主上读到 `undefined`。修复 = **作用域注入** `ctx.inject(['webServer'], scoped => …)`：只在服务可用时挂路由、服务出现自动重跑、服务消失自动卸载，**父 fiber 从不失活**（D16 的 9 个工具一个不少）；`webRuntime` 保持可选（缺席降级为只信 loopback）；路由 disposer 发布给父 effect，在 `manager.dispose()` 之前同步摘掉（cordis 卸载 effects 是并发的）；日志改为陈述状态而非替宿主下结论。**护栏**：`tests/host/wiring.test.ts` 假 ctx 实现 `ctx.inject` 双半契约 + `provide()`，新增 5 个用例（晚到挂载 / 无 webRuntime 照挂 / 晚挂路由可摘 / 服务永不到场工具照常 / 负向日志不得谎报）。同一类 bug 在信任围栏里也有一处：`createApiRouteHandler` 建路由时快照 `trustedHosts`，而 `webRuntime` 在那一刻**仍不存在**（实测 `present:false`），配了 `trustedHosts` 的 LAN 部署会被自己的围栏 403；改为每请求读一次。**证据**：真机前后对比、`POST /agents-bridge/api/status` 真实响应、跨站 403；`pnpm exec vitest run` → **710 passed / 1 skipped（42 个文件）**；`tsc --noEmit` → 0 错误；`pnpm run build` → `lib/index.js` 310.4 KB + `lib/client.js` 59.2 KB；`verify_plugin.py` **11/11 PASS**。详见「工作流 H」一节。
 
+  - [x] **工作流 D39 · Hermes Agent CLI（`hermes acp`）接入为 ACP 身份（2026-09-17）**：`hermes`（`~/.local/bin/hermes` → venv，`#!/bin/sh` shim）复用既有 `acp` family —— **加一个身份 = 加一条描述符**，没有新方言、没有 driver 改动、没有 ABI 变更。能力**逐字段来自真机 `session/new` 探针**而不是抄 `codebuddy-code-acp`：`{resume:true, model:false, effort:false, clientTools:false}`（`session/new` **广播** 252 个模型但**忽略**模型参数；完全不回 `configOptions`），`mcpConfig` 不声明（没拿真 server 验过）。**真机验收如实记录为「干净落地但非成功回合」**：`status=completed exit=0 durationMs=18739`，唯一文本是引擎转述的上游 `HTTP 404: This model is unavailable for free`（默认免费 slug 失效），**零模型输出** —— 不改驱动映射、不加启发式，上游档位问题进 `docs/handoff-blockers.md` 记录 9。**6 条负控全部先红后绿**（能力位三项、`argsPrefix` 重复 token、身份移出 catalog、node-shim 修复误触发）。**证据**：`pnpm exec vitest run` → **779 passed / 1 skipped（47 passed \| 1 skipped 文件）**；`tsc --noEmit` → 0 错误；`node scripts/build.mjs` + `node scripts/build-client.mjs` → 341.3 KB + 73.8 KB；`verify_plugin.py` **11/11 PASS**。详见「工作流 D39」一节。
+
 ## 交付指标（当前）
 
 > 下表所有数字来自**合并工作流 H、D31、`node-shim-note` 与 `settings-surface` 之后的树**（主干）**本机真跑**：`pnpm exec vitest run` / `pnpm exec tsc --noEmit` / `pnpm run build` / `verify_plugin.py`。
 
 | 指标 | 值 |
 |---|---|
-| TS 文件 | **100** 个 `.ts`（src 48 / tests 51 / scripts 1；另有 `scripts/*.mjs` 3 个）—— `find src tests scripts -name '*.ts' \| wc -l` |
-| 测试 | **763 个通过 + 1 skipped（45 passed \| 1 skipped 文件）** —— 基线 704/1；工作流 H 新增 6 个、D31 新增 3 个、`node-shim-note` 新增 6 个、`settings-surface` 新增 15 个（`tests/settings/settings.test.ts` 10 + `tests/host/settings-route.test.ts` 4 + `tests/client/plugin.test.ts` keyed 槽位 1）、**D35 新增 6 个**（同一文件 10 → 16）、**D36 新增 2 个**（`tests/client/components.test.ts` 20 → 22）、**D37 新增 3 个**（同一文件 22 → 25，已验证会真红）、**D38 新增 18 个**（`tests/drivers/zcode.test.ts`，另加 fixtures 两枚 provenance 分级），零删除、零跳过 |
+| TS 文件 | **101** 个 `.ts`（src 48 / tests 52 / scripts 1；另有 `scripts/*.mjs` 3 个）—— `find src tests scripts -name '*.ts' \| wc -l` |
+| 测试 | **779 个通过 + 1 skipped（47 passed \| 1 skipped 文件，共 48 个测试文件）** —— 基线 704/1；工作流 H 新增 6 个、D31 新增 3 个、`node-shim-note` 新增 6 个、`settings-surface` 新增 15 个（`tests/settings/settings.test.ts` 10 + `tests/host/settings-route.test.ts` 4 + `tests/client/plugin.test.ts` keyed 槽位 1）、**D35 新增 6 个**（同一文件 10 → 16）、**D36 新增 2 个**（`tests/client/components.test.ts` 20 → 22）、**D37 新增 3 个**（同一文件 22 → 25，已验证会真红）、**D38 新增 18 个**（`tests/drivers/zcode.test.ts`，另加 fixtures 两枚 provenance 分级）、**D39 新增 16 个**（`tests/drivers/hermes-acp.test.ts` 11 + `tests/tracks/cli.test.ts` 的 hermes describe 5；另加真机握手 fixture 一枚；唯一 skipped 是 `tests/drivers/acp-e2e.test.ts` 的 `DSH_ACP_E2E=1` 选项），零删除 |
 | `tsc --noEmit` | 0 错误 |
-| 构建产物 · `lib/index.js` | 336.6 KB（esbuild，`@deepseek-ai/*` 全部 external） |
-| 构建产物 · `lib/client.js` | 74.1 KB（web platform，`react` 系列 external；带 `window.__ModuleLoader__.load({ id: <包名>, factory })` 包装）。**注意中文以 `\uXXXX` 转义写进产物**（esbuild ASCII charset）：任何「用中文字面量 grep 产物」的检查都是无效检查 —— 要查得先解码，本仓库出现过这个坑 |
+| 构建产物 · `lib/index.js` | 341.3 KB（esbuild，`@deepseek-ai/*` 全部 external） |
+| 构建产物 · `lib/client.js` | 73.8 KB（web platform，`react` 系列 external；带 `window.__ModuleLoader__.load({ id: <包名>, factory })` 包装）。**注意中文以 `\uXXXX` 转义写进产物**（esbuild ASCII charset）：任何「用中文字面量 grep 产物」的检查都是无效检查 —— 要查得先解码，本仓库出现过这个坑 |
 | 工具面 | **9 个**（`agents_probe` / `run` / `run_many` / `status` / `wait` / `output` / `usage` / `cancel` / `send`） |
 | 合同校验 | **`verify_plugin.py` 11/11 PASS**（`pnpm run verify`；等价命令 `python3 /Users/king/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py .`，原始输出见「工作流 G」）。另有监理自检 `.wb-harness/check-contract.mjs` **19/19**（工具，不入交付物） |
 | 端到端集成 | `tests/integration/pipeline.test.ts`（真子进程 + 真 stream-json 解析 + 取消 + usage + resume 指针）全绿；`tests/integration/argv-shape.test.ts`（每个内置身份的最终 argv 形状，5 个用例）全绿 |

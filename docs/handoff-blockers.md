@@ -326,3 +326,58 @@ copilot.tencent.com**，两次产出回合后断线。按规程记录、不无�
   3. （无需再做别的）桥侧 zcode 驱动的端到端验收即可从「被阻塞」转为「可执行」。
 - **禁止的绕法（已拒绝执行）**：手改 `~/.zcode/**`（vendor 状态目录）、伪造 plan entitlement、
   或把 `[inferred]` 的解析映射当 `[proven]` 写进驱动。
+
+---
+
+## 记录 9 — hermes 的默认模型被 OpenRouter 拒（HTTP 404 免费档不可用），而桥报 `completed` 却**没有任何模型输出**（**上游/账号模型可用性故障，只记录、不绕过**）
+
+- **时间**：2026-09-17 20:35 前后（本机 CST），D39 的真机验收。
+- **执行的命令**：
+  ```bash
+  export PATH=/opt/homebrew/bin:$PATH
+  cd /Users/king/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge
+  node --experimental-strip-types scripts/acceptance.ts hermes "Reply with exactly: OK"
+  ```
+- **原始输出（逐字）**：
+  ```
+  probe  hermes: track=cli available=true
+         executable=/Users/king/.local/bin/hermes version=0.21.3 reason=-
+  run    session=sess_756d58a0-4ada-4fbf-be18-968762c57554 status=running
+  [dsh-agents-bridge:acceptance:run:hermes] acp engine advertises auth methods {"authMethods":["openrouter","hermes-setup"]}
+
+  events (6):
+    [status] engine requires authentication; it accepts: openrouter, hermes-setup. Set DSH_AGENTS_BRIDGE_ACP_AUTH_METHOD to one of these to have the bridge authenticate.
+    [status] session eeac6539-f93a-4a48-8222-7acd1258e467 ready
+    [status] running
+    [status] available commands update: 9 commands
+    [status] session info update
+    [text] OpenRouter didn't answer after 3 attempts — it looks temporarily unavailable. Wait a minute and send /retry, or switch models with /model. To avoid this in future, add a backup provider with `hermes fallback add`.  Provider said: HTTP 404: This model is unavailable for free. The paid version is available now - use this slug instead: minimax/minimax-m3
+
+  result status=completed exit=0 durationMs=18739
+  text: <与上一条 [text] 同文>
+  backendSessionId: eeac6539-f93a-4a48-8222-7acd1258e467
+  ```
+  （`acceptance.ts` 以 `exit=0` 结束，即 `current.terminal === true`：**终态确实落地了，没有挂起**。）
+
+- **判定：不是桥的缺陷、不是凭据失效、不是网络问题。**
+  - 凭据是**活的**：`initialize` 的 `authMethods[0] = openrouter`，而且请求**真的到了 OpenRouter** ——
+    404 后面那段话是 OpenRouter 自己的话术（"This model is unavailable for free… use this slug instead"）。
+  - 失败的是**模型档位**：hermes 自己配置里的默认 slug `minimax/minimax-m3:free` 已不再免费，
+    上游要求改用 `minimax/minimax-m3`。这是**账号/上游模型可用性**问题（与本文件记录 8 的 ZCode
+    「账号无模型授权」同族），不是桥能修的。
+- **必须如实记录的形态（本条的重点）**：终态是 `completed`、18.7s、`exit=0`，但**这一回合没有产生任何模型输出** ——
+  唯一的 `[text]` 是引擎自己转述的上游失败。根因在引擎侧：hermes 把上游失败当成**普通 assistant 文本**发出，
+  并在 ACP 层以**正常的 end-of-turn** 收尾；`stopReason` 不在 `refusal | max_tokens | max_turn_requests` 里，
+  所以驱动判 `completed` 是**按协议正确**的行为。**不要**因此去改驱动的 `stopReason` 映射 ——
+  那会把「引擎报告正常结束」改成「桥猜测失败」，是更糟的静默错误。这条留作**已知形态**，
+  而不是靠启发式（"看到 404 就判失败"）去修。
+- **为什么桥在这个身份上没有换模型的杠杆**：`hermes acp` 的 `session/new` **忽略**模型参数 ——
+  实测 `model` 与 `modelId` 两种拼法都被接受但不生效（`currentModelId` 纹丝不动，见
+  `tests/fixtures/ACP-PROVENANCE.md` 的「A SECOND engine on the same wire」）。所以描述符
+  如实声明 `model: false` / `effort: false`（`session/new` 完全不回 `configOptions`）。
+- **未做（有意为之）**：没有改 `~/.hermes/**` 的任何文件、没有换 key、没有改 baseURL、
+  没有为了绕过而重试刷量、没有在驱动里加"文本里出现 404 就判失败"的启发式。
+- **人工待办（唯一动作，在 hermes 自己的配置里，不在本仓库）**：把 hermes 的默认模型换成可用档位 ——
+  paid slug `minimax/minimax-m3`、或在 hermes 内 `/model` 选一个可用模型、或用 `hermes fallback add`
+  配后备 provider。改完复跑同一条 `scripts/acceptance.ts hermes "Reply with exactly: OK"`，
+  期望看到 `[text] OK` 而不是 404 话术。**不要把这条当代码缺陷去查。**

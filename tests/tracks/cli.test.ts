@@ -353,6 +353,78 @@ describe('the codebuddy-code-acp identity on the CLI track', () => {
   })
 })
 
+describe('the hermes identity on the CLI track', () => {
+  it('rides the acp family with its own protocol token and env namespace', () => {
+    const descriptor = builtinDescriptor('hermes')
+    expect(descriptor.track).toBe('cli')
+    expect(descriptor.family).toBe('acp')
+    expect(descriptor.command.executable).toBe('hermes')
+    // `hermes acp` takes no model/permission flags before the subcommand: the
+    // whole turn is ACP-over-wire, so the only argv token is the protocol.
+    expect(descriptor.command.protocolArgs).toEqual(['acp'])
+    expect(descriptor.envPrefix).toBe('HERMES')
+    // Distinct namespace from every other identity, so pinning HERMES_PATH does
+    // not move anything else (and vice versa).
+    const others = BUILTIN_DESCRIPTORS.filter((entry) => entry.id !== 'hermes')
+    expect(others.map((entry) => entry.envPrefix)).not.toContain('HERMES')
+  })
+
+  it('needs no descriptor searchPath: the install is in ~/.local/bin', () => {
+    // `hermes` lives at ~/.local/bin/hermes (a `#!/bin/sh` shim into its venv),
+    // and that directory is already an entry of the SHARED search path — so a
+    // GUI host with a truncated PATH resolves it without a second copy of the
+    // same fact in the descriptor.
+    expect(CLI_SEARCH_PATH).toContain('~/.local/bin')
+    expect(builtinDescriptor('hermes').command.searchPath).toBeUndefined()
+  })
+
+  it('resolves the bare name through the track search path without repairing anything', () => {
+    // The real `hermes` is a POSIX `/bin/sh` shim, NOT a `#!/usr/bin/env node`
+    // script, so the node-shim repair must stay out of the way. A wrong repair
+    // here would be invisible except as a mysterious failure to exec.
+    const bin = path.join(tmpRoot, 'hermes-bin')
+    fs.mkdirSync(bin, { recursive: true })
+    const shim = writeFile('hermes-bin/hermes', '#!/bin/sh\nexec "$@"\n')
+
+    const resolved = createRegistry({
+      env: { PATH: bin },
+      trackPolicyOptions: { searchPath: [bin] },
+      probeVersion: async () => '0.21.3',
+    }).resolve('hermes')
+
+    expect(resolved.reason).toBeUndefined()
+    expect(resolved.executablePath).toBe(shim)
+    expect(resolved.command.interpreter).toBeUndefined()
+    expect(resolved.command.protocolArgs).toEqual(['acp'])
+    expect(resolved.descriptor.family).toBe('acp')
+  })
+
+  it('honours the documented HERMES_PATH / HERMES_INTERPRETER escape hatches', () => {
+    const script = writeFile('hermes-override/hermes-elsewhere', '#!/bin/sh\n')
+    const node = writeFile('hermes-override/node', '#!/bin/sh\n')
+    const resolved = createRegistry({
+      env: { PATH: '', HERMES_PATH: script, HERMES_INTERPRETER: node },
+      trackPolicyOptions: { searchPath: [] },
+    }).resolve('hermes')
+
+    expect(resolved.reason).toBeUndefined()
+    expect(resolved.executablePath).toBe(script)
+    expect(resolved.command.interpreter).toBe(node)
+  })
+
+  it('declares capabilities measured from the real handshake, not copied', () => {
+    // Full row asserted here so the tests/tracks layer also reddens if someone
+    // "harmonises" hermes with codebuddy-code-acp. The measurements live in
+    // tests/drivers/hermes-acp.test.ts (capture) and ACP-PROVENANCE.md.
+    expect(builtinDescriptor('hermes').capabilities).toEqual({
+      resume: true,
+      model: false,
+      effort: false,
+      clientTools: false,
+    })
+  })
+})
+
 function builtinDescriptor(id: string) {
   const found = BUILTIN_DESCRIPTORS.find((descriptor) => descriptor.id === id)
   if (found === undefined) throw new Error(`no built-in descriptor for ${id}`)

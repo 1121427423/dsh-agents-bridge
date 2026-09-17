@@ -12,6 +12,7 @@ traps that cost real time here, both measured rather than read:
 | fixture | provenance | how it was produced |
 |---|---|---|
 | `fake-acp-cli.mjs` | **DERIVED — not captured** | frame shapes transcribed from real captures of `codebuddy-code --acp` 2.151.0; the *sequences* are authored to exercise specific driver branches |
+| `hermes-acp-handshake.ndjson` | **CAPTURED** (exactly one field ABRIDGED — see below) | real `initialize` + `session/new` frames from `hermes acp` (hermes-agent 0.21.3) on this host, 2026-09-17, over real stdio |
 
 There are no `acp-*.ndjson` capture files checked in, and that is deliberate: a
 capture of this engine on this host contains only the auth failure below, so it
@@ -116,3 +117,53 @@ In practice a small Node driver is needed (the handshake is stateful and
 script used here and its only non-obvious trick is that it must keep reading
 stdout *while* writing, or the exchange stalls — the very trap the driver's own
 `deadlock` scenario exists to prevent.
+
+## A SECOND engine on the same wire — `hermes-acp-handshake.ndjson`
+
+Appended 2026-09-17 (D39). Nothing above is changed by this section.
+
+Taken against `/Users/king/.local/bin/hermes` → `~/.hermes/hermes-agent/venv/bin/hermes`,
+**`hermes-agent` 0.21.3**, driving `initialize` → `session/new` over real stdio
+with the throwaway script `/tmp/hermes-acp-probe.mjs`. `hermes acp --version`
+prints exactly `0.21.3` [proven].
+
+Two lines, one JSON-RPC frame each:
+
+* line 1 — the verbatim `initialize` **result** (`agentInfo`, `agentCapabilities`,
+  `authMethods`).
+* line 2 — the `session/new` **result**. **ABRIDGED in exactly one field**:
+  `models.availableModels` was truncated 252 → 6 entries to keep the fixture
+  reviewable. Every other byte is verbatim, including the live `sessionId`
+  (an ephemeral local session id, not a credential).
+
+Measured facts this fixture locks down (all [proven] on this host):
+
+* The framing is the same headerless NDJSON as CodeBuddy's, and **stdout carried
+  ONLY these two frames** — the adapter's very large INFO log went to **stderr**.
+  So the "non-JSON noise on stdout" risk is real but **unobserved on this path**:
+  the driver's per-line `tryParseJson` skip is NOT exercised against a real
+  banner here, and no synthetic banner fixture was invented to pretend otherwise.
+* `authMethods` = `openrouter` + `hermes-setup` (the second is a `type:"terminal"`
+  method with `args:["--setup"]`).
+* `session/new` answers `sessionId` + `models` (`availableModels`,
+  `currentModelId`) + `modes`, and **NO `configOptions`** → an effort dial cannot
+  be claimed (`extractEffortOption` returns `undefined` on these bytes).
+* `agentCapabilities.loadSession: true` and `sessionCapabilities.resume: {}`.
+
+What this fixture deliberately does **not** show (probed separately, same host
+and day, `/tmp/hermes-acp-model-probe.mjs` + `/tmp/hermes-acp-probe3.mjs`):
+
+* Whether `session/new` HONOURS a model param — it does **not**. Passing
+  `model` and the `modelId` spelling both left `currentModelId` at
+  `openrouter:minimax/minimax-m3:free`. The model LIST is real; the SELECTION is
+  not. That measurement is why the descriptor declares `model: false` even
+  though the capture shows 252 models.
+* A `session/resume` call (not in this fixture) returned a normal result
+  (`models` + `modes`, no JSON-RPC error) but **no `sessionId`** — the driver
+  falls back to the caller's pinned id, which is why `resume: true` still holds.
+* A completed turn: the acceptance outcome is recorded in `docs/plan.md`.
+
+Consumer: `tests/drivers/hermes-acp.test.ts` parses both frames with the
+driver's OWN extractors (`extractAuthMethods`, `extractSessionId`,
+`extractCurrentModelId`, `extractEffortOption`) and fails if the descriptor's
+capability flags disagree with these bytes.

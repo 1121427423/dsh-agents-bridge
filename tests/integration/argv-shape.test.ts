@@ -236,6 +236,13 @@ describe('the version probe and the run path build the same argv', () => {
       fs.writeFileSync(file, '#!/usr/bin/env node\n', { mode: 0o755 })
       fs.chmodSync(file, 0o755)
     }
+    // `hermes` is deliberately NOT a node shim: the real install is a POSIX
+    // `/bin/sh` shim into a Python venv, so the CLI track must resolve it
+    // WITHOUT inventing an interpreter. Writing it as a node shim here would
+    // make this file assert a repair that must never happen.
+    const hermes = path.join(binDir, 'hermes')
+    fs.writeFileSync(hermes, '#!/bin/sh\nexec "$@"\n', { mode: 0o755 })
+    fs.chmodSync(hermes, 0o755)
     return binDir
   }
 
