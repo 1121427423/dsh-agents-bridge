@@ -36,7 +36,9 @@
     "build:host": "node scripts/build.mjs",
     "build:client": "node scripts/build-client.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "pretest": "pnpm run build",
+    "test": "vitest run",
+    "verify": "node scripts/verify.mjs"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

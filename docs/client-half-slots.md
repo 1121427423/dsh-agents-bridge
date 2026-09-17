@@ -28,6 +28,14 @@ function apply(ctx) {
 }
 ```
 
+**这份 tail 外面还有一层包装，缺了它整块 UI 静默消失**（工作流 G 的缺陷正在这里）：
+整个产物被 `window.__ModuleLoader__.load({ id: '<包名>', factory: (require) => { … } })`
+包着 —— 宿主在**启动时注册 factory**（模块主体保持惰性），**不是** import 产物后读
+`exports`。所以 `exports.inject` / `apply` 必须出现在 factory 的**返回值**上，`id` 必须
+**等于包名**（我们是 `dsh.bundle.patch` 的 bundle 形态；`dsh-external/<name>` 是
+`client-registry.js` 那种分发形态的 id）。包装由 `scripts/build-client.mjs` 生成，
+`react` 通过 factory 的 `require` 从宿主取。见 D30。
+
 要点（三条都照抄）：
 
 1. **`slots` 是唯一放进 `inject` 的服务**。它是客户端运行时的基础服务，缺失

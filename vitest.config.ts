@@ -14,12 +14,25 @@
  * its non-React logic exercised. Nothing here changes what ships.
  */
 import { fileURLToPath } from 'node:url'
+import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { defineConfig } from 'vitest/config'
 
 const root = path.dirname(fileURLToPath(import.meta.url))
 
+/**
+ * `src/client/identity.ts` reads the package name from the bundler's `define`
+ * (see its module note). The bundle gets it from `scripts/build-client.mjs`;
+ * the tests get it from here, from the SAME `package.json#name`, so a test can
+ * never disagree with what ships. No fallback value on purpose: a missing
+ * define must throw, not quietly pick a name.
+ */
+const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')) as { name: string }
+
 export default defineConfig({
+  define: {
+    __PACKAGE_NAME__: JSON.stringify(pkg.name),
+  },
   resolve: {
     alias: {
       react: path.join(root, 'tests', 'stubs', 'react.ts'),
