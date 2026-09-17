@@ -59,8 +59,26 @@ export const systemClock: Clock = {
   now: () => Date.now(),
 }
 
+/**
+ * The largest delay a single timer can hold: 2^31-1 ms (Node's own ceiling).
+ *
+ * `setTimeout` does not reject a larger delay — it silently rewrites it to
+ * **1 ms** and emits `TimeoutOverflowWarning`. For a watchdog that turns a
+ * caller's "no deadline" (a very large number) into an immediate timeout: the
+ * child is SIGTERM/SIGKILLed right after spawn and the run is reported as a
+ * timeout. `positive()` therefore clamps to this value, and the tool layer caps
+ * the same value at the boundary. Exported so both layers use ONE number.
+ */
+export const MAX_TIMER_DELAY_MS = 2_147_483_647
+
+/**
+ * Normalize a user-supplied window: non-finite/non-positive disables the timer,
+ * and anything above the runtime ceiling is LOWERED to it (never passed
+ * through, which the runtime would collapse to 1 ms).
+ */
 function positive(value: number | undefined): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined
+  return Math.min(Math.floor(value), MAX_TIMER_DELAY_MS)
 }
 
 export function createWatchdog(options: WatchdogOptions): Watchdog {

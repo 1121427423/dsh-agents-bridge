@@ -163,12 +163,15 @@ describe('buildCodebuddyArgs', () => {
     )
   })
 
-  it('declares the two dialect differences from claude', () => {
+  it('declares the dialect differences from claude', () => {
     expect(CODEBUDDY_DIALECT.strictMcpConfigWhenManaged).toBe(false)
     expect(CODEBUDDY_DIALECT.forwardSystemPrompt).toBe(true)
     // codebuddy.go's switch reads no terminal_reason and no async-launch flag.
     expect(CODEBUDDY_DIALECT.readsTerminalReason).toBe(false)
     expect(CODEBUDDY_DIALECT.detectsAsyncLaunch).toBe(false)
+    // The fork's SdkPermissionClient reads `allowed` and treats a missing key
+    // as a denial; claude's reads `behavior` and must never see an extra key.
+    expect(CODEBUDDY_DIALECT.controlResponseIncludesAllowed).toBe(true)
   })
 })
 

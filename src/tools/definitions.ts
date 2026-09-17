@@ -29,6 +29,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { AgentManager, AgentMessage, AgentResult, SessionSnapshot } from '../kernel/types.ts'
 import { AgentRunRejectedError } from '../kernel/types.ts'
+import { MAX_TIMER_DELAY_MS } from '../kernel/watchdog.ts'
 
 /** Lifecycle states a session can be in, in the order a model should reason about them. */
 const RUN_STATUSES = ['running', 'completed', 'failed', 'cancelled', 'timeout'] as const
@@ -58,6 +59,22 @@ const MESSAGE_TYPES = ['text', 'thinking', 'tool_use', 'tool_result', 'status', 
  */
 export const MAX_WAIT_TIMEOUT_MS = 60_000
 export const DEFAULT_WAIT_TIMEOUT_MS = 20_000
+
+/**
+ * Cap a per-run hard deadline at the runtime's timer ceiling.
+ *
+ * The schema leaves `timeoutMs` unbounded on purpose: 0 means "no deadline", so
+ * a caller expressing "this task may take a very long time" writes a very large
+ * number. Node does not reject a `setTimeout` delay above `MAX_TIMER_DELAY_MS` —
+ * it rewrites it to **1 ms**, which would turn that intent into an immediate
+ * timeout. The value is therefore lowered HERE, at the boundary where it enters
+ * the kernel, exactly as `agents_wait` caps its own window at
+ * `MAX_WAIT_TIMEOUT_MS`; the watchdog applies the same clamp again for callers
+ * that reach the kernel directly.
+ */
+function capRunTimeout(timeoutMs: number): number {
+  return Math.min(Math.floor(timeoutMs), MAX_TIMER_DELAY_MS)
+}
 
 /**
  * How often `agents_wait` re-reads the manager's snapshots.
@@ -523,7 +540,8 @@ export function createToolDefinitions(manager: AgentManager) {
       },
       timeoutMs: {
         type: 'integer',
-        description: 'Hard wall-clock deadline in ms. 0 or omitted = no deadline (idle watchdog only).',
+        description:
+          `Hard wall-clock deadline in ms, capped at ${MAX_TIMER_DELAY_MS}. 0 or omitted = no deadline (idle watchdog only).`,
       },
       mode: {
         type: 'string',
@@ -565,7 +583,7 @@ export function createToolDefinitions(manager: AgentManager) {
           ...(args.cwd === undefined ? {} : { cwd: args.cwd }),
           ...(args.model === undefined ? {} : { model: args.model }),
           ...(args.effort === undefined ? {} : { effort: args.effort }),
-          ...(args.timeoutMs === undefined ? {} : { timeoutMs: args.timeoutMs }),
+          ...(args.timeoutMs === undefined ? {} : { timeoutMs: capRunTimeout(args.timeoutMs) }),
           ...(args.mode === undefined ? {} : { mode: args.mode }),
         })
       } catch (err) {
@@ -620,7 +638,10 @@ export function createToolDefinitions(manager: AgentManager) {
             cwd: { type: 'string', description: 'Working directory for this entry. Defaults to the bridge default.' },
             model: { type: 'string', description: 'Model override where the dialect supports one.' },
             effort: { type: 'string', description: 'Runtime-native reasoning effort where the dialect supports it.' },
-            timeoutMs: { type: 'integer', description: 'Hard wall-clock deadline in ms for this entry. 0 = none.' },
+            timeoutMs: {
+              type: 'integer',
+              description: `Hard wall-clock deadline in ms for this entry, capped at ${MAX_TIMER_DELAY_MS}. 0 = none.`,
+            },
           },
         },
       },
@@ -732,7 +753,7 @@ export function createToolDefinitions(manager: AgentManager) {
             ...(entry.cwd === undefined ? {} : { cwd: entry.cwd }),
             ...(entry.model === undefined ? {} : { model: entry.model }),
             ...(entry.effort === undefined ? {} : { effort: entry.effort }),
-            ...(entry.timeoutMs === undefined ? {} : { timeoutMs: entry.timeoutMs }),
+            ...(entry.timeoutMs === undefined ? {} : { timeoutMs: capRunTimeout(entry.timeoutMs) }),
           })
           results.push({
             index,

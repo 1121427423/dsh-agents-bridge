@@ -118,6 +118,21 @@ export interface StreamJsonDialect {
    * returns nothing, so the guard does not exist there (codebuddy.go:245).
    */
   readonly detectsAsyncLaunch: boolean
+  /**
+   * Whether an auto-approval `control_response` also carries `allowed: true`.
+   *
+   * The two permission clients on this fork read DIFFERENT keys of the same
+   * frame: Claude Code reads `behavior`, while CodeBuddy's
+   * `SdkPermissionClientImpl.handleResponse` resolves
+   * `allowed: response.allowed ?? false` — so an approval that omits `allowed`
+   * is read as a denial, and the tool is refused (or the CLI waits for a
+   * confirmation that never arrives). The fork's Go reference
+   * (`server/pkg/agent/codebuddy.go` `handleControlRequest`) sends both keys and
+   * comments that a missing one reads as a rejection; claude's
+   * (`claude.go:483`) sends `behavior` alone. Hence: claude false (its wire must
+   * stay byte-identical), codebuddy true.
+   */
+  readonly controlResponseIncludesAllowed: boolean
 }
 
 export const CLAUDE_DIALECT: StreamJsonDialect = {
@@ -143,6 +158,8 @@ export const CLAUDE_DIALECT: StreamJsonDialect = {
   forwardSystemPrompt: false,
   readsTerminalReason: true,
   detectsAsyncLaunch: true,
+  // Byte-compat: claude reads `behavior` and must not see an extra key.
+  controlResponseIncludesAllowed: false,
 }
 
 // ── argv ────────────────────────────────────────────────────────────────────
@@ -754,13 +771,20 @@ export class ClaudeStreamParser {
     // `async_launched` result and the run would outlive the transcript.
     if (input['run_in_background'] === true) input['run_in_background'] = false
     if (this.#stdinClosed) return
+    // ONE decision object, two wire spellings — the rule lives here so a
+    // dialect cannot half-implement it. `allowed` goes FIRST for codebuddy so
+    // the frame reads in the Go reference's order (allowed, behavior,
+    // updatedInput); claude's bytes are unchanged.
+    const decision = this.#dialect.controlResponseIncludesAllowed
+      ? { allowed: true, behavior: 'allow', updatedInput: input }
+      : { behavior: 'allow', updatedInput: input }
     this.#sink.writeFrame(
       JSON.stringify({
         type: 'control_response',
         response: {
           subtype: 'success',
           request_id: requestId,
-          response: { behavior: 'allow', updatedInput: input },
+          response: decision,
         },
       }) + '\n',
     )

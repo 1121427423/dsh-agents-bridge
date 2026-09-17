@@ -473,6 +473,37 @@ describe('malformed and partial frames', () => {
     expect(response.response.response.updatedInput.run_in_background).toBe(false)
   })
 
+  it('sends `allowed: true` alongside `behavior` — a missing key reads as a DENIAL', () => {
+    const replayed = replayFixture(
+      [
+        '{"type":"control_request","request_id":"req-allow","request":{"input":{"command":"pwd"}}}',
+        '{"type":"result","is_error":false,"result":"OK"}',
+        '',
+      ].join('\n'),
+    )
+    expect(replayed.frames).toHaveLength(1)
+    const response = JSON.parse(replayed.frames[0] ?? '{}') as {
+      type: string
+      response: {
+        subtype: string
+        request_id: string
+        response: { allowed?: boolean; behavior: string; updatedInput: Record<string, unknown> }
+      }
+    }
+    expect(response.type).toBe('control_response')
+    expect(response.response.subtype).toBe('success')
+    // The request_id must be echoed or the CLI cannot match the decision.
+    expect(response.response.request_id).toBe('req-allow')
+    // PROVEN against the shipped bundle (WorkBuddy.app 5.5.6,
+    // cli/dist/codebuddy-headless.js): `SdkPermissionClientImpl.handleResponse`
+    // resolves `allowed: response.allowed ?? false`, so an approval that omits
+    // this key is read as a denial. `behavior` is kept because the fork still
+    // honours Claude Code's spelling on its other permission paths.
+    expect(response.response.response.allowed).toBe(true)
+    expect(response.response.response.behavior).toBe('allow')
+    expect(response.response.response.updatedInput).toEqual({ command: 'pwd' })
+  })
+
   it('does not answer a control_request that arrives after the terminal result', () => {
     const replayed = replayFixture(
       [

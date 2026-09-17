@@ -295,6 +295,9 @@ describe('ClaudeStreamParser', () => {
         response: { behavior: 'allow', updatedInput: { command: 'pwd' } },
       },
     })
+    // Byte-compat with claude: its permission client reads `behavior`, and the
+    // `allowed` key CodeBuddy needs must never appear on claude's wire.
+    expect(first.response.response).not.toHaveProperty('allowed')
     const second = JSON.parse(frames[1] ?? '{}')
     expect(second.response.response.updatedInput).toEqual({
       command: 'sleep 60',
