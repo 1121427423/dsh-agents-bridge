@@ -174,3 +174,23 @@ probe 时被执行」，理想情况给**家目录根一个显式 opt-in**；（
 **IM-1 仍维持 IM 而非 CR**：跨不过权限边界（能种文件者已在以该用户执行代码），也无远程向量；
 只有当 probe 以提权身份运行、或 bundle 路径变得远程可控时才会升级为 CR。修 IM-1 时，
 `~/Applications` 目前被丢弃这点也一并记录 —— 别让"修好了上限 bug"顺手把执行面放大而无人知晓。
+
+### G-2 client / tests-meta 组（1 成立 / 6 降级，已完成）—— 严重度标定被系统性纠偏
+
+> 这一组是"审查高估"的集中体现：7 条 IM 主张里 **6 条被降级**。复核者的反证都落到了具体行号，
+> 因此这里按复核后的真实严重度重编号（MI-10…MI-15），修复仍照做 —— 降级不等于不修。
+
+| ID | 判定 | 位置 | 裁定要点（含反证） |
+|---|---|---|---|
+| IM-14 | **CONFIRMED** | `tsconfig.json:36` + `package.json:38` | `include:["src"]`、`exclude:["tests"]`、无第二份 tsconfig、无 CI、vitest 配置里也没有 `typecheck` 块 → **52 个测试文件（外加 `scripts/acceptance.ts`）完全不在类型门禁内**；`tests/integration/client-bundle.test.ts` 里存在 4 个真 TS2339（273/289×2/290：`module.SETTINGS_SLOT`、`settings?.key`、`module.SETTINGS_NAMESPACE`），因为该文件本地的 `ClientModule`/`Registration` 接口从未补上 `src/client/index.ts:64,72` 已导出的字段 |
+| MI-10 | DOWNGRADED | `client/store.ts:274-275,426-427` | 打开 transcript 期间列表轮询被暂停（`paused: selectedId !== undefined`），而 `loadTranscript` **丢掉** `read.terminal`、`startTranscriptTimer` 只复查内存行 → 会话在观看期间结束会**永远保持 1.2s 轮询**。但"列表再也不更新"被推翻：`closeSession`/`refresh()`/可见性回调都会重跑 `schedule()`。真实代价是**浪费请求**，不是死列表 |
+| MI-11 | DOWNGRADED | `client/indicator.ts:53` | 点击取排序后**第一个 failed** 而非第一个**未见过的** failure → 当已见失败排在未见失败之前时，徽标不下降且打开错的行。"永远清不掉"被推翻：面板每一行都有 `openOutput`（`panel.ts:166-171`）会把该会话标记为已见 |
+| MI-12 | DOWNGRADED | `client/api.ts:282-306` | 20s 看门狗在 299 行清掉、303 行才读 body → 只覆盖"等到响应头"；body 卡住会让面板永久 loading 且无错误。但**仓库内无触发路径**（唯一写者 `host/api.ts:205-212` 同步 writeHead+end），属潜在缺口而非已证挂起 |
+| MI-13 | DOWNGRADED | `kernel/store.ts:174-178` | V8 只在**首个 token** 解析失败时才回显文件字节；`StoredSession` 只存 id/状态/时间戳/cwd/model（transcript 只在内存，`store.ts:1-8`）→ 泄漏被限制在 store 自身约 25 字节头部，且不含任何提示词内容 |
+| MI-14 | DOWNGRADED | `docs/plan.md:790` | 跳测机制实为**三种**（`acp-e2e.test.ts:70` 的 `describe.runIf`；`desktop.test.ts:138` 与 `scan.test.ts:823` 的 `describe.skipIf` 宿主探测，各 2 例），指标表只写了第一种。"静默消失"被推翻：vitest 会把 skipIf 记为 skipped，干净机器上是 +4 skipped，不是 4 个幽灵通过 |
+| MI-15 | DOWNGRADED | `tests/kernel/manager-resume.test.ts:84-86` | `if (status === 'running')` 能静默跳过唯一断言，但**不是**"快宿主"导致（`void manager.cancel()` 的终态要等 await，83 行读取发生在 cancel 的同步前缀内）。真正的洞是**未断言的前置条件**：spawn/fixture 失败会让该测试零断言地变绿 |
+
+**监理独立核对（IM-14）**：`tsc --noEmit --skipLibCheck tests/integration/client-bundle.test.ts` 报 8 条，
+其中 **4 条 TS2339 为真**（273/289×2/290）；另 4 条（TS1259 `esModuleInterop`、TS1343 `import.meta`、
+TS2322、TS2349）是**脱离工程 tsconfig 独立编译的假象**，不计入缺陷。修 IM-14 时必须用
+`tsconfig.tests.json`（继承基准 + `noEmit`）来判定，否则门禁会带进假阳性。
