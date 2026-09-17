@@ -28,6 +28,7 @@ import type {
   ProtocolFamily,
 } from '../../src/kernel/types.ts'
 import type { ProcessExit, SpawnedProcess } from '../../src/drivers/argv.ts'
+import { clampTimerDelay } from '../../src/drivers/argv.ts'
 import { clearDriverRuntime, createBackendWithRuntime } from '../../src/drivers/index.ts'
 import { ZCODE_BUILTIN_PROVIDER_CONFIG_ENV } from '../../src/drivers/zcode.ts'
 import { MAX_TIMER_DELAY_MS } from '../../src/kernel/watchdog.ts'
@@ -269,5 +270,60 @@ describe('RR-MI-5 · config-supplied graces above the ceiling', () => {
     expect(warnings.stop()).toEqual([])
     child.finish(0)
     void handle.done.catch(() => {})
+  })
+})
+
+/**
+ * SV-2 — `clampTimerDelay` used to guard only FINITE delays.
+ *
+ * `Number.isFinite(ms) ? min(…) : ms` let `+Infinity` through untouched, and
+ * `Infinity > 0` is true, so every driver's own "is this a real delay?" guard
+ * waved it on to `setTimeout`, which rewrote it to **1 ms** and warned
+ * (`TimeoutOverflowWarning: Infinity does not fit into a 32-bit signed integer`).
+ * The same tree's `capRunWindow` clamps the same input with `Math.min` — two
+ * guards over the same number, disagreeing — and the helper's own comment
+ * claimed non-finite values were "disarmed by each driver's own `<= 0` guard",
+ * which is false for `+Infinity`.
+ *
+ * Latent, not known-reachable (no live path feeds it `+Infinity` today), which
+ * is why this is a Minor. Fixed anyway: the guard must be total over its input.
+ */
+describe('SV-2 · clampTimerDelay is total over non-finite input', () => {
+  it('clamps +Infinity to the ceiling instead of letting it through to a 1 ms timer', () => {
+    expect(clampTimerDelay(Number.POSITIVE_INFINITY)).toBe(MAX_TIMER_DELAY_MS)
+  })
+
+  it('does not let a clamped +Infinity reach setTimeout as an overflow (the consequence)', async () => {
+    const warnings = watchOverflowWarnings()
+    let fired = false
+    const timer = setTimeout(() => {
+      fired = true
+    }, clampTimerDelay(Number.POSITIVE_INFINITY))
+    await delay(80)
+
+    // The un-clamped value fires in ~1-2 ms and warns; the clamped one is a
+    // 24-day timer that neither fires nor complains.
+    expect(fired).toBe(false)
+    expect(warnings.stop()).toEqual([])
+    clearTimeout(timer)
+  })
+
+  it('negative control — NaN is still passed through, not turned into a deadline', () => {
+    // Why NaN stays: every driver arms on `delay > 0`, and `NaN > 0` is false,
+    // so a NaN delay is already disarmed. Turning it into MAX_TIMER_DELAY_MS
+    // would arm a 24-day timer from what is always a caller bug — the thing
+    // the pass-through exists to surface.
+    expect(Number.isNaN(clampTimerDelay(Number.NaN))).toBe(true)
+    expect(clampTimerDelay(Number.NaN) > 0).toBe(false)
+  })
+
+  it('negative control — every other input is clamped exactly as before', () => {
+    expect(clampTimerDelay(Number.NEGATIVE_INFINITY)).toBe(Number.NEGATIVE_INFINITY)
+    expect(clampTimerDelay(NORMAL_TIMEOUT_MS)).toBe(NORMAL_TIMEOUT_MS)
+    expect(clampTimerDelay(NORMAL_TIMEOUT_MS + 0.7)).toBe(NORMAL_TIMEOUT_MS)
+    expect(clampTimerDelay(OVERFLOW_MS)).toBe(MAX_TIMER_DELAY_MS)
+    // A negative finite delay is also disarmed by the callers' `> 0` guard, and
+    // is left alone for the same reason NaN is.
+    expect(clampTimerDelay(-5)).toBe(-5)
   })
 })

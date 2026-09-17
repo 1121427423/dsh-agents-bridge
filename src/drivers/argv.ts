@@ -551,12 +551,23 @@ export function errorText(err: unknown): string {
  *
  * One number for both layers: this is the kernel's own {@link MAX_TIMER_DELAY_MS}
  * (imported, never re-declared), so the watchdog and the drivers can never drift
- * onto different ceilings. Non-finite values are left untouched — they are
- * disarmed by each driver's own `<= 0` guard, and silently turning `NaN` into a
- * three-week deadline would hide a caller bug.
+ * onto different ceilings.
+ *
+ * `Math.min` is what makes the guard total, and dropping the old
+ * `Number.isFinite` test is the fix (SV-2): `Infinity` used to be handed to
+ * `setTimeout` unchanged, which rewrites it to **1 ms** and warns — and
+ * `Infinity > 0` is true, so no driver's own `<= 0` guard stopped it, whatever
+ * this comment used to claim. `Math.floor(Infinity)` is still `Infinity`, and
+ * `Math.min` then lowers it to the ceiling.
+ *
+ * What is still passed through, and why: `NaN` (every comparison and every
+ * `Math.*` propagates it) and `-Infinity`. Both are disarmed by each driver's
+ * own `> 0` guard, and silently turning a `NaN` delay into a three-week
+ * deadline would hide the caller bug it is meant to surface — the same reason
+ * a negative finite delay is left alone.
  */
 export function clampTimerDelay(ms: number): number {
-  return Number.isFinite(ms) ? Math.min(Math.floor(ms), MAX_TIMER_DELAY_MS) : ms
+  return Math.min(Math.floor(ms), MAX_TIMER_DELAY_MS)
 }
 
 /** Options for {@link readLines}. */
