@@ -125,6 +125,27 @@ describe('desktop track policy', () => {
     expect(outcome.command.argsPrefix).toEqual(['--profile', 'autoclaw'])
     expect(outcome.command.interpreter).toBe('/opt/homebrew/bin/node')
   })
+
+  it('carries protocolArgs through launch, like the CLI policy does (MI-9)', () => {
+    // The ACP driver reads the wire protocol from `deps.command.protocolArgs`
+    // (`src/drivers/acp.ts`). Rebuilding the command field-by-field dropped it,
+    // so an ACP identity on the desktop track would silently launch the default
+    // protocol of the same binary — the CLI policy already spreads it
+    // (`src/tracks/cli/index.ts`), and this is the symmetry guard.
+    const base = descriptor('autoclaw')
+    const asAcp = { ...base, command: { ...base.command, protocolArgs: ['--acp'] } }
+    const outcome = createDesktopPolicy().launch({
+      descriptor: asAcp,
+      executablePath: '/Applications/AutoClaw.app/Contents/Resources/gateway/openclaw/openclaw.mjs',
+      env: { PATH: '' },
+      rawExecutable: asAcp.command.executable,
+    })
+    expect('command' in outcome).toBe(true)
+    if (!('command' in outcome)) return
+    expect(outcome.command.protocolArgs).toEqual(['--acp'])
+    // …without disturbing the fields that were already carried.
+    expect(outcome.command.argsPrefix).toEqual(['--profile', 'autoclaw'])
+  })
 })
 
 /**

@@ -44,6 +44,20 @@
  *     number or a clock. That is what makes it safe to merge into a descriptor
  *     table that a settings override can address by id.
  *
+ *  5. A DISCOVERED IDENTITY IS A CANDIDATE, NEVER AN ENGINE. Every identity this
+ *     scanner emits carries `unsupported`, so neither `agents_run` nor the
+ *     `--version` probe will ever execute it: the launcher is a file the bridge
+ *     did NOT verify, under roots that include the user-writable `~/Applications`,
+ *     and the probe path runs `<exe> --version` with the host user's merged
+ *     environment. The operator opts in by declaring a descriptor for the id
+ *     (`config.descriptors`, `src/index.ts`); a declared descriptor is merged
+ *     BEFORE the scan and therefore shadows the candidate. Provenance
+ *     (`CFBundleIdentifier` vs `product.json darwinBundleIdentifier`) is
+ *     verified and reported so that decision is informed, but it is a
+ *     self-consistency check only — two fields a hostile bundle can both write —
+ *     so it never flips the gate by itself. See `docs/plan.md` §B4 for the
+ *     contract.
+ *
  * The scanner is PURE with respect to the host apart from `fs` itself: roots,
  * the clock and the directory reader are all injectable, which is how the tests
  * build fake bundles in a tmp dir and never look at the real `/Applications`.
@@ -56,7 +70,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import type { AgentDescriptor, ProtocolFamily } from '../../kernel/types.ts'
-import { oneLine, parseJsonObject } from '../host-files.ts'
+import { oneLine, parseJsonObject, redactSecrets } from '../host-files.ts'
 
 /* --------------------------------------------------------------- identity */
 
@@ -187,6 +201,19 @@ const MAX_ENTRIES_PER_DIR = 2_000
 const MAX_BUNDLES_PER_ROOT = 64
 /** Largest file this scanner will open. `product.json` is ~60 KB. */
 const MAX_FILE_BYTES = 4_000_000
+/**
+ * Longest slug allowed to become a descriptor id / env-var prefix. `product.json`
+ * is attacker-supplied, so an `applicationName` of 5 000 characters must not
+ * reach an id, an env prefix or a settings key at full length.
+ */
+const MAX_ID_CHARS = 64
+/**
+ * Longest assembled descriptor text (`notes` / `displayName` / a candidate
+ * reason). Larger than `oneLine`'s 200 because a note legitimately carries
+ * several facts; unlike every fact it is NOT truncated to a single fact's size,
+ * it only has to stay ONE line (see `oneLineText`).
+ */
+const MAX_DESCRIPTOR_TEXT_CHARS = 800
 
 /** Where a bundled CodeBuddy CLI's product file lives, relative to `Contents`. */
 const PRODUCT_CANDIDATES: readonly string[] = [
@@ -254,16 +281,21 @@ const ENGINE_HEAD_BYTES = 64_000
 /**
  * Turn an arbitrary product/bundle name into a stable id fragment.
  *
- * Lower-case, runs of non-alphanumerics collapsed to `-`, trimmed. Chosen so
- * that `WorkBuddy AI` → `workbuddy-ai` (matching the built-in id), which is
- * what makes the collisions with the built-in table line up instead of creating
- * a near-duplicate.
+ * Lower-case, runs of non-alphanumerics collapsed to `-`, trimmed, and CAPPED:
+ * the input is `product.json` or a directory name, i.e. attacker-chosen, and a
+ * 5 000-character `applicationName` must not become a 5 000-character id, env
+ * prefix and settings key. Chosen so that `WorkBuddy AI` → `workbuddy-ai`
+ * (matching the built-in id), which is what makes the collisions with the
+ * built-in table line up instead of creating a near-duplicate.
  */
 export function slugify(raw: string): string {
-  return raw
+  const slug = raw
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
+  if (slug.length <= MAX_ID_CHARS) return slug
+  // Re-trim: the cut can land on a separator.
+  return slug.slice(0, MAX_ID_CHARS).replace(/-+$/g, '')
 }
 
 /** `WorkBuddy AI.app` → `workbuddy-ai`. Never used for identity, only for ids. */
@@ -279,6 +311,40 @@ export function bundleSlug(bundleName: string): string {
  */
 export function envPrefixFor(id: string): string {
   return id.toUpperCase().replace(/[^A-Z0-9]+/g, '_')
+}
+
+/* ------------------------------------------------------------ safe text */
+
+/**
+ * ONE untrusted fact, made safe for a descriptor field.
+ *
+ * `product.json` values and the bundle's own directory name are hostile input,
+ * and the fields they feed are agents_probe OUTPUT COLUMNS: a newline in `notes`
+ * or `displayName` becomes an extra row in the probe table, and a 5 000-char
+ * `applicationName` becomes a 5 000-char cell. So every fact is collapsed to a
+ * single line, credential-looking substrings are masked, and the length is
+ * capped — the same posture as `tracks/host-files.ts` (`oneLine` 200-char cap,
+ * `redactSecrets` at the single point free text leaves a reader) and
+ * `tracks/health.ts`'s `fragment()`.
+ */
+function safeFact(raw: string): string {
+  return redactSecrets(oneLine(raw))
+}
+
+/**
+ * ONE line of descriptor text assembled from several facts.
+ *
+ * Same collapse-and-redact as `safeFact`, but capped at
+ * `MAX_DESCRIPTOR_TEXT_CHARS` rather than a single fact's 200: a note carries
+ * several facts, and truncating it to one fact's size would silently drop the
+ * facts that make a wrong identity diagnosable. The property that must hold is
+ * "one line", not "200 chars".
+ */
+function oneLineText(raw: string): string {
+  const collapsed = redactSecrets(raw.replace(/\s+/g, ' ').trim())
+  return collapsed.length > MAX_DESCRIPTOR_TEXT_CHARS
+    ? `${collapsed.slice(0, MAX_DESCRIPTOR_TEXT_CHARS - 3)}...`
+    : collapsed
 }
 
 /* --------------------------------------------------------------- the walk */
@@ -308,14 +374,19 @@ export function readBundleIdentifier(contentsPath: string, readDir: DirReader): 
   const entries = readDir(contentsPath)
   const plist = entries.find((entry) => entry.name === 'Info.plist' && entry.isFile)
   if (plist === undefined) return undefined
-  try {
-    const xml = fs.readFileSync(path.join(contentsPath, 'Info.plist'), 'utf8')
-    const match = /<key>\s*CFBundleIdentifier\s*<\/key>\s*<string>([^<]{1,200})<\/string>/.exec(xml)
-    const value = match?.[1]?.trim()
-    return value === undefined || value === '' ? undefined : value
-  } catch {
-    return undefined
-  }
+  // The stat is already in hand from the directory listing and it is the FIRST
+  // bound: a 2 GB "Info.plist" must not reach an open at all. Then the READ goes
+  // through `readBounded` like every other untrusted read in this module — a raw
+  // `readFileSync` here bypassed that helper entirely, so a FIFO or a device
+  // node under a user-writable root blocked the whole walk with no way to
+  // interrupt it. This runs for EVERY candidate bundle, which is what made that
+  // reachable rather than theoretical.
+  if (plist.size !== undefined && plist.size > MAX_FILE_BYTES) return undefined
+  const xml = readBounded(path.join(contentsPath, 'Info.plist'))
+  if (xml === undefined) return undefined
+  const match = /<key>\s*CFBundleIdentifier\s*<\/key>\s*<string>([^<]{1,200})<\/string>/.exec(xml)
+  const value = match?.[1]?.trim()
+  return value === undefined || value === '' ? undefined : value
 }
 
 /** Describe one candidate directory as a bundle, or `undefined` if it is not one. */
@@ -350,6 +421,14 @@ function findBundles(root: string, readDir: DirReader, out: AppBundle[]): void {
     if (direct !== undefined) out.push(direct)
     return
   }
+  // The cap is PER ROOT, so `out` may already hold bundles from an earlier root.
+  // Testing `out.length` directly is the IM-10 bug: once root 1 reached
+  // MAX_BUNDLES_PER_ROOT every later root returned immediately, and with the
+  // production roots (`/Applications` first, `~/Applications` second) that made
+  // the user-writable root unreachable on any host with 64+ `.app` in
+  // `/Applications` — i.e. the home root was never scanned at all. The snapshot
+  // is what keeps the bound a bound while letting root 2 be walked.
+  const startLen = out.length
   const candidates: string[] = []
   for (const entry of readDir(root)) {
     if (candidates.length >= MAX_BUNDLES_PER_ROOT) break
@@ -359,7 +438,7 @@ function findBundles(root: string, readDir: DirReader, out: AppBundle[]): void {
   // the order the filesystem happened to hand back. This is what makes the
   // scanned ids reproducible across runs.
   for (const name of candidates.sort()) {
-    if (out.length >= MAX_BUNDLES_PER_ROOT) return
+    if (out.length - startLen >= MAX_BUNDLES_PER_ROOT) return
     const bundle = asBundle(path.join(root, name), readDir)
     if (bundle !== undefined) out.push(bundle)
   }
@@ -429,7 +508,10 @@ export function parseProductIdentity(contents: string): ProductIdentity | undefi
   const record = parsed.value
   const stringField = (key: string): string | undefined => {
     const value = record[key]
-    return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
+    // Every fact is clamped, one-lined and redacted HERE, at the single point
+    // the untrusted file becomes identity data — so the id, the env prefix, the
+    // display name and `notes` are all built from bounded, single-line values.
+    return typeof value === 'string' && value.trim() !== '' ? safeFact(value) : undefined
   }
   const identity: ProductIdentity = {
     ...(stringField('applicationName') !== undefined ? { applicationName: stringField('applicationName') } : {}),
@@ -576,10 +658,12 @@ interface BundleScanContext {
  * The three recognisers are tried in order of how strong their evidence is:
  *
  *   1. a bundled CodeBuddy CLI — the strongest, because `product.json` states
- *      the product's own identity and the launcher beside it is directly
- *      launchable,
+ *      the product's own identity and the launcher beside it is a real
+ *      executable at a real absolute path. Still a CANDIDATE: identity evidence
+ *      is not verification, so it is reported `unsupported` (rule 5),
  *   2. a bundled node engine (an OpenClaw gateway) — inferred from an entry
- *      point plus a family match,
+ *      point plus a family match, `unsupported` because the bridge has no
+ *      verified argv for it,
  *   3. a bundled node interpreter with nothing to run — a CANDIDATE, reported
  *      as `unsupported` because an interpreter alone is not an agent.
  *
@@ -641,7 +725,7 @@ function scanBundle(bundle: AppBundle, context: BundleScanContext): ScannedIdent
           id,
           track: 'desktop',
           family: inferFamily(engineAbsolute, context.families, slugName),
-          displayName: `${bundleDisplayName(bundle)} (bundled engine)`,
+          displayName: oneLineText(`${bundleDisplayName(bundle)} (bundled engine)`),
           command: {
             executable: engineAbsolute,
             ...(interpreter !== undefined ? { interpreter } : {}),
@@ -652,9 +736,14 @@ function scanBundle(bundle: AppBundle, context: BundleScanContext): ScannedIdent
           // how you run it wrong. The desktop track refuses the launch instead
           // (see `bundledEngineDescriptor`).
           unsupported: {
-            reason: `${evidenceNote('bundled node engine', evidence)} — the bridge has no verified argv for this engine, so it will not launch it. Set ${envPrefixFor(id)}_PATH to the entry point and a driver family in settings to enable it.`,
+            // IM-11: this used to tell the operator to "set <PREFIX>_PATH … and
+            // a driver family in settings to enable it". That remedy is INERT —
+            // `registry.resolve()` returns `unsupported` BEFORE the track policy
+            // runs and `manager` refuses every run — so the string was a lie. It
+            // now names the one surface that can actually enable the identity.
+            reason: oneLineText(`${evidenceNote('bundled node engine', evidence)} — the bridge has no verified argv for this engine, so it will not launch it, and a discovered identity is never executed by a probe. To enable it, declare a descriptor for this id in the plugin's config.descriptors (src/index.ts); a declared descriptor shadows this candidate.`),
           },
-          notes: `${evidenceNote('bundled node engine', evidence)}. Discovered by scan, NOT verified: check the entry point and set ${envPrefixFor(id)}_PATH / ${envPrefixFor(id)}_MODEL before a run.`,
+          notes: oneLineText(`${evidenceNote('bundled node engine', evidence)}. Discovered by scan, NOT verified: the entry point is reported for diagnosis until a descriptor in config.descriptors declares it.`),
         },
         evidence,
         shadowedByBuiltin: false,
@@ -675,13 +764,17 @@ function scanBundle(bundle: AppBundle, context: BundleScanContext): ScannedIdent
         id,
         track: 'desktop',
         family: 'generic',
-        displayName: `${bundleDisplayName(bundle)} (bundled node interpreter)`,
+        displayName: oneLineText(`${bundleDisplayName(bundle)} (bundled node interpreter)`),
         command: { executable: interpreter },
         envPrefix: envPrefixFor(id),
         unsupported: {
-          reason: `${evidenceNote('node interpreter', evidence)} — an interpreter cannot be driven on its own; point a descriptor's \`interpreter\` at it (or set ${envPrefixFor(id)}_PATH to a script) and this identity becomes launchable.`,
+          // IM-11: the old remedy ("point a descriptor's `interpreter` at it
+          // (or set <PREFIX>_PATH to a script)") could never fire, because an
+          // `unsupported` descriptor is refused before the track policy sees
+          // it. Name the surface that works.
+          reason: oneLineText(`${evidenceNote('node interpreter', evidence)} — an interpreter cannot be driven on its own, and a discovered identity is never executed by a probe. To use it, declare a descriptor in the plugin's config.descriptors (src/index.ts) whose command.interpreter is this file.`),
         },
-        notes: `Bundled interpreter candidate. Set ${envPrefixFor(id)}_PATH (and ${envPrefixFor(id)}_INTERPRETER if the target is a script) to turn it into a driver.`,
+        notes: oneLineText(`Bundled interpreter candidate. Declare a descriptor in config.descriptors that uses it before anything launches it.`),
       },
       evidence,
       shadowedByBuiltin: false,
@@ -691,24 +784,58 @@ function scanBundle(bundle: AppBundle, context: BundleScanContext): ScannedIdent
   return undefined
 }
 
-/** `WorkBuddy AI.app` → `WorkBuddy AI`. */
+/** `WorkBuddy AI.app` → `WorkBuddy AI` (single line, bounded, redacted). */
 function bundleDisplayName(bundle: AppBundle): string {
   const base = path.basename(bundle.bundlePath)
-  return base.replace(/\.app$/i, '')
+  return safeFact(base.replace(/\.app$/i, ''))
 }
 
 /**
- * The bundled-CLI descriptor.
+ * How a bundle's own two identity files agree about who it is.
+ *
+ * `consistent` means the `Info.plist` `CFBundleIdentifier` equals the
+ * `product.json` `darwinBundleIdentifier`; `inconsistent` means the bundle
+ * contradicts itself; `unknown` means at least one side said nothing. This is a
+ * SELF-CONSISTENCY check, not a signature: a hostile bundle writes both files.
+ * It exists so the operator's opt-in decision is informed, never to flip the
+ * gate — see `bundledCliDescriptor`.
+ */
+type Provenance = 'consistent' | 'inconsistent' | 'unknown'
+
+function provenanceOf(bundle: AppBundle, identity: ProductIdentity): Provenance {
+  if (bundle.bundleIdentifier === undefined || identity.darwinBundleIdentifier === undefined) return 'unknown'
+  return bundle.bundleIdentifier === identity.darwinBundleIdentifier ? 'consistent' : 'inconsistent'
+}
+
+function provenanceNote(provenance: Provenance, bundle: AppBundle, identity: ProductIdentity): string {
+  if (provenance === 'consistent') {
+    return `provenance consistent: CFBundleIdentifier=${bundle.bundleIdentifier} matches darwinBundleIdentifier (self-consistency only — the bridge performs no code-signature check)`
+  }
+  if (provenance === 'inconsistent') {
+    return `provenance INCONSISTENT: CFBundleIdentifier=${bundle.bundleIdentifier} does not match product.json darwinBundleIdentifier=${identity.darwinBundleIdentifier} — the bundle contradicts its own identity files`
+  }
+  return 'provenance unknown: Info.plist and product.json do not both state a bundle identifier, so nothing corroborates this identity'
+}
+
+/**
+ * The bundled-CLI descriptor, which is a CANDIDATE and never launchable.
  *
  * `dataFolderName` is the load-bearing read: it is what makes the SAME
  * byte-identical launcher read `~/.workbuddy` in one bundle and
  * `~/.workbuddy-ai` in the other, so it is surfaced in `notes` rather than
  * silently absorbed.
  *
- * The bundled CLI is treated as LAUNCHABLE (`family: 'codebuddy'`, no
- * `unsupported`) because that dialect is compiled into the bridge and the
- * launcher is a real executable at a real absolute path — the desktop track's
- * own launch rules then decide, which is exactly the separation D21 asks for.
+ * WHY `unsupported` (IM-1): the recogniser matches on SHAPE — a directory
+ * containing `…/cli/product.json` and `bin/codebuddy` — and the shape is all a
+ * hostile bundle has to fake. The descriptor used to be emitted launchable, and
+ * `agents_probe` then executed the discovered launcher (`<exe> --version`) with
+ * the host user's merged environment, on a path a model can trigger, over roots
+ * that include the user-writable `~/Applications`. A file the bridge did not
+ * verify is not an engine; `unsupported` is what makes `registry.resolve()`
+ * refuse it for BOTH a run and the version probe, because both go through that
+ * one function. The operator opts in with an explicit descriptor for the id
+ * (`config.descriptors`), which is merged before the scan and shadows this
+ * candidate; provenance is reported to inform that decision (see above).
  */
 function bundledCliDescriptor(input: {
   readonly id: string
@@ -727,6 +854,7 @@ function bundledCliDescriptor(input: {
   }
   if (identity.endpoint !== undefined) facts.push(`endpoint=${identity.endpoint}`)
   const prefix = envPrefixFor(id)
+  const provenance = provenanceOf(bundle, identity)
 
   const noteParts = [evidenceNote('bundled CodeBuddy CLI', evidence)]
   if (facts.length > 0) noteParts.push(`product.json: ${facts.join(', ')}`)
@@ -736,6 +864,7 @@ function bundledCliDescriptor(input: {
     )
   }
   if (bundle.bundleIdentifier !== undefined) noteParts.push(`CFBundleIdentifier=${bundle.bundleIdentifier}`)
+  noteParts.push(provenanceNote(provenance, bundle, identity))
   // No interpreter is baked in here on purpose: `resolve()` runs the
   // descriptor's interpreter through the same resolver as everything else, so a
   // scanned bundle whose interpreter moved reports an honest "interpreter not
@@ -749,14 +878,18 @@ function bundledCliDescriptor(input: {
     id,
     track: 'desktop',
     family: 'codebuddy',
-    displayName:
+    displayName: oneLineText(
       identity.productName !== undefined
         ? `${identity.productName} (${bundleDisplayName(bundle)})`
         : `${bundleDisplayName(bundle)} (bundled CodeBuddy CLI)`,
+    ),
     command: { executable: launcher },
     envPrefix: prefix,
     capabilities: { resume: true, model: true, effort: true, mcpConfig: true },
-    notes: noteParts.join('. '),
+    unsupported: {
+      reason: oneLineText(`${evidenceNote('bundled CodeBuddy CLI', evidence)} — a scan-discovered bundle is a CANDIDATE: the bridge did not verify this launcher, so it will not launch it and will not execute it for a version probe. To opt in, declare a descriptor for id "${id}" in the plugin's config.descriptors (src/index.ts) with command.executable "${launcher}"; ${prefix}_PATH then only overrides the path of that declared descriptor.`),
+    },
+    notes: oneLineText(noteParts.join('. ')),
   }
 }
 

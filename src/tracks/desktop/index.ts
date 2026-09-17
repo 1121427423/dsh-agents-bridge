@@ -39,6 +39,14 @@ export function createDesktopPolicy(): TrackPolicy {
           ...(interpreterPath !== undefined ? { interpreter: interpreterPath } : {}),
           ...(descriptor.command.argsPrefix !== undefined ? { argsPrefix: descriptor.command.argsPrefix } : {}),
           ...(descriptor.command.env !== undefined ? { env: descriptor.command.env } : {}),
+          // The wire protocol is launch data and must survive the track, exactly
+          // as it does on the CLI side (`tracks/cli/index.ts`): the ACP driver
+          // reads it from `deps.command.protocolArgs`, so dropping it makes an
+          // ACP identity silently launch the same binary on its default protocol
+          // — a wiring fault that looks like an engine fault.
+          ...(descriptor.command.protocolArgs !== undefined
+            ? { protocolArgs: descriptor.command.protocolArgs }
+            : {}),
         },
       }
     },

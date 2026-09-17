@@ -800,3 +800,75 @@ backendSessionId: eeac6539-f93a-4a48-8222-7acd1258e467
 | 真机验收 · **`overridden` 不再误报**（D35，操作员真实 `DSH_HOME`，只读） | 重启到修复后构建的 web 宿主：`POST /agents-bridge/api/settings` → `writable: true`、**`overridden` 命中的字段列表为 `[]`**（修复前是 `allowedCwd`/`deniedCwd`/`allowedAgents` 三个），列表字段 `value: []`（provider 物化）、`defaultCwd`/`maxConcurrent` 为 `undefined`；`{"patch":{"maxConcurrent":0}}` 回 `ok:false, "maxConcurrent must be a positive integer (got 0)"` 且 `~/.dsh/settings.yaml` sha256 不变（`02c15fdf6a3db339…`，无 `dsh-agents-bridge` 节）|
 | 真机验收 · AutoClaw | `status=completed`、`text: AUTOCLAW_OK`、8404 ms（**合并后的树上复跑**，`scripts/acceptance.ts autoclaw`） |
 | 真机验收 · WorkBuddy | 国际版 `workbuddy-ai`：`status=completed`、`text: FINAL_OK`、6273 ms（**合并后的树上复跑**）。国内版 `workbuddy` 上游 ETIMEDOUT，见 `docs/handoff-blockers.md` 记录 1 |
+
+## B4 · scan 轨道信任契约（IM-1 + IM-10 同批，IM-11/12/13 + MI-9）（2026-09-17）
+
+**这一节是扫描行为的契约记录，改 `src/tracks/desktop/scan.ts` 前先读它。**
+
+### 契约（逐字）
+
+> **扫描根下的任何 bundle 都会在 probe 时被执行，除非操作员显式声明它的身份。**
+
+反过来说，本批之后默认行为是：**扫描发现的任何 bundle 都不会在 probe 时被执行，也不会被 run**；唯一的
+启用方式是操作员在 `config.descriptors`（`src/index.ts:74`）里为**同一个 id** 声明一条描述符。这条声明
+在 `mergeDescriptors()` 里先于扫描进入表，`mergeScannedIdentities()` 的「内置/已声明优先」规则因此让声明
+遮蔽（shadow）扫描候选，此后它才像任何普通身份一样被 probe 和 run。
+
+### 机制（为什么是这三行，而不是各自打补丁）
+
+1. `bundledCliDescriptor()` 无条件带 `unsupported`（引擎候选、解释器候选本来就带）。`registry.resolve()`
+   在 `descriptor.unsupported` 时**先于** track policy 返回 `reason`（`registry.ts:523-524`），`probeOne()`
+   因此在 `buildCommandLine` / `probeVersion` **之前**返回 `available:false`；`manager` 在 `manager.ts:576-579`
+   抛 `unsupported-agent`。run 与 `--version` 探针走的是**同一个** `resolve()`，所以「探针要过与 run
+   同一套允许清单」是**一个函数**的性质，不是两处调用点要各自记得对齐。
+2. 家目录根的显式 opt-in 由此**被这条契约涵盖**：`~/Applications` 与 `/Applications` 都不自动可信，
+   「用户可写根需要显式选择」不再是单独开关，而是默认姿态。
+3. 来源校验（`CFBundleIdentifier` vs `product.json` 的 `darwinBundleIdentifier`）**被计算并写进 `notes`**
+   （`provenance consistent` / `provenance INCONSISTENT` / `provenance unknown`），用于让操作员的 opt-in
+   决策有依据；它**本身不翻这个闸** —— 两个字段敌意 bundle 都能写，**本桥不做代码签名校验**（已在 notes
+   里逐字说明，不假装做了）。
+
+### IM-10 为什么必须同批
+
+`findBundles()` 原先用**共享** `out.length` 判 `MAX_BUNDLES_PER_ROOT`：根 1 满了之后每个后续根立即返回。
+生产根序是 `/Applications` → `~/Applications`，本机 `/Applications` 有 100 个 `.app`，于是**用户可写根从来
+没被扫过** —— 这既丢掉了家目录里的身份，也**掩盖了 IM-1**（那条执行路径当时根本没被走到）。改成按根快照
+`startLen` 后该路径被打开，所以信任闸必须在同一批落地，否则修好上限 bug 的净效果是**放大执行面**。
+上限仍是**每根 64**、墙钟预算仍全局。
+
+### 与本契约冲突的旧断言（已改，不删）
+
+- `tests/tracks/scan.test.ts` 的 `produces a descriptor a scanned bundle can actually be launched from`
+  → 改为 `keeps a scanned bundle a candidate through the merge, and the policy pure`：desktop policy 只是
+  接线（声明过的描述符它照样放行），闸不在 policy 而在 `registry.resolve()`。
+- 同文件的 `resolves a discovered identity against its real bundle path` → 改为
+  `resolves a discovered identity to its real path but refuses to launch it (IM-1)`：路径照给（操作员要它），
+  `reason` 必须指向 `config.descriptors`。
+
+### IM-11/12/13 与 MI-9 的落地要点
+
+- **IM-11**：两处 `unsupported.reason` 的伪 remedy（「设 `<PREFIX>_PATH` … 并配 driver family 来 enable」）
+  改为指向 `config.descriptors`。理由：`registry` 先于 policy 返回 unsupported、`manager` 一律拒跑，
+  env 覆盖**永远无法**启用该身份。测试断言 reason 含 `config.descriptors` 且**不匹配** `/_PATH[\s\S]*enable/i`。
+- **IM-12**：`parseProductIdentity` 的每个字符串字段在**唯一入口**过 `safeFact()`（`redactSecrets(oneLine(v))`，
+  200 字符钳）；`slugify()` 输出钳到 64 字符（id / env prefix / settings key 同源）；`notes`/`displayName`/reason
+  过 `oneLineText()`（折叠为一行 + 脱敏 + 800 字符钳）。**有意偏离台账字面**：台账说 notes 过 `oneLine`（200 钳），
+  实测 200 会把 `dataFolderName` / `isOversea` 等可诊断事实整段截掉（`puts the product.json facts into notes`
+  这条既有断言正是要求它们在场）；本批取「必须是一行」这一性质，长度钳值放宽到 800，事实级仍按 200 钳。
+  想回到字面 200 只需改 `MAX_DESCRIPTOR_TEXT_CHARS` 一个常量，但那条诊断断言需同时改。
+- **IM-13**：`readBundleIdentifier` 不再裸 `readFileSync`：先用已 stat 的 `plist.size > MAX_FILE_BYTES` 早拒，
+  再走 `readBounded`（其 stat 正是为了不让 FIFO/设备节点挂死遍历而存在的）。
+- **MI-9**：desktop policy 重建 command 时补 `protocolArgs` 的 spread，与 `tracks/cli/index.ts:186-188` 对称。
+
+### 负控（撤掉修复的真红，全部实测）
+
+| 项 | 负控 → 观测失败 |
+|---|---|
+| IM-1（候选姿态） | 修复前跑新测试：`expected undefined to be defined`（`descriptor.unsupported`） |
+| IM-1（执行面，台账 oracle） | 修复前：种一个 `bin/codebuddy` 为 `touch <marker>` 的 bundle → probe 后 `expected true to be false`（**marker 真被创建**）；修后同一 bundle 由操作员声明时 marker 出现 → oracle 非空跑 |
+| IM-1（探针同闸） | 修复前：`expected true to be false`（未声明的 house-agent `available:true`，即探针真执行了它） |
+| IM-10 | 修复前：`expected [ 'bulk-0', … ] to include 'needle'`（根 2 从未被走） |
+| IM-11 | 修复前：reason 不含 `config.descriptors` |
+| IM-12 | 修复前：`expected '[scan] bundled CodeBuddy CLI discover…' not to contain '\n'`；id 未钳长 |
+| IM-13 | 修复前：4 MB `Info.plist` 仍返回 `'com.huge.app'` |
+| MI-9 | 修复前：`expected undefined to deeply equal [ '--acp' ]` |

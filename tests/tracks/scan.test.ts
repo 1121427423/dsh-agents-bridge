@@ -26,6 +26,7 @@ import {
   mergeScannedIdentities,
   parseProductIdentity,
   productIdentityId,
+  readBundleIdentifier,
   scanDesktopBundles,
   shadowedSummary,
   slugify,
@@ -416,6 +417,133 @@ describe('scanDesktopBundles', () => {
     expect(scan.budgetExhausted).toBe(false)
     expect(scan.elapsedMs).toBeGreaterThanOrEqual(0)
   })
+
+  it('bounds the per-root bundle budget per ROOT, not per scan (IM-10)', () => {
+    // `findBundles` used to test the SHARED `out.length`, so the first root that
+    // reached the cap made every later root return immediately. With the real
+    // roots (`/Applications` first, `~/Applications` second) and 100 `.app` on
+    // the host, the user-writable root was NEVER scanned at all — which is also
+    // what masked IM-1: the home root never entered the execution path.
+    const rootOne = freshRoot()
+    for (let i = 0; i < 65; i += 1) {
+      writeBundle(rootOne, {
+        name: `Bulk${String(i).padStart(3, '0')}.app`,
+        product: productJson({ applicationName: `bulk-${i}` }),
+      })
+    }
+    const rootTwo = freshRoot()
+    writeBundle(rootTwo, { name: 'Needle.app', product: productJson({ applicationName: 'needle' }) })
+
+    const scan = scanDesktopBundles({ roots: [rootOne, rootTwo], budgetMs: 30_000 })
+    const ids = scan.identities.map((entry) => entry.descriptor.id)
+    // Root 1 is still capped at 64: the bound is a bound, not a bug.
+    expect(ids.filter((id) => id.startsWith('bulk-'))).toHaveLength(64)
+    // …and root 2 was actually walked. Before the fix this list has no `needle`.
+    expect(ids).toContain('needle')
+  })
+})
+
+/* -------------------------------------------- scan hardening (IM-11..IM-13) */
+
+describe('scan hardening', () => {
+  it('tells the truth about how to enable a discovered engine (IM-11)', () => {
+    const root = freshRoot()
+    writeBundle(root, {
+      name: 'Gateway.app',
+      files: {
+        'Resources/gateway/acmeopenclaw/acmeopenclaw.mjs': '#!/usr/bin/env node\n// openclaw gateway\n',
+        'Resources/node/darwin-arm64/node': '#!/bin/sh\nexit 0\n',
+      },
+    })
+    writeBundle(root, { name: 'Runtime.app', files: { 'Resources/node/darwin-arm64/node': '#!/bin/sh\nexit 0\n' } })
+    const scan = scanDesktopBundles({ roots: [root] })
+    const engine = scan.identities.find((entry) => entry.descriptor.id === 'acmeopenclaw')!.descriptor
+    const interpreter = scan.identities.find((entry) => entry.descriptor.id === 'runtime-interpreter')!.descriptor
+    for (const descriptor of [engine, interpreter]) {
+      const reason = descriptor.unsupported?.reason ?? ''
+      // The remedy that can actually work: an explicit descriptor.
+      expect(reason).toContain('config.descriptors')
+      // The remedy the ledger proved INERT: `registry.resolve()` returns
+      // `unsupported` BEFORE the track policy runs, and `manager` refuses every
+      // run of such an identity — so an env override can never "enable it".
+      expect(reason).not.toMatch(/_PATH[\s\S]*enable/i)
+    }
+  })
+
+  it('keeps a hostile product.json from forging probe rows (IM-12)', () => {
+    const root = freshRoot()
+    const longApplicationName = `${'a'.repeat(5_000)}end`
+    writeBundle(root, {
+      name: 'Hostile.app',
+      product: productJson({
+        applicationName: `evil\n[probe] forged-row ${longApplicationName}`,
+        productName: 'Evil\n[probe] second-forged-row',
+        dataFolderName: '.evil\nsecond-line',
+        darwinBundleIdentifier: 'com.evil\nmore',
+        endpoint: `https://evil.example/${'b'.repeat(400)}\nBearer sk-ant-abcdefghijklmnopqrstuvwxyz`,
+      }),
+    })
+    const descriptor = scanDesktopBundles({ roots: [root] }).identities[0]!.descriptor
+    const notes = descriptor.notes ?? ''
+    // `notes` is an agents_probe output column: a newline in it becomes a new
+    // TABLE ROW, which is how a bundle forges probe output.
+    expect(notes).not.toContain('\n')
+    expect(notes).not.toContain('\r')
+    expect(descriptor.displayName).not.toContain('\n')
+    expect(descriptor.id).not.toContain('\n')
+    // Each fact is clamped (~200 chars) instead of reproduced verbatim.
+    expect(notes).not.toContain('a'.repeat(300))
+    // The slug that becomes the id AND the env prefix is bounded.
+    expect(descriptor.id.length).toBeLessThanOrEqual(64)
+    expect(envPrefixFor(descriptor.id).length).toBeLessThanOrEqual(64)
+    // Credential-looking text is redacted, not echoed into a probe row.
+    expect(notes).not.toContain('sk-ant-abcdefghijklmnopqrstuvwxyz')
+  })
+
+  it('reports provenance so an operator can judge a candidate (IM-12/IM-1)', () => {
+    const agree = freshRoot()
+    writeBundle(agree, {
+      name: 'Agree.app',
+      product: productJson({ applicationName: 'agree', darwinBundleIdentifier: 'com.example.agree' }),
+      bundleId: 'com.example.agree',
+    })
+    const disagree = freshRoot()
+    writeBundle(disagree, {
+      name: 'Disagree.app',
+      product: productJson({ applicationName: 'disagree', darwinBundleIdentifier: 'com.example.disagree' }),
+      bundleId: 'com.example.attacker',
+    })
+    const agreeNotes = scanDesktopBundles({ roots: [agree] }).identities[0]!.descriptor.notes ?? ''
+    const disagreeNotes = scanDesktopBundles({ roots: [disagree] }).identities[0]!.descriptor.notes ?? ''
+    expect(agreeNotes).toContain('provenance consistent')
+    expect(disagreeNotes).toContain('provenance INCONSISTENT')
+    expect(disagreeNotes).toContain('com.example.attacker')
+  })
+
+  it('never reads an Info.plist above the scanner size cap (IM-13)', () => {
+    // `readBundleIdentifier` used a raw `fs.readFileSync`, bypassing the
+    // scanner's own `readBounded` — whose comment exists precisely because an
+    // untrusted FIFO/2 GB file would hang the walk. The already-stat'ed
+    // `plist.size` was simply ignored, and the function runs for EVERY candidate
+    // bundle under the user-writable root.
+    const root = freshRoot()
+    const hugeContents = path.join(root, 'Huge.app', 'Contents')
+    fs.mkdirSync(hugeContents, { recursive: true })
+    fs.writeFileSync(
+      path.join(hugeContents, 'Info.plist'),
+      `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict>\n<key>CFBundleIdentifier</key>\n<string>com.huge.app</string>\n</dict></plist>\n${'x'.repeat(4_000_001)}`,
+    )
+    expect(readBundleIdentifier(hugeContents, defaultReadDirForTest)).toBeUndefined()
+
+    // Positive control: the same layout, under the cap, still yields the id.
+    const smallContents = path.join(root, 'Small.app', 'Contents')
+    fs.mkdirSync(smallContents, { recursive: true })
+    fs.writeFileSync(
+      path.join(smallContents, 'Info.plist'),
+      '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict>\n<key>CFBundleIdentifier</key>\n<string>com.small.app</string>\n</dict></plist>\n',
+    )
+    expect(readBundleIdentifier(smallContents, defaultReadDirForTest)).toBe('com.small.app')
+  })
 })
 
 /* ----------------------------------------------------------- merge rules */
@@ -475,22 +603,30 @@ describe('built-in descriptors always win over a scan', () => {
     expect(shadowedSummary([])).toBeUndefined()
   })
 
-  it('produces a descriptor a scanned bundle can actually be launched from', () => {
+  it('keeps a scanned bundle a candidate through the merge, and the policy pure', () => {
     const root = freshRoot()
     writeBundle(root, { name: 'HouseAgent.app', product: productJson({ applicationName: 'house-agent' }) })
     const scan = scanDesktopBundles({ roots: [root] })
     const descriptor = scan.identities[0]!.descriptor
-    // The desktop policy refuses a missing executable by naming the app, so a
-    // scanned descriptor that was really launchable must pass through it.
+    // Merging must not weaken the trust gate: the descriptor that lands in the
+    // table is still the CANDIDATE (see the trust-contract suite).
+    expect(descriptor.unsupported).toBeDefined()
+    const merged = mergeScannedIdentities(DESKTOP_TRACK_DESCRIPTORS, scan.identities)
+    expect(merged.descriptors.at(-1)?.unsupported).toBeDefined()
+
+    // The desktop policy is pure WIRING: it happily passes a DECLARED desktop
+    // descriptor through, which is why the launch gate cannot live here — it
+    // lives in `registry.resolve()`, the one point both run and probe share.
+    const declared = { ...descriptor, unsupported: undefined }
     const outcome = createDesktopPolicy().launch({
-      descriptor,
-      executablePath: descriptor.command.executable,
+      descriptor: declared,
+      executablePath: declared.command.executable,
       env: { PATH: '' },
-      rawExecutable: descriptor.command.executable,
+      rawExecutable: declared.command.executable,
     })
     expect('command' in outcome).toBe(true)
     if (!('command' in outcome)) return
-    expect(outcome.command.executable).toBe(descriptor.command.executable)
+    expect(outcome.command.executable).toBe(declared.command.executable)
   })
 })
 
@@ -603,7 +739,7 @@ describe('registry integration', () => {
     expect(scans).toBe(afterFirst)
   })
 
-  it('resolves a discovered identity against its real bundle path', async () => {
+  it('resolves a discovered identity to its real path but refuses to launch it (IM-1)', async () => {
     const root = freshRoot()
     const bundlePath = writeBundle(root, {
       name: 'HouseAgent.app',
@@ -613,11 +749,14 @@ describe('registry integration', () => {
     // The scan has to run before `resolve` knows the id.
     await registry.probe()
     const resolved = registry.resolve('house-agent')
-    expect(resolved.reason).toBeUndefined()
+    // The path is still resolved and reported — that is the fact an operator
+    // needs to declare the identity — but the identity is NOT launchable.
     expect(resolved.executablePath).toBe(
       path.join(bundlePath, 'Contents', 'Resources', 'app.asar.unpacked', 'cli', 'bin', 'codebuddy'),
     )
     expect(resolved.descriptor.track).toBe('desktop')
+    expect(resolved.reason).toContain('config.descriptors')
+    expect(resolved.descriptor.unsupported).toBeDefined()
   })
 
   it('leaves every built-in identity available exactly as it was before the scan', async () => {
@@ -811,6 +950,148 @@ describe('registry integration', () => {
       ;(fs as unknown as { readdirSync: typeof realReaddir }).readdirSync = realReaddir
     }
     expect(hostReads.length).toBeGreaterThan(0)
+  })
+})
+
+/* ------------------------------------------------- trust contract (IM-1) */
+
+/**
+ * A bundle the scan discovers is a CANDIDATE, never an engine.
+ *
+ * Before this suite the scanner handed the registry a LAUNCHABLE descriptor for
+ * any directory shaped like
+ * `X.app/Contents/Resources/[app.asar.unpacked/]cli/product.json` +
+ * `bin/codebuddy`, and `agents_probe` then EXECUTED it (`<launcher> --version`)
+ * on a path a model can trigger, over roots that include the user-writable
+ * `~/Applications`. IM-10 masked that root; the per-root budget above turns it
+ * back on, so the trust gate had to land in the same batch.
+ *
+ * The contract: the scanned identity carries the discovered path (so an
+ * operator can act on it), it is reported `unsupported` with a truthful reason,
+ * and it is never executed — not by a run, not by the version probe. The single
+ * opt-in is an explicit descriptor for the same id (`config.descriptors`), which
+ * shadows the candidate and is then launched and probed like any declared
+ * identity. The run path (manager) and the probe path (registry) both funnel
+ * through `resolve()`, so "the version probe passes the same allow-list as a
+ * run" is a property of ONE function rather than two call sites to keep in sync.
+ */
+describe('scanned bundles are candidates, never auto-launchable (IM-1)', () => {
+  it('reports a discovered bundled CLI as `unsupported`, naming the real opt-in', () => {
+    const root = freshRoot()
+    writeBundle(root, {
+      name: 'HouseAgent.app',
+      product: productJson({ applicationName: 'house-agent', darwinBundleIdentifier: 'com.example.house' }),
+      bundleId: 'com.example.house',
+    })
+    const descriptor = scanDesktopBundles({ roots: [root] }).identities[0]!.descriptor
+    expect(descriptor.unsupported).toBeDefined()
+    const reason = descriptor.unsupported?.reason ?? ''
+    // The remedy that can actually work…
+    expect(reason).toContain('config.descriptors')
+    expect(reason).toContain('house-agent')
+    // …the word that makes the posture explicit…
+    expect(reason.toLowerCase()).toContain('candidate')
+    // …and the launcher path, so the operator does not have to re-derive it.
+    expect(reason).toContain(descriptor.command.executable)
+    // The descriptor still carries the launch path for a DECLARED descriptor.
+    expect(descriptor.command.executable).toContain('HouseAgent.app')
+  })
+
+  it('never executes a scanned bundle during a probe (marker oracle)', async () => {
+    const root = freshRoot()
+    const marker = path.join(root, 'EXECUTED-BY-PROBE')
+    const bundlePath = writeBundle(root, {
+      name: 'Hostile.app',
+      product: productJson({ applicationName: 'hostile' }),
+    })
+    const launcher = path.join(bundlePath, 'Contents', 'Resources', 'app.asar.unpacked', 'cli', 'bin', 'codebuddy')
+    // An executable that proves it ran by touching a marker, then answers the
+    // version probe — i.e. the exact shape a hostile bundle would take.
+    fs.writeFileSync(launcher, `#!/bin/sh\n/usr/bin/touch "${marker}"\n/usr/bin/printf '9.9.9\\n'\n`, { mode: 0o755 })
+    const registryOptions = {
+      env: { PATH: '' },
+      scan: { roots: [root] },
+      portProbe: false,
+      trackPolicyOptions: { searchPath: [] },
+      hostOptions: { home: '/home/test', contents: {} },
+    } as const
+    // NO injected probeVersion here on purpose: the REAL default spawner is the
+    // code path IM-1 is about.
+    await createRegistry({ ...registryOptions }).probe()
+    expect(fs.existsSync(marker)).toBe(false)
+
+    // Negative control for the ORACLE ITSELF (so "no marker" cannot pass
+    // vacuously): the SAME bundle, opted in the same way an operator would,
+    // really does execute. §H discipline applied to the test.
+    await createRegistry({
+      ...registryOptions,
+      extraDescriptors: [
+        {
+          id: 'hostile',
+          track: 'desktop',
+          family: 'codebuddy',
+          displayName: 'Hostile (operator-declared)',
+          command: { executable: launcher },
+          envPrefix: 'HOSTILE',
+        },
+      ],
+    }).probe()
+    expect(fs.existsSync(marker)).toBe(true)
+  })
+
+  it('gates the version probe with the same allow-list as a run', async () => {
+    const root = freshRoot()
+    const bundlePath = writeBundle(root, {
+      name: 'HouseAgent.app',
+      product: productJson({ applicationName: 'house-agent' }),
+    })
+    const launcher = path.join(bundlePath, 'Contents', 'Resources', 'app.asar.unpacked', 'cli', 'bin', 'codebuddy')
+    const base = {
+      env: { PATH: '' },
+      scan: { roots: [root] },
+      portProbe: false,
+      trackPolicyOptions: { searchPath: [] },
+      hostOptions: { home: '/home/test', contents: {} },
+    }
+    const undeclaredProbes: string[] = []
+    const undeclared = createRegistry({
+      ...base,
+      probeVersion: async ({ argv }) => {
+        undeclaredProbes.push(argv[0] ?? '')
+        return '1.2.3'
+      },
+    })
+    const before = await undeclared.probe()
+    expect(before.find((entry) => entry.id === 'house-agent')?.available).toBe(false)
+    // The launcher is never spawned while undeclared. (`not.toContain` rather
+    // than `toEqual([])`: a built-in desktop identity may legitimately be
+    // probed on a host that has the real bundles installed.)
+    expect(undeclaredProbes).not.toContain(launcher)
+
+    const declaredProbes: string[] = []
+    const declared = createRegistry({
+      ...base,
+      probeVersion: async ({ argv }) => {
+        declaredProbes.push(argv[0] ?? '')
+        return '1.2.3'
+      },
+      // The opt-in an operator actually has: an explicit descriptor.
+      extraDescriptors: [
+        {
+          id: 'house-agent',
+          track: 'desktop',
+          family: 'codebuddy',
+          displayName: 'House agent (operator-declared)',
+          command: { executable: launcher },
+          envPrefix: 'HOUSE_AGENT',
+        },
+      ],
+    })
+    const after = await declared.probe()
+    const row = after.find((entry) => entry.id === 'house-agent')
+    expect(row?.available).toBe(true)
+    expect(row?.version).toBe('1.2.3')
+    expect(declaredProbes).toContain(launcher)
   })
 })
 
