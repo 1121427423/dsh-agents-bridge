@@ -877,3 +877,46 @@ forward vs reverse）。
    可复制去声明 descriptor），但**任何未来新增的模型可见渲染路径都必须自己过一遍 `renderExecutablePath`**；
    目前 `agents_probe` 是唯一一处。
    这是「宁可漏杀不可错杀」的取向，已在 §O-5 的「附加字段、无需裁决」前提下选定。
+
+## R. 监理核验：批次 B（独立门禁 + 监理自写 oracle）（2026-09-18）
+
+提交：**`cba18aa`**（树已干净；本节与两条新条目随该提交落盘）。监理**未改任何被测实现**，只新增了临时 oracle 文件
+（跑完即删，未入库），因此本节所有数字都是对 `cba18aa` 那棵树的重跑。
+
+### R-1 门禁（监理亲跑，与批次 B 自报逐位一致）
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| vitest | `node node_modules/vitest/vitest.mjs run` | **891 passed / 1 skipped（892）**，56 文件通过 / 1 skipped |
+| tsc(src) | `node node_modules/typescript/bin/tsc --noEmit` | **exit 0** |
+| tsc(tests) | `... tsc --noEmit -p tsconfig.tests.json` | **exit 0** |
+| build | `node scripts/build.mjs` | `lib/index.js` **370.7kb** |
+| build-client | `node scripts/build-client.mjs` | `lib/client.js` **74.7kb** |
+| 插件校验 | `verify_plugin.py .` | **11/11 PASS** |
+
+无残留进程（`sleep 30` / `codebuddy -p` 计数为 0），`git status` 仅本批 7 个路径。
+
+### R-2 监理自写 oracle（与被测者测试**不同构造**，跑完即删）
+
+1. **RR-IM-5 · 换行字母表扩容**：同一真实工具面（`ManagerPool` → 真 scan → 真 probe → 真 `renderTool`），把
+   目录名里的终止符换成 **LF / CR / CRLF / VT / FF / LS(U+2028) / PS(U+2029) / NEL(U+0085)** 八种，每种都断言
+   `lines.length === value.length + 2`、每行以 `✓`/`✗` 开头、且伪造行 `✓ forged […]` **不存在**、`path=/etc/passwd`
+   **不出现**。**结果：8/8 通过**。另测「恶意叠加超长」（>200 字符且含换行 + 伪造行）仍为单行。
+   附带结论（读码非猜测）：`\s` 覆盖前七种，**NEL(U+0085) 不在 JS `\s` 内**，但 NEL 也不是本渲染器的行分隔符，
+   故不构成伪造行通道 —— 记录为已知边界，不作为缺陷。
+2. **RR-IM-5 · `reason` 通道**（被测者未单独隔离的一条）：把 `sk-ant-…` 放进 bundle 目录名，断言**整段渲染文本**
+   既不含该串也不含原始路径，且 `✗` 行数 === 不可用条目数。**通过** —— 依据 `scan.ts:343-348` 的 `oneLineText`
+   = 折叠 + `redactSecrets`（与 `renderExecutablePath` 同一取向）。
+3. **RR-MI-1 / MI-8 · 在真门面上（不是 registry 直调）**：空 root 首跑 → 运行中装入 `Late.app` →
+   `probe({refresh:true})` 仍**看不见**（MI-8 保持）→ `probe({rescan:true})` **看得见**，且重复调用只出 1 条。
+   **通过** —— 证实 §Q 那条「运行期可达」的自述为真。
+
+### R-3 监理新发现（两 条，均由批次 B 的「如实记账」升级而来）
+
+| id | 位置 | 性质 | 处置 |
+|---|---|---|---|
+| **RR-MI-1b** | `src/kernel/types.ts:476`（门面签名）+ `src/host/api.ts:544`（`probe` 路由）+ `src/client/api.ts:374` | **RR-MI-1 的用户可见面仍未闭环**：registry 有 verb、门面运行期能透传，但**面板 Refresh 仍只做版本重探**，操作员装完 app 依旧无法让面板看见它。批次的验收判据（清 scan memo）已满足，故此条是**新条目**，不是把 RR-MI-1 判回未修 | 批次 D（一处 fenced 改动，见下） |
+| **SV-1**（监理编号） | `src/tools/definitions.ts:215-220` | **中间省略会切断代理对**：`head = slice(0,100)` 落在星面字符中间时产出**孤立高代理**。实测（监理 oracle）：目录名含 😀 且恰好落在第 99 个 code unit 时，渲染值 = `…s/s/a\ud83d…t/t/t`，`loneSurrogate=true`，长度仍 200。**不构成伪造行**（折叠与长度界都仍成立），纯观感/编码瑕疵，严重度 trivial | 批次 D（与 RR-MI-1b 同批，均为「小口子」） |
+
+**审计式自评**：这两条都是监理这边发现、被测者报告里没有的。它们的共同特征是**「修好了机制、没修好用户可见结果」**与
+**「边界只差一个 code unit」** —— 与 §O 里 3 条 CR 被降级、15 条 IM 被证实同源：**用户可见面**比机制面更容易漏。
