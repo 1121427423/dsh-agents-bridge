@@ -546,4 +546,7 @@ export const DEFAULT_IDLE_TIMEOUT_MS = {
   codebuddy: 300_000,
   openclaw: 600_000,
   generic: 300_000,
+  // zcode streams lifecycle events throughout a turn; 300s of SILENCE from an
+  // engine whose turn-failure event arrives in seconds is a stall, not thought.
+  zcode: 300_000,
 } as const

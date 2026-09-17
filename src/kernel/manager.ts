@@ -74,6 +74,8 @@ const DEFAULT_IDLE_TIMEOUT_MS: Readonly<Record<ProtocolFamily, number>> = {
   // two different thresholds. ACP engines are long-lived services that can sit
   // quiet between `session/update` notifications, so this is not a "fast" family.
   acp: 300_000,
+  // Must equal `DEFAULT_IDLE_TIMEOUT_MS.zcode` in src/drivers/argv.ts (D38).
+  zcode: 300_000,
 }
 
 function defaultIdleMs(family: ProtocolFamily): number {

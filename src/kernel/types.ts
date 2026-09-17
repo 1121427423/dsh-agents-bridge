@@ -70,8 +70,14 @@ export type AgentId = string
  * NDJSON over the child's stdin/stdout. It is the one family here that is a
  * cross-vendor standard rather than a vendor dialect, which is why it is the
  * family that unlocks the most identities per line of driver code.
+ *
+ * `'zcode'` (ABI v5, D38) is the ZCode Protocol the CLI bundled inside
+ * ZCode.app streams with `--output-format stream-json`: NDJSON envelopes
+ * `{eventId, seq, sessionId, turnId, type, payload}` with dotted lifecycle
+ * names. It mimics the claude FLAG names but shares no wire with claude —
+ * see docs/findings-zcode-headless.md §3 for the measured envelope.
  */
-export type ProtocolFamily = 'claude' | 'codebuddy' | 'codex' | 'openclaw' | 'acp' | 'generic'
+export type ProtocolFamily = 'claude' | 'codebuddy' | 'codex' | 'openclaw' | 'acp' | 'generic' | 'zcode'
 
 /**
  * Integration track: HOW the bridge obtains a launchable engine. This is a

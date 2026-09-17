@@ -428,7 +428,7 @@ export function createToolDefinitions(manager: AgentManager) {
             id: { type: 'string' },
             displayName: { type: 'string' },
             track: { type: 'string', enum: ['cli', 'desktop'] },
-            family: { type: 'string', enum: ['claude', 'codebuddy', 'codex', 'openclaw', 'acp', 'generic'] },
+            family: { type: 'string', enum: ['claude', 'codebuddy', 'codex', 'openclaw', 'acp', 'generic', 'zcode'] },
             available: { type: 'boolean' },
             executable: { type: 'string' },
             version: { type: 'string' },

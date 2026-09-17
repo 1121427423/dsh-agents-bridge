@@ -50,6 +50,18 @@ const WORKBUDDY_AI_CLI =
 const AUTOCLAW_ENGINE = '/Applications/AutoClaw.app/Contents/Resources/gateway/openclaw/openclaw.mjs'
 /** Homebrew node: the interpreter the bundled engines need. */
 const BUNDLED_NODE = '/opt/homebrew/bin/node'
+/**
+ * ZCode.app ships its agent CLI as a plain node bundle [proven 0.16.5]. Unlike
+ * WorkBuddy's launcher it CANNOT be executed bare: it resolves its built-in
+ * provider config relative to `process.argv[1]` and the in-bundle layout
+ * matches neither candidate, so a bare launch dies with
+ * 「无法定位 CLI ZCode Built-in Provider Config」. The documented escape hatch
+ * is the env var below, which the driver also derives from the executable as a
+ * fallback. See docs/findings-zcode-headless.md §1.
+ */
+const ZCODE_CLI = '/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs'
+const ZCODE_BUILTIN_PROVIDER_CONFIG =
+  '/Applications/ZCode.app/Contents/Resources/config/provider/zcode-builtin.json'
 
 /** The desktop-track identities, in probe order. */
 export const DESKTOP_TRACK_DESCRIPTORS: readonly AgentDescriptor[] = [
@@ -92,6 +104,25 @@ export const DESKTOP_TRACK_DESCRIPTORS: readonly AgentDescriptor[] = [
     capabilities: { resume: true, model: true },
     notes:
       'Runs with `--profile autoclaw` (descriptor-supplied, NOT driver-supplied): the default profile loads ~/.openclaw/openclaw.json and fails config validation. `agent` is emitted by the driver, never by this prefix. Its proxy credential is bound to the client system prompt, so this identity is usable as an EXECUTOR only, never as a generic upstream.',
+  },
+  {
+    id: 'zcode',
+    track: 'desktop',
+    family: 'zcode',
+    displayName: 'ZCode (bundled CLI)',
+    command: {
+      executable: ZCODE_CLI,
+      interpreter: BUNDLED_NODE,
+      env: { ZCODE_BUILTIN_PROVIDER_CONFIG_FILE: ZCODE_BUILTIN_PROVIDER_CONFIG },
+    },
+    envPrefix: 'ZCODE',
+    // `model: false` is not a missing feature — 0.16.5's parser REJECTS
+    // `--model` (its own help advertises it; the binary disagrees) [proven].
+    // Selection travels in the engine's own defaultModelSelection store, and
+    // `--max-turns` is likewise help-but-not-parser [proven §2].
+    capabilities: { resume: true, model: false, effort: false, mcpConfig: false },
+    notes:
+      'Headless contract (proven 0.16.5 up to the entitlement wall, docs/handoff-blockers.md record 8): `node zcode.cjs --prompt <text> --output-format stream-json` with ZCODE_BUILTIN_PROVIDER_CONFIG_FILE set; sessions continue via `--resume sess_…`; auth is the app login (Z.AI OAuth, encrypted credential store). A host whose plans are not entitled fails EVERY turn with turn.failed CONFIGURATION_ERROR "Select a model before continuing" — that is the account, not the bridge.',
   },
   {
     id: 'mimo',

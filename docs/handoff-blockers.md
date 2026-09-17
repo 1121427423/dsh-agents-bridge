@@ -90,6 +90,15 @@ text: OK1
 
 ---
 
+### 1.3 D38 派发再次撞上上游（2026-09-17，两次，均为网络/服务侧）
+
+第一次：`400 model [default-model] service info not found`（账号侧模型服务查不到，
+而它自己列出的"支持模型"里就有 default-model —— 上游自相矛盾）。第二次：`--model fast-model`
+换旗标后正常开工（读了 spec 与 pitfalls 两轮），随后 **502 socket hang up →
+copilot.tencent.com**，两次产出回合后断线。按规程记录、不无限重试：D38 由监理方直接实施
+（与 D35–D37 同一处置），全部护栏仍按「先红后绿 + 负控」执行。workbuddy 恢复判据 =
+一次真实的 `-p` 回合完整跑到 result。
+
 ## 记录 2 — 子代理调查 `app.asar` 长时间无产出（非模型故障，属工具局限）
 
 - **时间**：2026-09-16T18:52Z 起，约 45 分钟后由协调者主动终止

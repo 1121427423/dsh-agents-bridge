@@ -54,6 +54,7 @@ import { createCodexBackend } from './codex.ts'
 import { createGenericBackend } from './generic-argv.ts'
 import { createOpenclawBackend } from './openclaw.ts'
 import { createAcpBackend } from './acp.ts'
+import { createZcodeBackend } from './zcode.ts'
 
 /**
  * The dialects implemented in v1, in the order the model-facing tool should
@@ -63,6 +64,11 @@ import { createAcpBackend } from './acp.ts'
  *
  * `acp` is the v4 addition (decision D27): one entry unlocks every CLI that
  * speaks the Agent Client Protocol, regardless of which vendor ships it.
+ *
+ * `zcode` is the v5 addition (decision D38): the ZCode Protocol of the CLI
+ * bundled inside ZCode.app. It shares claude's FLAG vocabulary but not its
+ * wire, which is exactly why it needed its own entry instead of a codebuddy
+ * dialect (see docs/findings-zcode-headless.md §3).
  */
 export const DRIVER_FAMILIES: readonly ProtocolFamily[] = [
   'claude',
@@ -71,6 +77,7 @@ export const DRIVER_FAMILIES: readonly ProtocolFamily[] = [
   'openclaw',
   'acp',
   'generic',
+  'zcode',
 ]
 
 /**
@@ -98,6 +105,8 @@ export function createBackend(family: ProtocolFamily, deps: DriverDeps): AgentBa
       return createAcpBackend(deps)
     case 'generic':
       return createGenericBackend(deps)
+    case 'zcode':
+      return createZcodeBackend(deps)
     default:
       // Reachable from JS/config even though the union is closed in TS.
       throw new Error(
@@ -132,6 +141,8 @@ export function createBackendWithRuntime(
       return createAcpBackend(deps, runtime)
     case 'generic':
       return createGenericBackend(deps, runtime)
+    case 'zcode':
+      return createZcodeBackend(deps, runtime)
     default:
       throw new Error(
         `dsh-agents-bridge: unknown protocol family ${JSON.stringify(family)}. ` +

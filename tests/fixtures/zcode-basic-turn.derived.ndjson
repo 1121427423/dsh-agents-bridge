@@ -1,0 +1,9 @@
+{"eventId":"f1","seq":1,"sessionId":"sess_derived01","turnId":"turn_1","timestamp":1,"traceId":"t1","type":"session.created","payload":{}}
+{"eventId":"f2","seq":2,"sessionId":"sess_derived01","turnId":"turn_1","timestamp":2,"traceId":"t1","type":"turn.started","payload":{}}
+{"eventId":"f3","seq":3,"sessionId":"sess_derived01","turnId":"turn_1","timestamp":3,"traceId":"t1","type":"tool.call.started","payload":{"tool":"Read","toolCallId":"call_1","input":{"file_path":"/tmp/x"}}}
+{"eventId":"f4","seq":4,"sessionId":"sess_derived01","turnId":"turn_1","timestamp":4,"traceId":"t1","type":"tool.call.completed","payload":{"tool":"Read","toolCallId":"call_1","output":"contents"}}
+{"eventId":"f5","seq":5,"sessionId":"sess_derived01","turnId":"turn_1","timestamp":5,"traceId":"t1","type":"text.delta","payload":{"text":"Hello "}}
+{"eventId":"f6","seq":6,"sessionId":"sess_derived01","turnId":"turn_1","timestamp":6,"traceId":"t1","type":"text.delta","payload":{"content":[{"type":"text","text":"world"}]}}
+{"eventId":"f7","seq":7,"sessionId":"sess_derived01","turnId":"turn_1","timestamp":7,"traceId":"t1","type":"mystery.future.event","payload":{"whatever":true}}
+{"eventId":"f8","seq":8,"sessionId":"sess_derived01","turnId":"turn_1","timestamp":8,"traceId":"t1","type":"turn.completed","payload":{}}
+{"eventId":"f9","seq":9,"sessionId":"sess_derived01","turnId":"turn_1","timestamp":9,"traceId":"t1","type":"session.closed","payload":{}}

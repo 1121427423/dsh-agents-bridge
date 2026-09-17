@@ -38,6 +38,7 @@ import { buildCodebuddyArgs } from '../../src/drivers/codebuddy.ts'
 import { buildCodexArgs } from '../../src/drivers/codex.ts'
 import { buildGenericArgs } from '../../src/drivers/generic-argv.ts'
 import { buildOpenclawArgs } from '../../src/drivers/openclaw.ts'
+import { buildZcodeArgs } from '../../src/drivers/zcode.ts'
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-bridge-argv-shape-'))
 
@@ -66,6 +67,10 @@ function driverArgs(family: ProtocolFamily, command: CommandSpec): string[] {
       // leaving it in the command (`buildCommandLine({...command, argsPrefix: []}, …)`).
       // The assembled vector is identical, so `buildArgv` above supplies it.
       return buildGenericArgs({})
+    case 'zcode':
+      // The prompt travels in argv (`--prompt <text>`): this CLI has no
+      // stream-json INPUT and no `--input-format` at all [proven, findings §3].
+      return buildZcodeArgs({ prompt: 'PROMPT' })
     default: {
       // A new family must be given an argv producer here rather than silently
       // skipped — an unchecked identity is exactly how the duplicated `agent`
@@ -226,7 +231,7 @@ describe('the version probe and the run path build the same argv', () => {
   function shimBin(): string {
     const binDir = path.join(tmpRoot, 'probe-argv-bin')
     fs.mkdirSync(binDir, { recursive: true })
-    for (const name of ['claude', 'codex', 'openclaw', 'openclaw.mjs', 'codebuddy-code', 'agent-cli', 'codebuddy', 'node']) {
+    for (const name of ['claude', 'codex', 'openclaw', 'openclaw.mjs', 'codebuddy-code', 'agent-cli', 'codebuddy', 'zcode.cjs', 'node']) {
       const file = path.join(binDir, name)
       fs.writeFileSync(file, '#!/usr/bin/env node\n', { mode: 0o755 })
       fs.chmodSync(file, 0o755)
