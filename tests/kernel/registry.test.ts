@@ -428,6 +428,42 @@ describe('probe()', () => {
     expect(probeCalls).toBe(afterFirst * 3)
   })
 
+  it('single-flights concurrent probes instead of re-walking and re-spawning (MI-22)', async () => {
+    // `probe({refresh:true})` is the expensive call: a bundle walk, a port
+    // sweep, and one `--version` child per resolvable identity. Two callers that
+    // arrive together (the panel's refresh button plus a model's `agents_probe`)
+    // used to run the whole pass twice — the second caller now joins the first
+    // in-flight promise.
+    const cli = fakeExecutable('probe-cli-single-flight')
+    let probeCalls = 0
+    const registry = createHermeticRegistry({
+      env: { PATH: '', GENERIC_PATH: cli },
+      probeVersion: async () => {
+        probeCalls += 1
+        // Long enough that the two calls genuinely overlap: without a delay the
+        // first pass can finish before the second one starts, which would make
+        // the defect invisible in the count.
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        return '1.0.0'
+      },
+    })
+
+    const [first, second] = await Promise.all([
+      registry.probe({ refresh: true }),
+      registry.probe({ refresh: true }),
+    ])
+    const concurrent = probeCalls
+    // Both callers were served, with the same facts.
+    expect(concurrent).toBeGreaterThan(0)
+    expect(first.map((r) => r.id).sort()).toEqual(second.map((r) => r.id).sort())
+
+    // One solo refresh after that is exactly one pass, so `concurrent` must not
+    // be the 2× a missing single-flight would produce.
+    probeCalls = 0
+    await registry.probe({ refresh: true })
+    expect(concurrent).toBe(probeCalls)
+  })
+
   it('invalidates the cache on demand', async () => {
     const cli = fakeExecutable('probe-cli-invalidate')
     let probeCalls = 0

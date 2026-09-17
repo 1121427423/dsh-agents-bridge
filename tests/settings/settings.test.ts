@@ -44,9 +44,12 @@ function fakeService(initial: { user?: Record<string, unknown>; exposeDescribe?:
   const scope = {
     get: () => ({ ...registered[0]?.base, ...user }),
     update: (patch: Record<string, unknown>) => {
+      // `undefined` values are DROPPED from the patch, exactly as the real
+      // provider's `cloneJsonShaped` does — an `update({ k: undefined })` is a
+      // silent no-op in production, so a fake that deletes the key here would
+      // make a fake save look real (see the IM-16 test below).
       for (const [key, value] of Object.entries(patch)) {
-        if (value === undefined) delete user[key]
-        else user[key] = value
+        if (value !== undefined) user[key] = value
       }
       for (const watcher of watchers) watcher()
     },
@@ -82,7 +85,12 @@ function fakeService(initial: { user?: Record<string, unknown>; exposeDescribe?:
  *  1. `describe()` OMITS `user` for a namespace whose stored section is absent
  *     (`...detachedUser === void 0 ? {} : { user: detachedUser }`);
  *  2. the resolved snapshot is `schema(mergeLayers(base, section))`, so an
- *     absent `z.array()` key materializes `[]` instead of staying `undefined`.
+ *     absent `z.array()` key materializes `[]` instead of staying `undefined`;
+ *  3. `update()` DROPS `undefined` entries from the patch (`cloneJsonShaped`)
+ *     instead of deleting the stored key, while `replace()` swaps the whole
+ *     section. Run together, those two are what make
+ *     `update({ key: undefined })` a silently fake save — and the fake has to
+ *     reproduce that or the IM-16 guard below cannot fail.
  *
  * `fakeService` above does neither, and that divergence is exactly how the first
  * live run of this card marked three list fields as "overridden by user" while
@@ -99,8 +107,10 @@ function fileProviderFake(initial: { user?: Record<string, unknown>; exposeDescr
     update: (patch: Record<string, unknown>) => {
       section = { ...(section ?? {}) }
       for (const [key, value] of Object.entries(patch)) {
-        if (value === undefined) delete section[key]
-        else section[key] = value
+        // Real-provider semantics (see behaviour 3 in the note above): an
+        // undefined entry never reaches the stored section, so it cannot delete
+        // anything — it is dropped from the patch.
+        if (value !== undefined) section[key] = value
       }
     },
     replace: (next: Record<string, unknown>) => {
@@ -328,6 +338,93 @@ describe('the settings namespace', () => {
     expect((await port.reset('maxConcurrent')).ok).toBe(true)
     expect(port.read().fields.filter(field => field.overridden)).toEqual([])
     expect(fake.section()).toEqual({})
+  })
+
+  it('clearing a field REMOVES the user-layer key instead of faking a save (IM-16)', async () => {
+    // The live defect: the card sends `drafts[k] ?? ''` for every dirty field
+    // (`client/settings.ts:308-310`), so an emptied input is a write of `''`.
+    // `coerceField` turns it into `undefined`, `clean` keeps the KEY, and
+    // `scope.update({ key: undefined })` reaches the real provider, whose
+    // `cloneJsonShaped` drops undefined entries and re-persists the OLD section
+    // — while `write()` returns `{ok: true}`. The card says saved, folds, and
+    // the old value plus its `overridden` badge come straight back.
+    const fake = fileProviderFake({ user: { defaultCwd: '/from/user', maxConcurrent: 3 } })
+    const entry = settingsEntryFrom({ defaultCwd: '/from/composition' })
+    const options = managerOptions({ defaultCwd: '/from/composition' })
+    const port = installSettings(wiredContext(fake.service), options, entry)
+
+    expect(port.read().fields.find(field => field.key === 'defaultCwd')).toMatchObject({
+      value: '/from/user',
+      overridden: true,
+    })
+
+    const cleared = await port.write({ defaultCwd: '' })
+
+    expect(cleared.ok).toBe(true)
+    // The key is GONE from the user layer — the only honest meaning of "clear".
+    expect(Object.prototype.hasOwnProperty.call(fake.section() ?? {}, 'defaultCwd')).toBe(false)
+    expect(cleared.ok ? cleared.value.fields.find(field => field.key === 'defaultCwd') : undefined).toMatchObject({
+      value: '/from/composition',
+      overridden: false,
+    })
+    // …and the removal did not disturb a sibling key.
+    expect(fake.section()?.maxConcurrent).toBe(3)
+
+    // Negative control 1: a real value still goes through `update` and flips the
+    // badge — the clearing path must not have replaced the ordinary one.
+    expect((await port.write({ maxConcurrent: 4 })).ok).toBe(true)
+    expect(port.read().fields.find(field => field.key === 'maxConcurrent')).toMatchObject({
+      value: 4,
+      overridden: true,
+    })
+    expect(fake.section()).toEqual({ maxConcurrent: 4 })
+
+    // Negative control 2: `reset` is unchanged — same `replace`, same result.
+    expect((await port.reset('maxConcurrent')).ok).toBe(true)
+    expect(port.read().fields.filter(field => field.overridden)).toEqual([])
+    expect(fake.section()).toEqual({})
+  })
+
+  it('one patch may both set and clear in a single write', async () => {
+    // Reachable from the card: two dirty fields, one emptied, one given a value.
+    // The `replace` payload carries both (the set value must survive the same
+    // section swap the clear forces).
+    const fake = fileProviderFake({ user: { defaultCwd: '/from/user' } })
+    const entry = settingsEntryFrom({ defaultCwd: '/from/composition' })
+    const port = installSettings(wiredContext(fake.service), managerOptions({ defaultCwd: '/from/composition' }), entry)
+
+    const result = await port.write({ defaultCwd: '', maxConcurrent: 5 })
+
+    expect(result.ok).toBe(true)
+    expect(fake.section()).toEqual({ maxConcurrent: 5 })
+    const fields = result.ok ? result.value.fields : []
+    expect(fields.find(field => field.key === 'defaultCwd')).toMatchObject({
+      value: '/from/composition',
+      overridden: false,
+    })
+    expect(fields.find(field => field.key === 'maxConcurrent')).toMatchObject({ value: 5, overridden: true })
+  })
+
+  it('refuses to fake a clear on a provider that cannot remove a key', async () => {
+    // A provider with no `replace()` (or one that does not describe namespaces)
+    // cannot express "this key is gone". `update({ key: undefined })` would look
+    // like a save and store nothing, so the only honest answer is a refusal that
+    // names the field — the ledger's documented alternative to replacing.
+    const user: Record<string, unknown> = { defaultCwd: '/from/user' }
+    const scope = {
+      get: () => ({ ...user }),
+      // Mirrors the real provider: undefined is dropped, never deleted.
+      update: (patch: Record<string, unknown>) => {
+        for (const [key, value] of Object.entries(patch)) if (value !== undefined) user[key] = value
+      },
+    }
+    const service = { register: () => scope, describe: () => [{ ns: SETTINGS_NAMESPACE, user: { ...user } }] }
+    const port = installSettings(wiredContext(service), managerOptions(), {})
+
+    const refused = await port.write({ defaultCwd: '' })
+    expect(refused).toMatchObject({ ok: false, error: expect.stringContaining('defaultCwd') })
+    expect(user['defaultCwd']).toBe('/from/user')
+    expect(await port.reset('defaultCwd')).toMatchObject({ ok: false, error: expect.stringContaining('defaultCwd') })
   })
 
   it('without `describe`, a provider-materialized `[]` is not mistaken for an override', () => {

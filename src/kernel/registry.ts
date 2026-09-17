@@ -432,6 +432,12 @@ export function createRegistry(options: RegistryOptions = {}): AgentRegistry {
   /** Memoised probe results, served for `ttlMs` after the last fresh pass. */
   let cache: readonly ProbeResult[] | undefined
   let cachedAt = 0
+  /**
+   * The probe pass currently running, shared by concurrent callers — a bundle
+   * walk plus one `--version` child per identity is not work to do twice at once
+   * (MI-22). Cleared when the pass settles.
+   */
+  let inFlight: Promise<readonly ProbeResult[]> | undefined
 
   /**
    * Resolve the table this probe run should use, running the scan at most once.
@@ -614,6 +620,41 @@ export function createRegistry(options: RegistryOptions = {}): AgentRegistry {
     }
   }
 
+  /**
+   * Run one full probe pass: the (memoised) identity table, the port
+   * fingerprint, and one `--version` per resolvable identity.
+   *
+   * Split out of `probe()` so the single-flight there can share exactly this
+   * work between concurrent callers.
+   */
+  async function runProbePass(): Promise<readonly ProbeResult[]> {
+    // The bundle scan runs at most ONCE per registry lifetime, before the
+    // (possibly longer) identity list is assembled, so the table is complete
+    // for this pass.
+    const table = effectiveDescriptors()
+    if (portProbeEnabled) {
+      try {
+        const sweep = await probePorts({
+          expectations: portExpectations,
+          ...(options.portConnector !== undefined ? { connect: options.portConnector } : {}),
+        })
+        portFindings = sweep.findings
+      } catch {
+        // A fingerprint is corroboration only; failing to obtain it must not
+        // be able to fail the probe.
+        portFindings = []
+      }
+    }
+    const results = await Promise.all(table.map((descriptor) => probeOne(descriptor)))
+    cache = results
+    cachedAt = now()
+    logger?.debug('probed agent identities', {
+      agents: results.map((r) => `${r.id}:${r.available ? 'available' : 'unavailable'}`),
+      ...(scanNote !== undefined ? { scan: scanNote } : {}),
+    })
+    return results
+  }
+
   return {
     get descriptors() {
       // The scan is part of "what this host has", so it is reflected here too —
@@ -626,31 +667,21 @@ export function createRegistry(options: RegistryOptions = {}): AgentRegistry {
       const refresh = opts?.refresh === true
       const at = now()
       if (!refresh && cache !== undefined && at - cachedAt < ttlMs) return cache
-      // The bundle scan runs at most ONCE per registry lifetime, before the
-      // (possibly longer) identity list is assembled, so the table is complete
-      // for this pass.
-      const table = effectiveDescriptors()
-      if (portProbeEnabled) {
-        try {
-          const sweep = await probePorts({
-            expectations: portExpectations,
-            ...(options.portConnector !== undefined ? { connect: options.portConnector } : {}),
-          })
-          portFindings = sweep.findings
-        } catch {
-          // A fingerprint is corroboration only; failing to obtain it must not
-          // be able to fail the probe.
-          portFindings = []
-        }
+      // Single-flight (MI-22): a pass is a synchronous bundle walk, a port
+      // sweep and one `--version` child per resolvable identity. Two callers
+      // arriving together (the panel's refresh button plus a model's
+      // `agents_probe`) used to run all of that twice; the second now joins the
+      // first's promise. `inFlight` is read and assigned with no `await` in
+      // between, so a concurrent caller cannot slip past it; the `finally`
+      // clears it for the next pass, whoever started it.
+      if (inFlight !== undefined) return inFlight
+      const run = runProbePass()
+      inFlight = run
+      try {
+        return await run
+      } finally {
+        if (inFlight === run) inFlight = undefined
       }
-      const results = await Promise.all(table.map((descriptor) => probeOne(descriptor)))
-      cache = results
-      cachedAt = now()
-      logger?.debug('probed agent identities', {
-        agents: results.map((r) => `${r.id}:${r.available ? 'available' : 'unavailable'}`),
-        ...(scanNote !== undefined ? { scan: scanNote } : {}),
-      })
-      return results
     },
     invalidate() {
       cache = undefined

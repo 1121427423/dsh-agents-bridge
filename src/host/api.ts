@@ -140,6 +140,19 @@ function isLoopbackHostname(hostname: string): boolean {
   return parts.length === 4 && parts[0] === '127' && parts.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255)
 }
 
+/**
+ * Whether a socket peer address is loopback.
+ *
+ * A connection's peer is an IP literal — `127.x.y.z`, `::1`, or an IPv4-mapped
+ * `::ffff:127.x.y.z` — never a name, so this is deliberately narrower than
+ * `isLoopbackHostname`.
+ */
+function isLoopbackAddress(address: string): boolean {
+  if (address === '::1' || address === '[::1]') return true
+  const mapped = address.startsWith('::ffff:') ? address.slice('::ffff:'.length) : address
+  return isLoopbackHostname(mapped)
+}
+
 /** Canonical authority form: hostname, or hostname:port when a port was written. */
 function canonicalAuthority(entry: string, entryUrl: URL): string {
   const port = entryUrl.port !== '' ? entryUrl.port : new URL(`https://${entry}`).port
@@ -168,30 +181,60 @@ function isTrustedAuthority(hostUrl: URL, trustedHosts: readonly string[]): bool
  *  2. the Host must be loopback (`localhost`, `[::1]`, or a well-formed
  *     `127.x.y.z`) OR match one of the web runtime's `trustedHosts`
  *     (the non-loopback authorities this deployment actually serves);
+ *  2b. when the Host claims LOOPBACK, the socket peer must be loopback too. The
+ *     Host header is client-supplied, so it is not evidence of who is calling:
+ *     a page whose DNS name resolves to 127.0.0.1 (DNS rebinding) sends
+ *     `Host: localhost` from a public origin. `req.socket.remoteAddress` is the
+ *     one fact the client cannot forge. A `trustedHosts` match deliberately
+ *     skips this — that list is an origin allow-list for a LAN deployment, not
+ *     a statement that every caller is local;
  *  3. `sec-fetch-site: cross-site` is refused — a cross-origin page must not
  *     be able to drive this plugin even from a browser that can reach the host;
- *  4. when an `Origin` header is present, its hostname must equal the Host's
- *     hostname. A missing Origin stays allowed (same-origin navigations and
- *     non-browser callers send none, and judgement 2/3 already gated them).
+ *  4. when an `Origin` header is present, its AUTHORITY must equal the Host's
+ *     authority — hostname AND port, not the hostname alone. Comparing hostnames
+ *     dropped the port, so a page served from ANY other loopback port
+ *     (`http://localhost:9999` against `Host: localhost:43120`) passed: a
+ *     different port is `same-site`, not `cross-site`, so judgement 3 does not
+ *     stop it, and no CORS preflight is needed for a simple request. A missing
+ *     Origin stays allowed (same-origin navigations and non-browser callers send
+ *     none, and judgement 2/3 already gated them). `URL.host` normalizes both
+ *     sides: a default or absent port becomes `''`, so a bare `Host: localhost`
+ *     still matches `http://localhost`.
  *
- * @param request - node HTTP request facts (headers only).
+ * @param request - node HTTP request facts (headers, and the socket peer).
  * @param trustedHosts - non-loopback authorities this deployment serves.
  * @returns true when the Host is ours and the browser markers are same-origin.
  */
 export function isTrustedApiRequest(
-  request: { readonly headers: IncomingMessage['headers'] },
+  request: {
+    readonly headers: IncomingMessage['headers']
+    /**
+     * The connection's peer. A Node HTTP server always supplies this; a caller
+     * that omits it (a structural test double) is not treated as proof of a
+     * non-loopback peer, so the fence never fails open on a missing fact it can
+     * only get from a real socket.
+     */
+    readonly socket?: { readonly remoteAddress?: string }
+  },
   trustedHosts: readonly string[] = [],
 ): boolean {
   const host = header(request.headers, 'host')
   if (host === undefined) return false
   const hostUrl = parseAuthority(host)
   if (hostUrl === undefined) return false
-  if (!isLoopbackHostname(hostUrl.hostname) && !isTrustedAuthority(hostUrl, trustedHosts)) return false
+  const claimsLoopback = isLoopbackHostname(hostUrl.hostname)
+  if (!claimsLoopback && !isTrustedAuthority(hostUrl, trustedHosts)) return false
+  if (claimsLoopback) {
+    const peer = request.socket?.remoteAddress
+    if (typeof peer === 'string' && peer !== '' && !isLoopbackAddress(peer)) return false
+  }
   if (header(request.headers, 'sec-fetch-site') === 'cross-site') return false
   const origin = header(request.headers, 'origin')
   if (origin === undefined) return true
   try {
-    return new URL(origin).hostname === hostUrl.hostname
+    // Authority, not hostname: dropping the port let any other loopback port's
+    // page drive this API without a token (see judgement 4 above).
+    return new URL(origin).host === hostUrl.host
   } catch {
     return false
   }

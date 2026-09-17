@@ -388,14 +388,19 @@ interface RenderedEvent {
  * per streamed delta, and a line per fragment is pure noise in the model's
  * context. `tool_use`/`tool_result` keep their own line so a tool call is never
  * mistaken for prose.
+ *
+ * The join is decided by whether the PREVIOUS event was text, not by whether any
+ * text has ever been seen: a sticky flag glued every later text event onto
+ * whatever block happened to be last — tool output included — so the prose lost
+ * its own index/type and the tool output gained a sentence (IM-19).
  */
 function renderEventBlocks(messages: readonly RenderedEvent[]): string[] {
-  let textSeen = false
+  let previousWasText = false
   const blocks: string[] = []
   for (const message of messages) {
     const prefix = `#${message.index ?? 0} [${message.type ?? 'log'}]`
     const isText = message.type === 'text' || message.type === 'thinking'
-    if (isText && textSeen && blocks.length > 0) {
+    if (isText && previousWasText && blocks.length > 0) {
       const last = blocks.length - 1
       blocks[last] = `${blocks[last] ?? ''}${message.text ?? ''}`
       continue
@@ -411,7 +416,7 @@ function renderEventBlocks(messages: readonly RenderedEvent[]): string[] {
         blocks.push(`${prefix} ${message.text ?? ''}`)
         break
     }
-    if (isText) textSeen = true
+    previousWasText = isText
   }
   return blocks
 }
@@ -1181,7 +1186,9 @@ export function createToolDefinitions(manager: AgentManager) {
       },
       limit: {
         type: 'integer',
-        description: 'Maximum number of events to return in this read.',
+        description:
+          'Maximum number of events to return in this read. Reads are capped at 80 events; nextIndex always '
+          + 'points at the first event NOT shown, so passing it back never skips one.',
       },
     },
     output: {
@@ -1259,9 +1266,25 @@ export function createToolDefinitions(manager: AgentManager) {
       },
     },
     execute: async (args) => {
+      // ALWAYS bound the read by the render budget, even when the caller named no
+      // limit: `nextIndex` is the manager's `sinceIndex + messages.length`
+      // (`manager.ts:727-733`) while the render below shows only
+      // MAX_RENDERED_MESSAGES of them. Let the manager return everything and the
+      // cursor describes events the model never saw, so a caller following the
+      // documented "pass nextIndex back" hint skips them silently (IM-17). With
+      // the limit always sent, `nextIndex === sinceIndex + messages.length` by
+      // construction.
+      //
+      // `Math.max(1, …)`: the manager reads a non-positive limit as "no limit"
+      // (`manager.ts:727`), which would reopen exactly that gap — a 0 is clamped
+      // to a single event instead.
+      const limit = Math.min(
+        args.limit === undefined ? MAX_RENDERED_MESSAGES : Math.max(1, args.limit),
+        MAX_RENDERED_MESSAGES,
+      )
       const read = manager.output(args.sessionId, {
         ...(args.sinceIndex === undefined ? {} : { sinceIndex: args.sinceIndex }),
-        ...(args.limit === undefined ? {} : { limit: args.limit }),
+        limit,
       })
       if (read === undefined) {
         throw new Error(unknownSessionMessage(manager, args.sessionId))

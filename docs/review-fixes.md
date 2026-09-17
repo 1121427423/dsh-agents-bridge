@@ -396,3 +396,77 @@ TS2322、TS2349）是**脱离工程 tsconfig 独立编译的假象**，不计入
 3. 本批**没有**碰 §E 原列在 B3 的 IM-15/MI-16/MI-17/MI-19/MI-20/MI-21（§E-2 已把它们移出 B3）。
 4. `openclaw` 的整块 result 扫描现在以"最后一个 result 标记"为界：一个把 `"durationMs"` 字样放进
    **日志行**的长流会多付几次 O(候选) 的 parse（仍远小于原先每行全 buffer 的代价），语义上不会误判。
+
+## L. B5a 落地记录（surface：settings 写路径 · Host/Origin 栅栏 · 工具输出）
+
+范围 = 监理指派的**六条**：**IM-16 · IM-18 · IM-17 · IM-19 · MI-1 · MI-22**（按指派优先级落地）。
+§E 的 B5 还列着 MI-10…MI-15（client 五条）——那些属 **B5b**，本批**未动**。
+树未提交（按要求保持 dirty）；动过的文件只有
+`src/settings.ts` · `src/host/api.ts` · `src/tools/definitions.ts` · `src/kernel/registry.ts`
+与对应四个测试文件（新增 `tests/tools/output.test.ts`）。
+
+六条全部**先红后绿**；红要么是修复前的实测，要么是"撤掉修复"的单行负控（与该条的绿在**同一会话**内跑出）。
+命令皆为 `/opt/homebrew/bin/node node_modules/vitest/vitest.mjs run <file> -t "<name>"`。
+
+| ID | 修复（文件:行） | 红（负控 → 观测失败文本） |
+|---|---|---|
+| IM-16 | `settings.ts:475-562`（`layerWithout` 475-494；`write` 496-537；`reset` 539-562）按 `coerceField === undefined` **分区**：有值走 `scope.update`，无值走 `replace({...userLayer 去掉这些键})`（与 `reset` 同一惯用法，混合补丁合成**一次** section 交换）；`reset` 的 `update({k:undefined})` 兜底改为**点名拒绝** | 修复前（新测试 + 镜像真 provider 的假件）→ `AssertionError: expected true to be false`（`write({defaultCwd:''})` 返回 `ok:true` 之后该键**仍在** user layer）；同批 3 failed |
+| IM-18 | `api.ts:237` 比 **authority**：`new URL(origin).host === hostUrl.host`（两侧都把缺省/缺失端口归一为 `''`） | 单行负控改回 `.hostname ===` → ① 测试 `-t "same AUTHORITY"`：`AssertionError: expected true to be false`；② 监理 oracle 重现两条 `**DEFECT**` |
+| IM-17 | `definitions.ts:1268-1290` 的 `execute` **总是**传 `limit: Math.min(args.limit ?? 80, 80)`（并对 `limit<=0` 取 `Math.max(1,…)`，否则 manager 的 `limit>0` 判断会把它当"无上限"，缺口原样回来） | 修复前 → `AssertionError: expected 200 to be 80`（`nextIndex` 透传 manager 的 end=200，而渲染只给了 80 条；照 `sinceIndex=nextIndex` 续读即静默跳过 80..199）。负控 `limit:5` 在修前修后都绿 |
+| IM-19 | `definitions.ts:397-422` 粘性 `textSeen` 换成 `previousWasText`（每轮末尾按 `isText` 赋值，并进 join 条件） | 修复前 → `expected [ '#0 [text] a', …(1) ] to have a length of 3 but got 2`（`b` 被粘到 tool 块：`#1 [tool_use] Bash → outb`）。负控 `[text a, text b]` 仍合并为 1 块，修前修后都绿 |
+| MI-1 | `api.ts:150-155`（`isLoopbackAddress`）与 `api.ts:225-230`：Host 声称 loopback 时**额外**要求 `req.socket.remoteAddress` 也是 loopback（`::1` / `::ffff:127.x` 一并处理）；`trustedHosts` 仍只当 origin 允许清单，**不**做 peer 证明 | 修复前 → 路由层 `expected 200 to be 403`；单元层 `expected true to be false`。负控（同测试内）：loopback peer 全部通过、`trustedHosts` 命中的 LAN 主机带非 loopback peer 仍通过 |
+| MI-22 | `registry.ts:440`（in-flight 变量）· `630-656`（`runProbePass`）· `666-693`（`probe`）：保住 in-flight promise，并发调用者拿到同一个；`finally` 里比对引用后清理 | 单行负控 `if (false && inFlight !== undefined)` → `expected 10 to be 5`（两次并发 refresh 各跑一遍 = 10 次 `probeVersion`，单次 = 5）。既有"TTL 缓存 + refresh"顺序断言未受影响 |
+
+**IM-18 的验收 oracle（监理亲手脚本，修复前后各跑一次）**
+
+`/opt/homebrew/bin/node --experimental-strip-types /tmp/repro-origin.ts`：
+
+```
+修复前：**DEFECT** localhost:9999 -> true / **DEFECT** 127.0.0.1:9999 -> true（四条对照 ok）
+修复后：两条均 -> false，四条对照（同 authority / 无 Origin / cross-site / 外部 Host）原值不变
+```
+
+同一 oracle 在 **MI-1 落地后复跑仍全 ok**（peer 检查只作用于 loopback 分支，不影响这六行）。
+
+**IM-16 的两次"假件保真"（本批的自纠，记账）**
+
+`tests/settings/settings.test.ts` 里两个假件的 `update` 原先写成"遇到 `undefined` 就 delete 该键"——
+这比真 provider **更强**：真 provider 的 `cloneJsonShaped` 是把 undefined 项**丢掉**，键留着。
+于是"清空字段"在假件里看起来能工作，缺陷被假件掩盖。本批把两个假件（`fakeService` / `fileProviderFake`）
+都改成真语义（**丢** undefined；`replace` 换 section），并把该语义写进假件注释 —— 这正是
+`fileProviderFake` 自己的教条："不能复现 provider 形状的假件守不住规则"。
+
+**改动过的既有断言（必须改，否则修了也红）**
+
+- `tests/host/api.test.ts` 原先把 IM-18 的缺陷行为写成预期
+  （`{ host: 'localhost:5173', origin: 'http://localhost:9999' }` → `true`）。现翻成 `false`，
+  测试改名为 `requires a present Origin to be the same AUTHORITY…`，并补上裸 `Host: localhost` +
+  `Origin: http://localhost` / `:80` 的归一对照。
+
+**与既有行为的差异（不粉饰）**
+
+1. **IM-16 的 `reset` 兜底**：旧代码在"provider 没有 `replace`，或它不描述 namespace"时发
+   `update({[field]: undefined})`。对真 provider 这条路径**不可达**（两者都有），但在别的 provider 上
+   它可能是"能删也可能静默 no-op"的未知赌注。现在按 ledger 的第二种许可（`ok:false` 点名该字段）**拒绝**，
+   而不是报成功。代价：一个「`update` 真的把 undefined 当删除」的 provider，其 reset 从"可用"变为"明确报错"。
+2. **IM-17 的 `limit<=0`**：published schema 里 `limit` 是裸 integer（无最小）。manager 把
+   `limit<=0` 读作"不设限"（`manager.ts:727`），所以本批把它钳到 1；同时把 80 条上限写进参数描述，
+   让模型知道 `nextIndex` 始终是"第一条没展示的事件"。
+3. **MI-1 的 `socket` 缺省**：结构化的测试假件不传 `socket` 时**不**按非 loopback 处理（否则
+   `/tmp/repro-origin.ts` 的四条对照会全部翻 false，oracle 失效）。真实 `IncomingMessage` 永远带 socket，
+   所以生产面没有 fail-open。
+
+**门禁（最终树，真实数字）**
+
+- `/opt/homebrew/bin/node node_modules/vitest/vitest.mjs run` → **869 passed / 1 skipped**（55 files：54 passed / 1 skipped）
+- `/opt/homebrew/bin/node node_modules/typescript/bin/tsc --noEmit` → **0 errors**
+- `/opt/homebrew/bin/node node_modules/typescript/bin/tsc --noEmit -p tsconfig.tests.json` → **0 errors**
+- `/opt/homebrew/bin/node scripts/build.mjs` → `lib/index.js 367.6kb`
+- `/opt/homebrew/bin/node scripts/build-client.mjs` → `lib/client.js 73.8kb`
+- `python3 /Users/king/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py .` → **11/11 PASS**
+
+**未做 / 留给后续**
+
+- §E 的 B5 中 **MI-10 · MI-11 · MI-12 · MI-13 · MI-14 · MI-15**（client + docs 指标表）属 B5b，本批未动。
+- §A 与 §E 中这六行的状态列仍是 `verified` / `pending` —— 按"本文件由监理维护、只追加不删"的约定，
+  本批**没有**改它们；请监理复核后按 §L 翻状态。

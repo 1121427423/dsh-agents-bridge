@@ -43,6 +43,14 @@ function fakeRequest(input: {
   readonly url?: string
   readonly headers?: Record<string, string>
   readonly body?: string
+  /**
+   * The socket peer. Defaults to loopback, because a request that reached this
+   * host's HTTP server from anywhere else could not have written
+   * `Host: localhost` without a DNS-rebinding-style setup — the fence now also
+   * consults the peer (MI-1), so tests that DO mean to model that setup pass a
+   * non-loopback address here.
+   */
+  readonly remoteAddress?: string
 }): IncomingMessage {
   const body = input.body ?? ''
   const stream = Readable.from(body === '' ? [] : [Buffer.from(body)])
@@ -50,6 +58,7 @@ function fakeRequest(input: {
     method: input.method ?? 'POST',
     url: input.url ?? `${API_PREFIX}/status`,
     headers: input.headers ?? { host: '127.0.0.1:5173' },
+    socket: { remoteAddress: input.remoteAddress ?? '127.0.0.1' },
   }) as unknown as IncomingMessage
 }
 
@@ -287,6 +296,24 @@ describe('host API — guards', () => {
     expect(result.status).toBe(403)
   })
 
+  it('403s a spoofed loopback Host whose connection did not come from loopback (MI-1)', async () => {
+    // End to end through the handler, because the peer address arrives on the
+    // request object, not in a header — the fence has to read `req.socket`.
+    const result = await call(makeHandler(fakeManager()), {
+      headers: { host: 'localhost:5173' },
+      remoteAddress: '203.0.113.7',
+      body: '{}',
+    })
+    expect(result.status).toBe(403)
+    // Control: the same headers from a genuinely loopback peer still pass.
+    const loopback = await call(makeHandler(fakeManager()), {
+      headers: { host: 'localhost:5173' },
+      remoteAddress: '127.0.0.1',
+      body: '{}',
+    })
+    expect(loopback.status).toBe(200)
+  })
+
   it('allows a non-loopback host that the web runtime DOES trust', async () => {
     const result = await call(makeHandler(fakeManager(), { trustedHosts: ['dsh.internal:5173'] }), {
       headers: { host: 'dsh.internal:5173' },
@@ -390,11 +417,50 @@ describe('isTrustedApiRequest — the same judgements as dsh-better-sidebar', ()
     expect(isTrustedApiRequest({ headers: { host: 'localhost', 'sec-fetch-site': 'same-origin' } }, [])).toBe(true)
   })
 
-  it('requires a present Origin to be same-host, but tolerates an absent one', () => {
+  it('requires a present Origin to be the same AUTHORITY, but tolerates an absent one', () => {
     expect(isTrustedApiRequest({ headers: { host: 'localhost:5173', origin: 'http://localhost:5173' } }, [])).toBe(true)
-    expect(isTrustedApiRequest({ headers: { host: 'localhost:5173', origin: 'http://localhost:9999' } }, [])).toBe(true)
+    // The port is part of the identity: a page on another loopback port is a
+    // different origin (`same-site`, not `cross-site`), so judgement 3 does not
+    // stop it and no preflight is needed. Comparing hostnames alone let it drive
+    // the API without a token (IM-18).
+    expect(isTrustedApiRequest({ headers: { host: 'localhost:5173', origin: 'http://localhost:9999' } }, [])).toBe(false)
+    expect(isTrustedApiRequest({ headers: { host: '127.0.0.1:5173', origin: 'http://127.0.0.1:9999' } }, [])).toBe(false)
+    // A default or absent port normalizes to the same authority, so the
+    // port-less spellings keep matching each other.
+    expect(isTrustedApiRequest({ headers: { host: 'localhost', origin: 'http://localhost' } }, [])).toBe(true)
+    expect(isTrustedApiRequest({ headers: { host: 'localhost', origin: 'http://localhost:80' } }, [])).toBe(true)
     expect(isTrustedApiRequest({ headers: { host: 'localhost:5173', origin: 'https://evil.example' } }, [])).toBe(false)
     expect(isTrustedApiRequest({ headers: { host: 'localhost:5173', origin: 'not a url' } }, [])).toBe(false)
+  })
+
+  it('requires the socket PEER to be loopback before a loopback Host is believed (MI-1)', () => {
+    // The `Host` header is client-supplied: a page on a public origin can have
+    // its DNS name resolve to 127.0.0.1 (DNS rebinding) and send
+    // `Host: localhost`, which used to pass judgement 2 on its own. The peer
+    // address is the one fact the client cannot forge, so a loopback claim is
+    // only believed when the connection itself came from loopback.
+    const spoofed = { headers: { host: 'localhost:5173' }, socket: { remoteAddress: '203.0.113.7' } }
+    expect(isTrustedApiRequest(spoofed, [])).toBe(false)
+    const spoofedIpv6 = { headers: { host: '127.0.0.1:5173' }, socket: { remoteAddress: '2001:db8::1' } }
+    expect(isTrustedApiRequest(spoofedIpv6, [])).toBe(false)
+
+    // Loopback peers pass — in every spelling the kernel reports them in.
+    for (const remoteAddress of ['127.0.0.1', '127.255.0.9', '::1', '::ffff:127.0.0.1']) {
+      expect(
+        isTrustedApiRequest({ headers: { host: 'localhost:5173' }, socket: { remoteAddress } }, []),
+        remoteAddress,
+      ).toBe(true)
+    }
+
+    // A trustedHosts entry is an ORIGIN allow-list, not proof of who is calling:
+    // a deployment served on a LAN authority must keep accepting its remote
+    // peers, so the peer check applies only to the loopback branch.
+    expect(
+      isTrustedApiRequest(
+        { headers: { host: 'dsh.internal:5173' }, socket: { remoteAddress: '203.0.113.7' } },
+        ['dsh.internal:5173'],
+      ),
+    ).toBe(true)
   })
 
   it('matches a trusted authority exactly, including its written port', () => {

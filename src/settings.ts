@@ -456,6 +456,43 @@ export function installSettings(
     return clean
   }
 
+  /**
+   * The user layer with `drop` removed (and `add` merged in), for a
+   * `scope.replace` — or a refusal when this provider cannot express a removal.
+   *
+   * `scope.update({ key: undefined })` LOOKS like a deletion and is not one: the
+   * real provider drops undefined entries from the patch
+   * (`cloneJsonShaped`, `@deepseek-ai/dsh-settings` `lib/index.js:218`), merges
+   * what is left onto the stored section and re-persists the OLD value — a
+   * silently FAKE save that still reports `ok: true`, after which the card folds
+   * and the old value plus its `overridden` badge come straight back. The one
+   * idiom that actually removes a key is `replace(section)`, which `reset` has
+   * always used; a write that clears a field goes through it too. If the
+   * provider exposes no `replace` (or does not describe namespaces, so the layer
+   * cannot be rebuilt without dropping keys we do not own), the honest answer is
+   * a refusal that names the field rather than a fake success.
+   */
+  const layerWithout = (
+    drop: readonly string[],
+    add: Record<string, unknown> = {},
+  ):
+    | { readonly ok: true; readonly section: Record<string, unknown>; readonly replace: NonNullable<SettingsScopeFace['replace']> }
+    | { readonly ok: false; readonly error: string } => {
+    const replace = scope?.replace
+    const current = service === undefined ? ({ known: false } as const) : userLayer(service)
+    if (replace === undefined || !current.known) {
+      return {
+        ok: false,
+        error:
+          `cannot clear ${drop.map((key) => `"${key}"`).join(', ')}: this deployment's settings provider cannot `
+          + 'remove a user-layer key (it exposes no replace(), or it does not describe namespaces)',
+      }
+    }
+    const section: Record<string, unknown> = { ...current.user, ...add }
+    for (const key of drop) delete section[key]
+    return { ok: true, section, replace }
+  }
+
   const write = async (patch: Readonly<Record<string, unknown>>): Promise<SettingsWriteResult> => {
     if (scope === undefined) {
       return { ok: false, error: 'no settings provider is mounted in this deployment; nothing can be persisted' }
@@ -466,12 +503,30 @@ export function installSettings(
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
+    // Partition by `coerceField === undefined`: a defined value is an ordinary
+    // upsert, while an `undefined` one is a CLEAR (an emptied form field
+    // coerces to `undefined`) and must go through `replace` — see
+    // `layerWithout`. A patch can carry both at once (two dirty card fields),
+    // which is why the removal path rebuilds the layer with the defined values
+    // merged in: one section swap, no half-applied write.
+    const defined: Record<string, unknown> = {}
+    const cleared: string[] = []
+    for (const [key, value] of Object.entries(clean)) {
+      if (value === undefined) cleared.push(key)
+      else defined[key] = value
+    }
+    const removal = cleared.length === 0 ? undefined : layerWithout(cleared, defined)
+    if (removal !== undefined && !removal.ok) return { ok: false, error: removal.error }
     try {
       // AWAITED: the provider's scope methods are `async`, so a refusal arrives as
       // a rejected promise. Dropping it would report `ok: true` for a write that
       // stored nothing, and leave the rejection unhandled — which on Node's
       // default `--unhandled-rejections=throw` kills the host process.
-      await scope.update(clean)
+      if (removal === undefined) {
+        await scope.update(defined)
+      } else if (removal.ok) {
+        await removal.replace(removal.section)
+      }
     } catch (error) {
       return { ok: false, error: `could not persist: ${error instanceof Error ? error.message : String(error)}` }
     }
@@ -487,19 +542,18 @@ export function installSettings(
     if (scope === undefined) {
       return { ok: false, error: 'no settings provider is mounted in this deployment; nothing can be persisted' }
     }
-    const user = service === undefined ? { known: false } as const : userLayer(service)
+    // Dropping the key from the whole user layer is the only way to stop being
+    // "overridden". `update({ [field]: undefined })` was the old fallback for a
+    // provider we cannot describe, and on the real provider it stores nothing
+    // while reporting success (see `layerWithout`) — so an unexpressible removal
+    // is now refused by name instead.
+    const layer = layerWithout([field])
+    if (!layer.ok) return { ok: false, error: layer.error }
     try {
       // AWAITED, for the same reason as `write`: these are the provider's `async`
-      // methods, and `replace({})` is its documented "re-inherit everything".
-      if (scope.replace !== undefined && user.known) {
-        // Dropping the key from the whole user layer is the only way to stop being
-        // "overridden": writing `undefined` would leave the key present.
-        const next: Record<string, unknown> = { ...user.user }
-        delete next[field]
-        await scope.replace(next)
-      } else {
-        await scope.update({ [field]: undefined })
-      }
+      // methods, and `replace({...userLayer})` is its documented
+      // "re-inherit everything".
+      await layer.replace(layer.section)
     } catch (error) {
       return { ok: false, error: `could not persist: ${error instanceof Error ? error.message : String(error)}` }
     }
