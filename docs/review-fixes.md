@@ -1158,3 +1158,97 @@ by each driver's own `<= 0` guard」**对 +Infinity 是假的**，因为 `Infini
 - **RR-MI-5 的 9 处调用点**：监理核对了守卫形态（8 处 `opts.… > 0` 前置，env 两处自带 `Number.isFinite`），
   除 +Infinity 外未发现新的放行路径。
 
+## U. 需求实现：会话终态「主动通知」（C 方案）与调用记录页签
+
+用户需求（2026-09-18 夜）：① 插件上要有**调用记录**，右侧侧边栏有一个页签能看到「正在执行 / 已完成」；
+② 会话到达终态要**主动通知**调用方（对标 DSH 子代理，而不是靠轮询）；③ 把 `rescan` 接到用户可见面。
+
+### U-0 交付与归属（先说清楚谁做了什么）
+
+| 项 | 归属 | 证据 |
+|---|---|---|
+| 调用记录页签（终态行带 `exitCode`、不再谎称「还在干活」） | **workbuddy**（`wb/call-records` · `1db2ef5`） | 已合并 `0c1b86e`；监理门禁 **930/1（931）** |
+| `rescan` 接到面板（RR-MI-1b） | **workbuddy**（`3f28da5`） | 同上；监理自写**路由级** oracle（真 registry + 真文件系统）：mid-flight 安装对 `refresh` 不可见、对 `rescan` 可见且未被路由缓存吞 |
+| **终态主动通知**（`ctx.jobs`） | **监理自建**（`b3c732c`） | 见 U-3；因为 workbuddy 的模型在 02:47 撞了 429（见 U-4） |
+| SV-1 / SV-2 / RR-MI-9 / RR-MI-10 / RR-MI-12 | workbuddy（`wb/minor-sweep`，详见 §V） | 本文件落笔时该批仍在跑 |
+
+### U-1 为什么是 `ctx.jobs`（机制已查证，不是发明）
+
+`@deepseek-ai/dsh-jobs` 的 README 原文：`onJobDone` 观察每个终态记录；「Settlement is first-wins… **Completion is
+announced last**, after the record is committed … **because a reporter may open a model turn synchronously**」；
+Model Experience 一节写明 `dsh-tool-jobs` 负责渲染 **completion notices**。这正是 `bash` 后台任务通知监理的同一套机制。
+
+契约要点：`start({kind, label, owner?, outputLimitBytes?, run()})`、`attachController(name)`（**没有控制器服务该 owner 时
+`start` 直接拒绝**）、`cancel` 必须同步幂等且最终结算 `done`、`done` 在**资源释放之后** resolve。
+调用方 agent 从 `ToolExecution.agent` 拿（类型声明原文：「The agent on whose behalf the call runs (set by the agent loop)」）。
+
+**RED（两条，都是真的）**：
+1. 代码事实：改动前 `grep -rc 'ctx\.jobs|jobs\.start|attachController' src/` = **0 处** —— 终态通知根本不存在；
+2. 测试级：`tests/host/jobs.test.ts` 跑在 `git archive HEAD` 的旧树副本上 → `Failed to load url ../../src/host/jobs.ts`，
+   `1 failed / no tests`。
+
+### U-2 修法
+
+- **`src/host/jobs.ts`（新）** — 结构面 `JobsFace`（**不**进 `inject`：cordis 会在 inject-listed 服务缺席时把整个插件标记
+  INACTIVE，那会拿九个工具换一个通知，与 D16/`webServer` 同一个坑）；`attachController` 先挂；`cancel` 同步幂等；`done`
+  不 reject；注册表**缺席 / 拒绝 / 抛错**一律退化为「没有通知」而不碰 run。
+- **`src/tools/definitions.ts`** — 可变 seat（`jobs` 行与 `webServer` 一样晚于本插件 apply）；owner = `exec.agent`；
+  fan-out **每条一个 job**；两处 run 工具的 output schema 与渲染文本加上 job；**owner 检查同时放在工具层**
+  （没有调用方就压根不请求注册）。
+- **`src/index.ts`** — 作用域注入 + 两行诚实状态日志（apply 时刻「尚未可用」与 scope 真正挂上时的「已启用」）。
+
+### U-3 证据
+
+**门禁（监理亲跑）**：vitest **944 passed / 1 skipped（945）**（基线 930/1 + 14 条新测试）· `tsc(src)` **0** ·
+`tsc(tests)` **0** · `lib/index.js` **379.4kb** · `lib/client.js` 74.7kb · `verify_plugin.py` **11/11 PASS**。
+
+**真实宿主里的状态（43121 日志，两行都在）**：
+```
+[dsh-agents-bridge:surface] no job registry available yet: session completions will not announce themselves …
+[dsh-agents-bridge:surface] job registry available: session completions will announce themselves {"kind":"agents"}
+[dsh-agents-bridge:surface] host api route mounted {"path":"/agents-bridge/api"}
+```
+即 `ctx.inject(['jobs'])` 真的 fired、controller 已挂、seat 已填。
+
+**端到端冒烟（决定性）**：`dsh --profile headless` 起一个真会话，提示词要求模型「`agents_run` 跑一个 trivial 任务 → **不许**
+调 `agents_wait`/`agents_status`/`agents_output` → 用 `bash sleep` 等 → 报告有没有**没主动请求**就出现的消息」。
+模型自己给出的回答（原文）：
+
+> (a) 有。自动出现的消息（逐字引用）：
+> `background job agents-1 (agents: claude: Reply with exactly: OK) finished [status: failed]. Read its output with job_output.`
+> (c) 我按顺序调用过的工具：**agents_probe** → **agents_run** → **bash**。
+
+**通知自发开进了模型回合，模型全程没有轮询** —— 需求 ② 成立。
+
+**关于 `[status: failed]`（如实记账，别误读）**：那次 claude 委托**本身失败**，不是映射错误 ——
+持久化记录 `/Users/king/.dsh/state/dsh-agents-bridge/sessions.json` 里该行 `agentId=claude status=failed`，
+与通知一致。**首次冒烟的失败是我自己造成的**：我在它还在跑的时候重启了 43121 宿主，宿主启动时的孤儿回收把该会话标成
+`the bridge restarted while this session was running`；第二次冒烟**没有任何重启**，仍是 failed（本地 claude CLI 自己的问题，
+与 §8/§9 记录的「本机 CLI 自身可用性」同类，本批**未**root-cause，因为它与需求正交：通知管的是「结束」，不是「成功」）。
+
+### U-4 监理自审：测试抓到的一处分层错误（已修）
+
+`tests/tools/job-seat.test.ts` 的负控（「调用方没有 agent 时不建 job」）**红**了：`announceCompletion` 把该策略完全交给了
+adapter，于是工具层仍会发出一次注定被拒的注册请求（假 registrar 就直接记下了）。修法是把 owner 检查**放回工具层**（它才是
+知道有没有调用方的那一层），adapter 的同名守卫保留为纵深。**这正是 RED 先行的价值**：策略放错层的 bug 被测试而非评审抓到。
+
+### U-5 如实记账（本节的接缝）
+
+1. **workbuddy 的模型配额**：2026-09-18 02:47 起 `deepseek-v4.1-flash` 返回
+   `429 … 将在 2026-09-18 22:55:03 UTC+8 重置`，**两个并行批次同时阵亡**（批次 1 死在 392 轮、批次 2 死在 103 轮，均零错误提交）。
+   **这是我的调度失误**：我并行派了两个 workbuddy，把配额烧穿了。用户随后给出工作链（`glm-5.3-flash` → `hy4-preview`），
+   监理实测 `glm-5.3-flash` 可用（探针 3 轮返回 `PONG`）并已用 `--fallback-model hy4-preview` 重启派工。
+2. **job 的状态映射**：`completed→completed`、`cancelled→killed`、其余（`failed`/`timeout`/会话已消失）→`failed`。
+   `timeout` 归入 failed 是刻意的，但**它无法与「引擎报错」区分** —— 模型看到的都是 `failed`。
+3. **通知不带 transcript**：`outputLimitBytes=4096`，通知只给「状态 + 耗时 + exit + 最后几行 + 怎么读」，
+   全文仍要 `agents_output`。这是刻意的（否则每次完成都烧调用方上下文）。
+4. **两套 id**：job id（`agents-N`）与 sessionId（`sess_…`）并存。冒烟里模型只看到**渲染文本**（没有 `jobId` 字段可读），
+   它照样复述出了 `agents-1`；但结构化字段进不了模型视野这件事本身记在这里。
+5. **无 `read` 钩子**：job 是 final-output-only，`done` 的 output 就是通知正文。
+6. **desktop profile 仍未加载本插件**（刻意）：standalone 拒绝触碰该 profile
+   （`error: profile "desktop" is managed exclusively by the Electron application`），**无法预演**；
+   已查实其内置 DSH 与已验证的 standalone **同为 0.1.5-rc.1**，故是「低风险但无法先验」的两步动作（改 profile + 重启 app），
+   留待用户点头。**web profile（43121）已实测加载**：两条状态日志 + API 正常。
+7. **本节的代码由监理自写**，未经第二方独立复核（workbuddy 当时不可用）。用户晨审时请把 `src/host/jobs.ts`
+   与 `tests/host/jobs.test.ts` 当作**待复核**而非已复核。
+

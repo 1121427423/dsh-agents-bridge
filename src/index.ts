@@ -277,6 +277,16 @@ export function apply(ctx: Context, config: Config = {}): void {
     const registrar = createJobRegistrar(jobs, logger)
     jobSeat.registrar = registrar
     jobSeatFilled = true
+    // The state line matters in BOTH directions. The `no job registry available
+    // yet` line below is printed at apply time and is true only of that instant
+    // (the `jobs` row mounts late, exactly like `webServer`, whose route is
+    // mounted right after this plugin applies). Without this line, a host where
+    // the scope DID fire later would be indistinguishable in the log from one
+    // that never provides `jobs` at all — which is the question an operator
+    // actually asks ("why did I never get a notice?").
+    logger.info('job registry available: session completions will announce themselves', {
+      kind: 'agents',
+    })
     scoped.effect(
       () => () => {
         jobSeatFilled = false
