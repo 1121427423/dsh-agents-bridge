@@ -25,8 +25,8 @@
 | IM-5 | Important | `src/kernel/manager.ts:247,359,465` | 续跑指针只在终态落盘 → 中途重启即丢，`agents_send` 永久无法续跑 | **fixed**（B2） |
 | IM-6 | Important | `src/kernel/store.ts:126-136,212-221` | 整表覆写：同目录两个 store 时，后写者吞掉先写者新增的行 | **fixed**（B2，见 §I） |
 | IM-7 | Important | `src/kernel/manager.ts:173,464,634`（`session.ts:80,129-144`） | 终态会话永不从 `live` 驱逐 + transcript 无上限 → 长期宿主 RSS 单调增长 | **fixed**（B2） |
-| IM-8 | Important | `src/drivers/argv.ts:544-552`（`claude.ts:1036-1050`） | 300s 空闲看门狗在 `tool_use`→`tool_result` 静默期误杀健康长工具调用 | verified |
-| IM-9 | Important | `src/drivers/generic-argv.ts:17-21,237-239,305` | generic 驱动删掉所有空行，违反自己声明的逐字契约 | verified |
+| IM-8 | Important | `src/drivers/argv.ts:544-552`（`claude.ts:1036-1050`） | 300s 空闲看门狗在 `tool_use`→`tool_result` 静默期误杀健康长工具调用 | **fixed**（B3，见 §J） |
+| IM-9 | Important | `src/drivers/generic-argv.ts:17-21,237-239,305` | generic 驱动删掉所有空行，违反自己声明的逐字契约 | **fixed**（B3，见 §J） |
 
 MI 级（复核后降级，仍修）：MI-1 Host 栅栏只看 `Host` 头（`host/api.ts:181-198`）· MI-2 不传 `cwd` 绕过 cwd 策略
 （`manager.ts:403-410`）· MI-3 `allowedCwd` fail-open（`policy.ts:49-59,140`）· MI-4 `readLines` 无单行上限
@@ -35,6 +35,9 @@ MI-6 `exited` 只在 `close` 结算（`spawn.ts:213-223`）· MI-7 强制终态�
 MI-8 `probe(refresh)` 同步重扫（`registry.ts:437-441`）。
 
 **B2 状态**：上述 MI 段中属 B2 的 **MI-2 · MI-3 · MI-6 · MI-7 · MI-8 均已 fixed**（其余 MI-4/MI-5 属 B3，未动）。
+
+**B3 状态**：MI 段中的 **MI-4 · MI-5 已 fixed**，§G-3 的 **MI-18** 同批 fixed（三条均见 §J）；
+其余 MI-1/MI-9…MI-15/MI-22 与 IM-15/MI-16/MI-17/MI-19/MI-20/MI-21 依 §E-2 并入后续批次，本批未动。
 
 ## B. 监理亲手复现（独立于 workbuddy 自述）
 
@@ -83,7 +86,7 @@ IM-3 overflow (timeoutMs=1e12)      : fired after 1ms
 |---|---|---|
 | B1 | IM-2 · IM-3 | **fixed**（`c554a6f`；监理复跑 785/1 · tsc 0 · 双构建 · verify 11/11，并自验负控：把 codebuddy 新字段翻回 `false` → 新测试真红） |
 | B2 | IM-4 · IM-5 · IM-6 · IM-7 · MI-2 · MI-3 · MI-6 · MI-7 · MI-8 | **fixed**（本分支未提交；vitest 808/1 · tsc 0 · 双构建 · verify 11/11，九条均先红后绿，见 §I） |
-| B3 | IM-8 · IM-9 · MI-4 · MI-5 + **IM-15**（ACP `dispose()` 零调用者 → 终端孤儿）· MI-16 · MI-17 · MI-18 · MI-19 · MI-20 · MI-21 | pending |
+| B3 | IM-8 · IM-9 · MI-4 · MI-5 + **IM-15**（ACP `dispose()` 零调用者 → 终端孤儿）· MI-16 · MI-17 · MI-18 · MI-19 · MI-20 · MI-21 | **IM-8 · IM-9 · MI-4 · MI-5 · MI-18 fixed**（见 §J）；其余（IM-15 · MI-16 · MI-17 · MI-19 · MI-20 · MI-21）依 §E-2 并入 B3b+B6 卫生批 |
 | B4 | IM-1 · IM-10 · IM-11 · IM-12 · IM-13 · MI-9 —— **IM-1 与 IM-10 必须同批**（前者今天被后者掩盖） | pending |
 | B5 | MI-1 · **IM-16**（settings 清空字段静默 no-op，却报 ok:true）· **IM-17**（`agents_output` nextIndex 越过未展示事件）· **IM-18**（Origin 丢端口 → 任意 loopback 端口页面可驱动 API）· **IM-19**（`textSeen` 永不复位 → 渲染粘连）· MI-10…MI-15 · MI-22 | pending |
 | B6 | 门禁自身：**IM-14**（测试文件不在类型门禁内，含 4 个真 TS2339）· 真空断言 · `verify` 无 CI 入口 | pending → **并入 B3b**（见 §E-2） |
@@ -338,3 +341,58 @@ TS2322、TS2349）是**脱离工程 tsconfig 独立编译的假象**，不计入
 **遗留（不粉饰）**：MI-8 只做到"refresh 不再重走"；**首次冷扫描仍是同步 `fs.readdirSync`**（原设计，
 受 `budgetMs` 约束），把它真正移出事件循环需要把 `scanDesktopBundles` 改异步或上 worker，属 B4 范围，
 未在本批夹带。
+
+## J. B3 落地记录（drivers：流式 + 生命周期卫生）
+
+范围 = 监理指派的**五条**：**IM-8 · IM-9 · MI-4 · MI-5 · MI-18**。
+（§E-2 已把 B3 原列的 IM-15 · MI-16 · MI-17 · MI-19 · MI-20 · MI-21 并入 B3b+B6，本批**未动**。）
+树未提交（按要求保持 dirty）。本批新增 22 个测试：B2 的 808/1 → 本批 **830 passed / 1 skipped**。
+
+五条全部**先红后绿**；红是"撤掉修复"的负控实测（与该条的绿在同一会话内跑出）。
+命令皆为 `/opt/homebrew/bin/node node_modules/vitest/vitest.mjs run <file> -t "<name>"`。
+
+| ID | 修复（文件:行） | 红（负控 → 观测失败文本） |
+|---|---|---|
+| IM-8 | `argv.ts:670-706` 新增 `STREAM_JSON_IDLE_TIMEOUT_MS = 1_800_000`，claude/codebuddy 默认窗口 300s→30min；`manager.ts:80-110` 同表同步抬高（法条要求两层同数）；`definitions.ts:546,595,654,772-774` 把 `idleTimeoutMs` 加进 `agents_run` / `agents_run_many` 并透传（`capRunWindow`） | ① 驱动层 `git stash push -- src/drivers/argv.ts src/kernel/manager.ts` → `expected 'timeout' to be 'running'`（claude.test.ts:666，6 分钟静默处）；② 管理层同一 stash → `expected 'timeout' to be 'running'`（manager-watchdog.test.ts:151）；③ `git stash push -- src/tools/definitions.ts` → 2 failed，`expected { agent: 'fake-slow', …(1) } to match object { idleTimeoutMs: 7000 }` |
+| IM-9 | `argv.ts:541-561,576-668` 给 `readLines` 加 `preserveBlankLines`；`generic-argv.ts:253-274` 传 `true`（不再用"按行重组 + 删空行"） | 负控改回 `preserveBlankLines: false` → `expected 'line1\nline2\nline3\ngap\nend' to be 'line1\n\nline2\n\n\nline3\ngap\n   \n…'`（与 §H 的 `line1\n\nline2\n\n\nline3` 复现逐字一致） |
+| MI-4 | 新模块 `kernel/stream-limits.ts`（单行 16 MiB / 单流 256 MiB / `StreamOverflowError`）；`argv.ts:576-668` 的 `readLines` 与 `kernel/spawn.ts:122-182` 的 `LineSplitter` 同数执行；`spawn.ts:384-405` 溢出即 SIGKILL 进程组并以 error 结算；六个驱动（claude/codebuddy 同路径、generic、openclaw、zcode、codex、acp）都把 `onOverflow` 接到自己的终态机制（新终态 `'overflow'` → `status:'failed'`，绝不静默截断） | ① `git stash push -- src/drivers/argv.ts`（reader 回到无上限）→ 单行 `expected [] to have a length of 1 but got +0`；总量 `expected [ 'aaaa', 'bbbb', 'cccc', 'dddd' ] to deeply equal [ 'aaaa', 'bbbb' ]`；② 上限临时置 `MAX_SAFE_INTEGER` → 内核 `expected undefined to be an instance of Error`（spawnDetached 不再溢出结算），并触发 sanity 断言 `expected 268435456 to be greater than or equal to 9007199254740991`；③ 只把 generic 的 `onOverflow` 改成 no-op → `expected 'pending' to be 'result'`（2015ms：驱动器再也不会结算） |
+| MI-5 | `openclaw.ts:354-398` `parseWholeBufferOpenclawResult` 改为**遍历每一个** `{` 开头行直到找到完整 result（原先遇到第一个就 `return`）；用"最后一个 result 标记（`payloads`/`durationMs`）"作为候选上界，纯事件流仍是一次子串扫描、零次 parse | 负控把该行改回 `return tryParseOpenclawResult(...)` → `expected 'timeout' to be 'completed'`（边界永不 arm，答案被空闲看门狗丢弃） |
+| MI-18 | 把 `signal.removeEventListener('abort', onAbort)` 移进**唯一的** settle 出口 `finishOnce`：`generic-argv.ts:215-226`、`openclaw.ts:798-807`、`zcode.ts:388-397`；`onAbort` 改成提升声明（与 codex 同形），settle 路径里原先"早返回之后"的那行删除 | 负控同时注释掉三处释放 → 3 failed，`expected 1 to be +0`（取消后监听器仍在） |
+
+**IM-8 的取舍（为什么选"抬默认值"而不是"未配对 tool_use 不计 idle"）**：ledger 给了两条路。
+真正在生产里杀运行的是**管理层**看门狗（`manager.ts:626-647`），它只看到归一化事件、看不到
+`tool_use`/`tool_result` 帧，所以"驱动侧识别未配对 tool_use"这一半**单独落地并不能阻止那次误杀**；
+而两层表按本仓库法条必须同数。因此选"把默认窗口抬到单次工具调用可信上限之上"（Claude Code 自己的
+单次工具上限是 600s，30min 是它的 3 倍），并把 `idleTimeoutMs` 暴露到 schema 让调用方按任务加宽 ——
+这是最小且端到端自洽的改动。**残余**：调用方显式给一个很小的 `idleTimeoutMs` 时，长工具调用仍会被杀 ——
+现在这是被文档化的知情选择，而不是默认行为。
+
+**MI-18 只做了一半**：ledger 明示其"保留上下文"那一半就是 IM-7（`live` 永不驱逐），B2 已修；
+本批只动监听器释放，未重复实现。
+
+**一次自纠（记账，与 §B/§H 同一条纪律）**：MI-18 的第一版测试让假 `AbortSignal` **自己 fire**，
+负控跑出来是**绿的** —— 因为无论是平台还是我的假件，`{once:true}` 监听器在事件触发后就会被摘掉，
+"监听器计数为 0"于是与驱动器有没有释放**无关**。这正是"对照写错会给出假信号"。改成经
+`handle.cancel()`（管理器真实杀路径，abort 事件从不触发）后，负控 3/3 真红。
+记录：`tests/helpers/recording-signal.ts` 的注释里写明了为什么不可以用 abort-fire 驱动这个断言。
+
+**门禁（最终树，真实数字）**
+
+- `/opt/homebrew/bin/node node_modules/vitest/vitest.mjs run` → **830 passed / 1 skipped**（53 files：52 passed / 1 skipped）
+- `/opt/homebrew/bin/node node_modules/typescript/bin/tsc --noEmit` → **0 errors**
+- `/opt/homebrew/bin/node scripts/build.mjs` → `lib/index.js 360.6kb`
+- `/opt/homebrew/bin/node scripts/build-client.mjs` → `lib/client.js 73.8kb`
+- `python3 /Users/king/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py .` → **11/11 PASS**
+- （额外，非本批门禁）用 `/tmp/tsconfig.b3tests.json`（`extends` 仓库 tsconfig、`rootDir` 上提、只 include
+  本批改动的 9 个测试文件 + helpers）复核：**0 errors** —— 提前确认本批的测试改动不会给 IM-14/B3b 添新债。
+
+**已知残余（不粉饰）**
+
+1. MI-4 的**总量上限（256 MiB/流）**是"失败得响亮"的取舍：一个真的吐出 >256 MiB stdout 的运行现在会
+   报 `failed` 而不是继续吃宿主内存。这是 ledger「溢出即报错并终止进程组」的字面要求；阈值取在
+   任何可信运行之上、宿主危险线之下，且两条 reader 同数。
+2. `readLines` 的驱动侧上限在**生产路径上不可达**：`integrate.ts` 的 `kernelSpawn` 让内核 `LineSplitter`
+   先在同一数值上触发。保留它是纵深防御（驱动可被别的 spawn 缝直接使用），不是重复检测。
+3. 本批**没有**碰 §E 原列在 B3 的 IM-15/MI-16/MI-17/MI-19/MI-20/MI-21（§E-2 已把它们移出 B3）。
+4. `openclaw` 的整块 result 扫描现在以"最后一个 result 标记"为界：一个把 `"durationMs"` 字样放进
+   **日志行**的长流会多付几次 O(候选) 的 parse（仍远小于原先每行全 buffer 的代价），语义上不会误判。

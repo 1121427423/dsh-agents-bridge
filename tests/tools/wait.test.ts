@@ -302,10 +302,11 @@ describe('agents_wait does not change the fire-and-forget contract', () => {
       const parameters = (tools.get(name)?.parameters ?? {}) as { properties?: Record<string, unknown> }
       return Object.keys(parameters.properties ?? {}).sort()
     }
-    // agents_run's published surface is unchanged — no wait knob was smuggled
+    // agents_run's published surface is unchanged apart from `idleTimeoutMs`,
+    // the per-run no-output window IM-8 requires — no wait knob was smuggled
     // into it (that would be the D5 violation this tool exists to avoid).
     expect(properties('agents_run')).toEqual(
-      ['agent', 'cwd', 'effort', 'mode', 'model', 'prompt', 'timeoutMs'],
+      ['agent', 'cwd', 'effort', 'idleTimeoutMs', 'mode', 'model', 'prompt', 'timeoutMs'],
     )
     expect(properties('agents_wait')).toEqual(['sessionIds', 'sinceIndex', 'timeoutMs', 'until'])
   })

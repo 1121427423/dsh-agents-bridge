@@ -1017,9 +1017,23 @@ export class AcpClient {
    * Attach the stdout reader. MUST run before the first write: the peer may emit
    * a startup burst that fills the pipe while we are still writing, and a
    * reader attached afterwards deadlocks (multica `claude_deadlock_test.go`).
+   *
+   * A peer that never emits `\n` (or never stops) would grow this reader's
+   * buffer inside the host process, so a limit breach fails every in-flight
+   * request and marks the stream dead (MI-4): the run settles as a failure
+   * naming the overrun, and the shutdown path terminates the group.
    */
   start(): void {
-    const reader = readLines(this.#child.stdout, (line) => this.#handleLine(line))
+    const reader = readLines(
+      this.#child.stdout,
+      (line) => this.#handleLine(line),
+      {
+        onOverflow: (overflow) => {
+          this.#failAll(overflow)
+          this.#markDead()
+        },
+      },
+    )
     void reader.flushed.then(() => {
       this.#failAll(new Error('ACP engine closed its output stream'))
       this.#markDead()

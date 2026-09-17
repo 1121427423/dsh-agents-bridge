@@ -655,7 +655,7 @@ export async function runCodex(
 
   const parser = new CodexStreamParser({ emit: (message) => session.push(message) }, now)
   const stderrTail = { value: '' }
-  let terminalReason: 'none' | 'cancelled' | 'timeout' | 'idle' = 'none'
+  let terminalReason: 'none' | 'cancelled' | 'timeout' | 'idle' | 'overflow' = 'none'
   let scanError: unknown
   let hardTimer: NodeJS.Timeout | undefined
   let idleTimer: NodeJS.Timeout | undefined
@@ -700,13 +700,16 @@ export async function runCodex(
     session.finish(result)
   }
 
-  function requestTerminal(reason: 'cancelled' | 'timeout' | 'idle', message: string): void {
+  function requestTerminal(
+    reason: 'cancelled' | 'timeout' | 'idle' | 'overflow',
+    message: string,
+  ): void {
     if (terminalReason !== 'none') return
     terminalReason = reason
     finishOnce({
       sessionId: session.sessionId,
       agentId: opts.agent,
-      status: reason === 'cancelled' ? 'cancelled' : 'timeout',
+      status: reason === 'cancelled' ? 'cancelled' : reason === 'overflow' ? 'failed' : 'timeout',
       exitCode: null,
       text: '',
       error: message,
@@ -722,12 +725,20 @@ export async function runCodex(
   }
 
   // Attach the reader before any other work so no early frame is lost.
-  const reader = readLines(child.stdout, (line) => {
-    parser.handleLine(line)
-    // ABI v6: codex names its thread id in the first events; publish it as soon
-    // as it is seen so the kernel can persist the resume pointer (IM-5).
-    session.pinBackendSessionId(parser.state.threadId)
-  })
+  const reader = readLines(
+    child.stdout,
+    (line) => {
+      parser.handleLine(line)
+      // ABI v6: codex names its thread id in the first events; publish it as soon
+      // as it is seen so the kernel can persist the resume pointer (IM-5).
+      session.pinBackendSessionId(parser.state.threadId)
+    },
+    {
+      // A stream that never emits a newline would grow this reader's buffer in
+      // the host process; fail loudly and kill the group instead (MI-4).
+      onOverflow: (overflow) => requestTerminal('overflow', overflow.message),
+    },
+  )
   child.stdout.on('error', (err: unknown) => {
     scanError = err
     reader.stop()

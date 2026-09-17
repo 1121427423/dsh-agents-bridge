@@ -86,10 +86,17 @@ const ORPHAN_CLOCK_SLACK_MS = 5_000
  * stream; this one watches the *manager's* view of the run and is the only thing
  * that catches a driver wedged before it arms its own timer. They are kept equal
  * so a run cannot be killed at two different thresholds.
+ *
+ * `claude` / `codebuddy` carry `STREAM_JSON_IDLE_TIMEOUT_MS` in
+ * `src/drivers/argv.ts` — 30 minutes, not 5 (IM-8). Those two dialects emit
+ * NOTHING between a `tool_use` frame and its `tool_result`, so a window sized
+ * for "no output while thinking" killed every healthy tool call longer than
+ * five minutes. Both tables MUST move together: if only the driver's did, this
+ * outer watchdog would still reap the run at the old threshold.
  */
 const DEFAULT_IDLE_TIMEOUT_MS: Readonly<Record<ProtocolFamily, number>> = {
-  claude: 300_000,
-  codebuddy: 300_000,
+  claude: 1_800_000,
+  codebuddy: 1_800_000,
   codex: 300_000,
   openclaw: 600_000,
   generic: 300_000,

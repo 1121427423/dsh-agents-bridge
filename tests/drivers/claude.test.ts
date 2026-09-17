@@ -9,7 +9,7 @@
 import { readFileSync } from 'node:fs'
 import { PassThrough } from 'node:stream'
 
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type {
   AgentMessage,
@@ -617,5 +617,86 @@ describe('run() over a fake child', () => {
       '--profile',
       'workbuddy',
     ])
+  })
+})
+
+/**
+ * IM-8 — the idle watchdog must not kill a HEALTHY run while it is inside a
+ * tool call.
+ *
+ * claude's stream-json emits nothing at all between the assistant `tool_use`
+ * frame and the following `tool_result` frame: stdout is silent for the whole
+ * duration of the tool. An idle timer that only looks at raw stdout data
+ * therefore cannot tell "the tool is running" from "the CLI is wedged", and a
+ * 300 s window kills any tool call longer than that.
+ *
+ * Time is faked, not slept: the six minutes below are the ledger's oracle
+ * (`init → tool_use → sleep 6 min → tool_result`), compressed onto the timer
+ * seam so the suite still runs in milliseconds.
+ */
+describe('IM-8: a long tool call is not idle silence', () => {
+  const INIT = '{"type":"system","subtype":"init","session_id":"idle-1","model":"auto"}'
+  const TOOL_USE =
+    '{"type":"assistant","message":{"id":"m1","model":"auto","content":' +
+    '[{"type":"tool_use","id":"call_1","name":"Bash","input":{"command":"sleep 360"}}]}}'
+  const TOOL_RESULT =
+    '{"type":"user","message":{"content":' +
+    '[{"type":"tool_result","tool_use_id":"call_1","content":"ok"}]}}'
+  const RESULT =
+    '{"type":"result","subtype":"success","result":"the build passed","session_id":"idle-1","is_error":false}'
+
+  it('keeps the default window above a six-minute tool_use → tool_result gap', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    try {
+      const child = new FakeChild()
+      const backend = createBackendWithRuntime('claude', makeDeps(), {
+        spawn: () => child,
+        now: () => 0,
+      })
+      const handle = await backend.run(
+        { agent: 'claude', prompt: 'run the long build' },
+        makeDeps(),
+        new AbortController().signal,
+      )
+
+      child.emit(INIT)
+      child.emit(TOOL_USE)
+      await vi.advanceTimersByTimeAsync(360_000)
+      // Six minutes of protocol-legal silence: the run is healthy.
+      expect(handle.snapshot().status).toBe('running')
+
+      child.emit(TOOL_RESULT)
+      child.emit(RESULT)
+      child.finish(0)
+      const finished = await handle.done
+      expect(finished.status).toBe('completed')
+      expect(finished.text).toBe('the build passed')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('still fires when the caller explicitly asks for a short window (control)', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    try {
+      const child = new FakeChild()
+      const backend = createBackendWithRuntime('claude', makeDeps(), {
+        spawn: () => child,
+        now: () => 0,
+      })
+      const handle = await backend.run(
+        { agent: 'claude', prompt: 'x', idleTimeoutMs: 30_000 },
+        makeDeps(),
+        new AbortController().signal,
+      )
+
+      child.emit(INIT)
+      child.emit(TOOL_USE)
+      await vi.advanceTimersByTimeAsync(30_000)
+      // The knob is not decoration: a caller who narrows the window gets it.
+      expect(handle.snapshot().status).toBe('timeout')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

@@ -185,7 +185,7 @@ export async function runGeneric(
 
   const chunks: string[] = []
   const stderrTail = { value: '' }
-  let terminalReason: 'none' | 'cancelled' | 'timeout' | 'idle' = 'none'
+  let terminalReason: 'none' | 'cancelled' | 'timeout' | 'idle' | 'overflow' = 'none'
   let writeError: unknown
   let hardTimer: NodeJS.Timeout | undefined
   let idleTimer: NodeJS.Timeout | undefined
@@ -215,16 +215,26 @@ export async function runGeneric(
   function finishOnce(result: AgentResult): void {
     if (session.result !== undefined) return
     clearTimers()
+    // Released on EVERY settle path, including the ones that return early
+    // (cancel / timeout / idle / overflow). The removal used to sit in the
+    // settle task behind that early return, so a cancelled run kept its
+    // listener — and with it this whole run closure — reachable from the
+    // caller's AbortController (MI-18). `onAbort` is a hoisted declaration
+    // precisely so this single place can own the release.
+    signal.removeEventListener('abort', onAbort)
     session.finish(result)
   }
 
-  function requestTerminal(reason: 'cancelled' | 'timeout' | 'idle', message: string): void {
+  function requestTerminal(
+    reason: 'cancelled' | 'timeout' | 'idle' | 'overflow',
+    message: string,
+  ): void {
     if (terminalReason !== 'none') return
     terminalReason = reason
     finishOnce({
       sessionId,
       agentId: opts.agent,
-      status: reason === 'cancelled' ? 'cancelled' : 'timeout',
+      status: reason === 'cancelled' ? 'cancelled' : reason === 'overflow' ? 'failed' : 'timeout',
       exitCode: null,
       text: '',
       error: message,
@@ -240,9 +250,22 @@ export async function runGeneric(
   // Attach the stdout reader before the prompt write, for the same reason as
   // the claude driver: a CLI that prints a banner first would otherwise block
   // on a full stdout pipe while we block writing stdin.
-  const reader = readLines(child.stdout, (line) => {
-    chunks.push(line)
-  })
+  const reader = readLines(
+    child.stdout,
+    (line) => {
+      chunks.push(line)
+    },
+    {
+      // The generic contract is verbatim stdout (IM-9): a blank or
+      // whitespace-only line is part of what the CLI printed.
+      preserveBlankLines: true,
+      // …and because this driver RETAINS every line, its stream is the one that
+      // most needs the bound: a newline-less writer would grow `chunks`
+      // unboundedly inside the host process (MI-4). The run fails loudly
+      // instead.
+      onOverflow: (overflow) => requestTerminal('overflow', overflow.message),
+    },
+  )
   child.stderr.on('data', (chunk: Buffer | string) => {
     const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
     stderrTail.value = (stderrTail.value + text).slice(-STDERR_TAIL_BYTES)
@@ -290,7 +313,12 @@ export async function runGeneric(
   child.stdout.on('data', touchIdle)
   touchIdle()
 
-  const onAbort = (): void => requestTerminal('cancelled', 'execution cancelled')
+  // A hoisted declaration (not a `const`) because `finishOnce` above releases
+  // this listener and the two are mutually recursive by design — the same
+  // shape the codex driver uses.
+  function onAbort(): void {
+    requestTerminal('cancelled', 'execution cancelled')
+  }
   if (signal.aborted) onAbort()
   else signal.addEventListener('abort', onAbort, { once: true })
 
@@ -304,8 +332,6 @@ export async function runGeneric(
       void child.terminate().catch(() => {})
       return
     }
-
-    signal.removeEventListener('abort', onAbort)
 
     // stdout verbatim (trimmed), no dialect inference whatsoever.
     const text = chunks.join('\n').trim()

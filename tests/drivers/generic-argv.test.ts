@@ -17,6 +17,8 @@ import {
   buildGenericArgs,
   genericResumeFlagFromEnv,
 } from '../../src/drivers/generic-argv.ts'
+import { MAX_STREAM_LINE_BYTES } from '../../src/kernel/stream-limits.ts'
+import { RecordingSignal } from '../helpers/recording-signal.ts'
 
 const silentLogger = {
   debug: () => {},
@@ -230,6 +232,93 @@ describe('run() over a fake child', () => {
     const result = await handle.done
     expect(specs[0]?.args).toEqual(['-r', 'sess-9'])
     expect(result.backendSessionId).toBe('sess-9')
+  })
+
+  it('keeps blank and whitespace-only lines: stdout is verbatim, not line-reassembled (IM-9)', async () => {
+    const { child, deps, backend } = launch()
+    const handle = await backend.run(
+      { agent: 'generic', prompt: PROMPT },
+      deps,
+      new AbortController().signal,
+    )
+    // The header's contract is "whatever the CLI printed becomes the run's
+    // text, untouched apart from a surrounding-whitespace trim". A blank line
+    // (or a line that is only spaces) is part of what it printed.
+    child.emit('line1\n\nline2\n\n\nline3\n')
+    child.emit('gap\n   \nend\n')
+    child.finish(0)
+    const result = await handle.done
+    const expected = 'line1\n\nline2\n\n\nline3\ngap\n   \nend'
+    expect(result.status).toBe('completed')
+    expect(result.text).toBe(expected)
+    expect(handle.messages).toEqual([{ type: 'text', content: expected, at: 0 }])
+  })
+
+  it('fails the run and kills the process when stdout overruns the cap (MI-4)', async () => {
+    const { child, deps, backend } = launch()
+    const handle = await backend.run(
+      { agent: 'generic', prompt: PROMPT },
+      deps,
+      new AbortController().signal,
+    )
+    // This driver RETAINS every line it reads, so a newline-less writer is the
+    // unbounded-memory case — inside the host process.
+    child.stdout.write(Buffer.alloc(MAX_STREAM_LINE_BYTES + 1, 0x61))
+
+    // Bounded wait so the pre-fix behaviour (the run simply keeps growing) is
+    // observed as a failed assertion rather than as a 5 s test timeout.
+    const settled = await Promise.race([
+      handle.done.then((result) => ({ kind: 'result' as const, result })),
+      new Promise<{ kind: 'pending' }>((resolve) => {
+        setTimeout(() => resolve({ kind: 'pending' }), 2_000)
+      }),
+    ])
+    expect(settled.kind).toBe('result')
+    if (settled.kind !== 'result') return
+
+    expect(settled.result.status).toBe('failed')
+    expect(settled.result.text).toBe('')
+    expect(settled.result.error).toMatch(/no newline/i)
+    expect(child.terminated).toBe(true)
+  })
+
+  it('releases the abort listener when a cancelled run settles (MI-18)', async () => {
+    const { child, deps, backend } = launch()
+    const signal = new RecordingSignal()
+    const handle = await backend.run(
+      { agent: 'generic', prompt: PROMPT },
+      deps,
+      signal.asAbortSignal(),
+    )
+    expect(signal.listenerCount()).toBe(1)
+
+    // Cancel through the SESSION, not through the signal: the manager's kill
+    // path is `session.cancel()` → `onCancel` → a terminal result, and the
+    // abort event never fires. (An abort-driven cancel cannot show this leak —
+    // the platform releases a `once` listener itself the moment it fires —
+    // which is exactly why the listener must be released on every settle path.)
+    await handle.cancel('operator stopped it')
+    const result = await handle.done
+    expect(result.status).toBe('cancelled')
+    expect(child.terminated).toBe(true)
+    // The settle task returns as soon as `terminalReason` is set, so a removal
+    // placed after that return never runs: a cancelled run used to keep the
+    // run-scoped closure reachable from the caller's AbortController forever.
+    expect(signal.listenerCount()).toBe(0)
+  })
+
+  it('releases the abort listener after a natural completion (control)', async () => {
+    const { child, deps, backend } = launch()
+    const signal = new RecordingSignal()
+    const handle = await backend.run(
+      { agent: 'generic', prompt: PROMPT },
+      deps,
+      signal.asAbortSignal(),
+    )
+    child.emit('done\n')
+    child.finish(0)
+    await handle.done
+    expect(signal.listenerCount()).toBe(0)
   })
 
   it('cancels through the abort signal', async () => {

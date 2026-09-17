@@ -18,6 +18,12 @@ import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import type { BridgeLogger, CommandSpec } from './types.ts'
 import { buildCommandLine } from './command-line.ts'
 import { redactArgs } from './logger.ts'
+import {
+  StreamOverflowError,
+  resolveStreamLimits,
+  type ResolvedStreamLimits,
+  type StreamLimits,
+} from './stream-limits.ts'
 
 /** SIGTERM → grace → SIGKILL window (multica's `claudeTerminateGrace`). */
 export const DEFAULT_GRACE_MS = 5_000
@@ -105,28 +111,69 @@ export function buildArgv(command: CommandSpec, args: readonly string[] = []): s
  * Incremental `\n` splitter. Implemented locally instead of with
  * `node:readline` so the trailing partial line and CRLF handling are explicit
  * and unit-testable without a stream.
+ *
+ * Bounded (MI-4): a writer that never emits `\n` would otherwise grow
+ * `#buffer` for as long as it runs, inside the host process. `push` THROWS
+ * {@link StreamOverflowError} once a bound is crossed — it never truncates,
+ * because a truncated line is indistinguishable from a complete frame to the
+ * parser downstream. After throwing, the splitter holds nothing and `flush()`
+ * stays empty.
  */
 export class LineSplitter {
   #buffer = ''
+  /** Byte length of `#buffer`, maintained incrementally (see the caps below). */
+  #bufferedBytes = 0
+  #totalBytes = 0
+  /** Set once a bound was crossed; re-thrown so the failure stays observable. */
+  #failure: StreamOverflowError | undefined
+  readonly #limits: ResolvedStreamLimits
+
+  constructor(limits?: StreamLimits) {
+    this.#limits = resolveStreamLimits(limits)
+  }
 
   push(chunk: string | Buffer): string[] {
-    this.#buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+    if (this.#failure !== undefined) throw this.#failure
+    const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+    const textBytes = Buffer.byteLength(text, 'utf8')
+    this.#totalBytes += textBytes
+    if (this.#totalBytes > this.#limits.maxTotalBytes) {
+      throw this.#fail(new StreamOverflowError('total', this.#totalBytes, this.#limits.maxTotalBytes))
+    }
+    this.#buffer += text
+    this.#bufferedBytes += textBytes
     const lines: string[] = []
     for (;;) {
       const index = this.#buffer.indexOf('\n')
       if (index === -1) break
-      lines.push(stripCr(this.#buffer.slice(0, index)))
+      const raw = this.#buffer.slice(0, index)
       this.#buffer = this.#buffer.slice(index + 1)
+      this.#bufferedBytes -= Buffer.byteLength(raw, 'utf8') + 1
+      lines.push(stripCr(raw))
+    }
+    // Checked AFTER the split: the remaining buffer is the single un-newlined
+    // run, so a chunk carrying many ordinary lines cannot trip the line cap.
+    if (this.#bufferedBytes > this.#limits.maxLineBytes) {
+      throw this.#fail(new StreamOverflowError('line', this.#bufferedBytes, this.#limits.maxLineBytes))
     }
     return lines
   }
 
   /** Emit whatever is left after the stream ended (a last line without `\n`). */
   flush(): string[] {
-    if (this.#buffer === '') return []
+    if (this.#failure !== undefined || this.#buffer === '') return []
     const line = stripCr(this.#buffer)
     this.#buffer = ''
+    this.#bufferedBytes = 0
     return [line]
+  }
+
+  /** Record the failure, drop everything held, and hand back the error to throw. */
+  #fail(error: StreamOverflowError): StreamOverflowError {
+    this.#failure = error
+    this.#buffer = ''
+    this.#bufferedBytes = 0
+    return error
   }
 }
 
@@ -334,8 +381,43 @@ export function spawnDetached(request: SpawnRequest): SpawnHandle {
     const spawned = child
     let spawnError: Error | undefined
 
-    const flushStdout = pipeLines(spawned.stdout, request.onStdoutLine, logger, 'stdout')
-    const flushStderr = pipeLines(spawned.stderr, request.onStderrLine, logger, 'stderr')
+    /**
+     * A stream crossed one of the output caps (MI-4). The run is already lost —
+     * the bytes are gone, not buffered — so the whole group is killed outright
+     * and `exited` settles with the overflow as its error.
+     *
+     * SIGKILL rather than the usual SIGTERM→grace→SIGKILL: the staged path's
+     * `exited` wait would observe the settle below and return before
+     * escalating, so a writer that ignores SIGTERM would survive. Nothing is
+     * gained by a grace window here — the output is already discarded.
+     */
+    const outputOverflow = (error: StreamOverflowError): void => {
+      logger?.error('agent output exceeded the stream cap; killing the process group', {
+        kind: error.kind,
+        bytes: error.bytes,
+        limitBytes: error.limitBytes,
+      })
+      sendSignal('SIGKILL')
+      settle({ code: null, signal: 'SIGKILL', error }, () => {
+        flushStdout()
+        flushStderr()
+      })
+    }
+
+    const flushStdout = pipeLines(
+      spawned.stdout,
+      request.onStdoutLine,
+      logger,
+      'stdout',
+      outputOverflow,
+    )
+    const flushStderr = pipeLines(
+      spawned.stderr,
+      request.onStderrLine,
+      logger,
+      'stderr',
+      outputOverflow,
+    )
 
     spawned.on('error', (err) => {
       spawnError = toError(err)
@@ -469,6 +551,8 @@ function settledWithin(promise: Promise<unknown>, ms: number): Promise<boolean> 
 /**
  * Attach the line splitter to one stream.
  *
+ * @param onOverflow called once when the splitter crosses an output cap; the
+ *   reader is already detached by then, so no further bytes are retained.
  * @returns a flush function that emits any trailing partial line. `settle()`
  *   calls it so output that arrived just before the child died is delivered
  *   even when `close` never fires (a descendant holds the pipe) and the stream
@@ -479,6 +563,7 @@ function pipeLines(
   emit: ((line: string) => void) | undefined,
   logger: BridgeLogger | undefined,
   label: 'stdout' | 'stderr',
+  onOverflow?: (error: StreamOverflowError) => void,
 ): () => void {
   if (!stream || !emit) return () => {}
   const splitter = new LineSplitter()
@@ -492,7 +577,22 @@ function pipeLines(
       }
     }
   }
-  stream.on('data', (chunk: Buffer | string) => deliver(splitter.push(chunk)))
+  const onData = (chunk: Buffer | string): void => {
+    let lines: string[]
+    try {
+      lines = splitter.push(chunk)
+    } catch (err) {
+      // Reading stops here on purpose: continuing would keep feeding a reader
+      // that has already refused the stream, and the bound exists to stop the
+      // host from holding this output (MI-4).
+      stream.off('data', onData)
+      if (err instanceof StreamOverflowError) onOverflow?.(err)
+      else logger?.error('line splitter failed', { stream: label, error: toError(err).message })
+      return
+    }
+    deliver(lines)
+  }
+  stream.on('data', onData)
   stream.on('end', () => deliver(splitter.flush()))
   stream.on('error', () => deliver(splitter.flush()))
   return () => deliver(splitter.flush())

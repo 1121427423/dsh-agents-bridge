@@ -7,6 +7,7 @@
  * this behaviour.
  */
 import { describe, expect, it } from 'vitest'
+import { PassThrough } from 'node:stream'
 
 import {
   DriverSession,
@@ -16,12 +17,18 @@ import {
   filterCustomArgs,
   filterLaunchPrefix,
   getDriverRuntime,
+  readLines,
   setDriverRuntime,
   unshellQuoteArg,
   type BlockedArgs,
   type SpawnSpec,
   type SpawnedProcess,
 } from '../../src/drivers/argv.ts'
+import {
+  MAX_STREAM_LINE_BYTES,
+  MAX_STREAM_TOTAL_BYTES,
+  type StreamOverflowError,
+} from '../../src/kernel/stream-limits.ts'
 import { createBackend, DRIVER_FAMILIES } from '../../src/drivers/index.ts'
 import type { AgentMessage, DriverDeps } from '../../src/kernel/types.ts'
 
@@ -125,6 +132,99 @@ describe('argsContainFlag', () => {
     expect(argsContainFlag(['--agent', 'x'], '--agent')).toBe(true)
     expect(argsContainFlag(['--agent=x'], '--agent')).toBe(true)
     expect(argsContainFlag(['--agentx', 'x'], '--agent')).toBe(false)
+  })
+})
+
+describe('readLines — the shared protocol reader', () => {
+  function collect(): { stream: PassThrough; lines: string[]; read: (text: string) => void } {
+    const stream = new PassThrough()
+    const lines: string[] = []
+    readLines(stream, (line) => lines.push(line))
+    return { stream, lines, read: (text) => stream.write(text) }
+  }
+
+  it('drops blank lines by default (the protocol-frame contract)', () => {
+    const { stream, lines, read } = collect()
+    read('a\n\n\nb\n')
+    expect(lines).toEqual(['a', 'b'])
+    stream.end()
+  })
+
+  it('preserves blank and whitespace-only lines when asked (IM-9)', () => {
+    const stream = new PassThrough()
+    const lines: string[] = []
+    readLines(stream, (line) => lines.push(line), { preserveBlankLines: true })
+    stream.write('a\n\n   \nb\n')
+    stream.end()
+    expect(lines).toEqual(['a', '', '   ', 'b'])
+  })
+
+  it('fails loudly on a single line over the cap instead of holding it (MI-4)', () => {
+    const stream = new PassThrough()
+    const lines: string[] = []
+    const overflows: StreamOverflowError[] = []
+    const reader = readLines(stream, (line) => lines.push(line), {
+      maxLineBytes: 16,
+      onOverflow: (overflow) => overflows.push(overflow),
+    })
+    stream.write('x'.repeat(64))
+
+    expect(overflows).toHaveLength(1)
+    expect(overflows[0]?.kind).toBe('line')
+    expect(overflows[0]?.limitBytes).toBe(16)
+    expect(overflows[0]?.bytes).toBeGreaterThanOrEqual(16)
+    expect(overflows[0]?.message).toMatch(/no newline|line/i)
+    // The oversized run is NEVER handed to the caller: a silent truncation
+    // would look like a complete protocol frame.
+    expect(lines).toEqual([])
+    // The reader releases the stream so a newline-less writer cannot keep
+    // growing the buffer after the failure.
+    expect(stream.listenerCount('data')).toBe(0)
+    stream.end()
+    return expect(reader.flushed).resolves.toBeUndefined()
+  })
+
+  it('bounds the total bytes a stream may deliver (MI-4)', () => {
+    const stream = new PassThrough()
+    const lines: string[] = []
+    const overflows: StreamOverflowError[] = []
+    readLines(stream, (line) => lines.push(line), {
+      maxTotalBytes: 16,
+      onOverflow: (overflow) => overflows.push(overflow),
+    })
+    // 10 bytes, then 10 more: the second chunk crosses the budget.
+    stream.write('aaaa\nbbbb\n')
+    stream.write('cccc\ndddd\n')
+
+    expect(lines).toEqual(['aaaa', 'bbbb'])
+    expect(overflows).toHaveLength(1)
+    expect(overflows[0]?.kind).toBe('total')
+    expect(overflows[0]?.limitBytes).toBe(16)
+    expect(overflows[0]?.bytes).toBe(20)
+    stream.end()
+  })
+
+  it('bounds a newline-less writer with the shipped defaults', () => {
+    // The shipped caps must be generous enough for a real protocol frame and
+    // finite enough that a writer that never emits `\n` cannot grow the host.
+    expect(MAX_STREAM_LINE_BYTES).toBeGreaterThanOrEqual(8 * 1024 * 1024)
+    expect(MAX_STREAM_TOTAL_BYTES).toBeGreaterThanOrEqual(MAX_STREAM_LINE_BYTES)
+
+    const stream = new PassThrough()
+    const lines: string[] = []
+    const overflows: StreamOverflowError[] = []
+    readLines(stream, (line) => lines.push(line), {
+      onOverflow: (overflow) => overflows.push(overflow),
+    })
+    // One chunk one byte over the line cap: the ledger's "newline-less writer"
+    // oracle, at the bound itself rather than at an arbitrary 50 MB.
+    stream.write(Buffer.alloc(MAX_STREAM_LINE_BYTES + 1, 0x61))
+
+    expect(overflows).toHaveLength(1)
+    expect(overflows[0]?.kind).toBe('line')
+    expect(overflows[0]?.bytes).toBeGreaterThan(MAX_STREAM_LINE_BYTES)
+    expect(lines).toEqual([])
+    stream.end()
   })
 })
 

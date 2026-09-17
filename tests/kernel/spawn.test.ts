@@ -8,6 +8,7 @@ import {
   processGone,
   spawnDetached,
 } from '../../src/kernel/spawn.ts'
+import { MAX_STREAM_LINE_BYTES, StreamOverflowError } from '../../src/kernel/stream-limits.ts'
 
 describe('buildArgv', () => {
   it('prepends the interpreter and argsPrefix in the frozen order', () => {
@@ -39,9 +40,55 @@ describe('LineSplitter', () => {
     expect(splitter.push(Buffer.from('a\n\nb', 'utf8'))).toEqual(['a', ''])
     expect(splitter.flush()).toEqual(['b'])
   })
+
+  it('rejects a single line over the cap instead of growing the buffer (MI-4)', () => {
+    const splitter = new LineSplitter({ maxLineBytes: 8 })
+    expect(() => splitter.push('123456789')).toThrowError(StreamOverflowError)
+    // The oversized run is not emitted, not truncated, and not kept.
+    expect(splitter.flush()).toEqual([])
+  })
+
+  it('rejects a stream that exceeds the total byte budget (MI-4)', () => {
+    const splitter = new LineSplitter({ maxTotalBytes: 8 })
+    expect(() => splitter.push('ab\ncd\nef\n')).toThrowError(/total/i)
+    expect(splitter.flush()).toEqual([])
+  })
+
+  it('is unaffected by the caps for ordinary protocol frames (control)', () => {
+    const splitter = new LineSplitter()
+    expect(splitter.push('{"a":1}\n')).toEqual(['{"a":1}'])
+    expect(splitter.push('tail')).toEqual([])
+    expect(splitter.flush()).toEqual(['tail'])
+  })
 })
 
 describe('spawnDetached', () => {
+  it('fails the run loudly when a child emits a line over the cap (MI-4)', async () => {
+    const pidOf: number[] = []
+    const handle = spawnDetached({
+      // A writer that never emits a newline is the unbounded-memory case.
+      command: { executable: process.execPath },
+      args: ['-e', `process.stdout.write('x'.repeat(${MAX_STREAM_LINE_BYTES + 1}))`],
+      // A reader must exist for the bound to be enforced at all; production
+      // always attaches one (see `kernelSpawn` in integrate.ts).
+      onStdoutLine: () => {},
+    })
+    if (handle.pid !== undefined) pidOf.push(handle.pid)
+
+    const exit = await handle.exited
+    expect(exit.error).toBeInstanceOf(Error)
+    expect(exit.error?.message).toMatch(/line|newline/i)
+
+    // The bound must terminate the group, not leave the writer running.
+    const pid = pidOf[0]
+    if (pid !== undefined) {
+      const deadline = Date.now() + 4_000
+      while (!processGone(pid) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      expect(processGone(pid)).toBe(true)
+    }
+  })
   it('normalizes a synchronous spawn failure into a settled handle', async () => {
     // An empty `file` makes child_process.spawn throw synchronously; the handle
     // must still behave like a process that failed to start.

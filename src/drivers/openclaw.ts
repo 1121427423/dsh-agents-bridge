@@ -353,23 +353,48 @@ export function tryParseOpenclawResult(raw: string): OpenclawResultBlob | undefi
 
 /**
  * `parseWholeBufferOpenclawResult`: try the whole stdout text as one blob, then
- * retry from the first line that starts with `{` so a log preamble does not
+ * retry from each line that starts with `{` so a log or event preamble does not
  * defeat the parse. Only line *starts* are considered — scanning for braces at
  * arbitrary offsets would false-match JSON fragments inside log lines.
+ *
+ * EVERY candidate start is tried, not just the first (MI-5). Returning on the
+ * first `{`-starting line meant that a stream carrying events AND a trailing
+ * single-line result blob — a real shape — never found its result: the first
+ * candidate was an event frame, the parse failed, and the scan gave up. The
+ * boundary then never armed and the completed answer was thrown away when the
+ * idle watchdog fired.
+ *
+ * Candidates are bounded by the LAST result marker in the buffer (a blob must
+ * carry `payloads` or a non-zero `meta.durationMs`), so an ordinary event
+ * stream — no marker at all — costs one substring scan and no parsing, which is
+ * what keeps the cheap gate cheap.
  */
 export function parseWholeBufferOpenclawResult(text: string): OpenclawResultBlob | undefined {
   const trimmed = text.trim()
   if (trimmed === '') return undefined
   const direct = tryParseOpenclawResult(trimmed)
   if (direct !== undefined) return direct
+  const markerAt = lastResultMarkerOffset(trimmed)
+  if (markerAt < 0) return undefined
   const lines = trimmed.split('\n')
+  let offset = 0
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
-    if (line !== undefined && line.length > 0 && line[0] === '{') {
-      return tryParseOpenclawResult(lines.slice(i).join('\n').trim())
-    }
+    const start = offset
+    offset += (line?.length ?? 0) + 1
+    // A candidate can only be the blob's opening line if the blob's own marker
+    // still lies ahead of it; offsets grow, so nothing later can qualify.
+    if (start > markerAt) break
+    if (line === undefined || line.length === 0 || line[0] !== '{') continue
+    const parsed = tryParseOpenclawResult(lines.slice(i).join('\n').trim())
+    if (parsed !== undefined) return parsed
   }
   return undefined
+}
+
+/** Text offset of the last `payloads` / `durationMs` key, or -1 when absent. */
+function lastResultMarkerOffset(text: string): number {
+  return Math.max(text.lastIndexOf('"payloads"'), text.lastIndexOf('"durationMs"'))
 }
 
 /** Everything one openclaw stdout produced (`openclawEventResult`). */
@@ -731,7 +756,7 @@ export async function runOpenclaw(
 
   const parser = new OpenclawStreamParser({ emit: (m) => session.push(m) }, now)
   const stderrTail = { value: '' }
-  let terminalReason: 'none' | 'cancelled' | 'timeout' | 'idle' = 'none'
+  let terminalReason: 'none' | 'cancelled' | 'timeout' | 'idle' | 'overflow' = 'none'
   let hardTimer: NodeJS.Timeout | undefined
   let idleTimer: NodeJS.Timeout | undefined
   let boundaryTimer: NodeJS.Timeout | undefined
@@ -773,16 +798,24 @@ export async function runOpenclaw(
   function finishOnce(result: AgentResult): void {
     if (session.result !== undefined) return
     clearTimers()
+    // ONE release point for every settle path, including the early returns for
+    // cancel / timeout / idle / overflow: the removal used to sit behind that
+    // return, so a cancelled run kept its listener (MI-18). `onAbort` is a
+    // hoisted declaration so this place can own it.
+    signal.removeEventListener('abort', onAbort)
     session.finish(result)
   }
 
-  function requestTerminal(reason: 'cancelled' | 'timeout' | 'idle', message: string): void {
+  function requestTerminal(
+    reason: 'cancelled' | 'timeout' | 'idle' | 'overflow',
+    message: string,
+  ): void {
     if (terminalReason !== 'none') return
     terminalReason = reason
     finishOnce({
       sessionId,
       agentId: opts.agent,
-      status: reason === 'cancelled' ? 'cancelled' : 'timeout',
+      status: reason === 'cancelled' ? 'cancelled' : reason === 'overflow' ? 'failed' : 'timeout',
       exitCode: null,
       text: '',
       error: message,
@@ -826,10 +859,18 @@ export async function runOpenclaw(
     boundaryTimer = setTimeout(finishAtBoundary, idleGraceMs)
   }
 
-  const reader = readLines(child.stdout, (line) => {
-    parser.handleLine(line)
-    armResultBoundary(line)
-  })
+  const reader = readLines(
+    child.stdout,
+    (line) => {
+      parser.handleLine(line)
+      armResultBoundary(line)
+    },
+    {
+      // A stream that never emits a newline would grow this reader's buffer in
+      // the host process; fail loudly and kill the group instead (MI-4).
+      onOverflow: (overflow) => requestTerminal('overflow', overflow.message),
+    },
+  )
   child.stderr.on('data', (chunk: Buffer | string) => {
     const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
     stderrTail.value = (stderrTail.value + text).slice(-STDERR_TAIL_BYTES)
@@ -855,7 +896,11 @@ export async function runOpenclaw(
   child.stdout.on('data', touchIdle)
   touchIdle()
 
-  const onAbort = (): void => requestTerminal('cancelled', 'execution cancelled')
+  // A hoisted declaration: `finishOnce` above releases this listener, and the
+  // two are mutually recursive by design (same shape as the codex driver).
+  function onAbort(): void {
+    requestTerminal('cancelled', 'execution cancelled')
+  }
   if (signal.aborted) onAbort()
   else signal.addEventListener('abort', onAbort, { once: true })
 
@@ -871,7 +916,6 @@ export async function runOpenclaw(
     }
 
     const state = parser.finish()
-    signal.removeEventListener('abort', onAbort)
 
     let status: AgentResult['status'] = state.status
     let errMsg = state.error

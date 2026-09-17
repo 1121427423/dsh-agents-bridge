@@ -132,6 +132,26 @@ describe('manager watchdog: idle window', () => {
     expect(manager.status(started.sessionId)?.status).toBe('running')
   })
 
+  it('keeps the per-family default above a long tool call (IM-8)', async () => {
+    const clock = new FakeClock()
+    const manager = pool.create(SLOW_CLI, { clock }, {}, 100)
+
+    const started = await manager.run({
+      agent: 'claude',
+      prompt: 'a six-minute tool call produces no stdout at all',
+      timeoutMs: 0,
+      // No idleTimeoutMs: this pins the MANAGER's own per-family default, which
+      // is the layer that actually reaps a production run. Six minutes is the
+      // ledger's oracle for claude's protocol-legal tool_use silence.
+    })
+    await sleep(150)
+
+    clock.advance(360_000)
+    await sleep(60)
+    expect(manager.status(started.sessionId)?.status).toBe('running')
+    expect(manager.status(started.sessionId)?.terminal).toBe(false)
+  })
+
   it('lets the earliest deadline win when both are armed', async () => {
     const clock = new FakeClock()
     const manager = pool.create(SLOW_CLI, { clock }, {}, 100)

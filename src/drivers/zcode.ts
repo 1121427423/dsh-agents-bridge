@@ -347,7 +347,7 @@ export async function runZcode(
 
   const parser = new ZcodeEventParser((m) => session.push(m), now)
   const stderrTail = { value: '' }
-  let terminalReason: 'none' | 'cancelled' | 'timeout' | 'idle' = 'none'
+  let terminalReason: 'none' | 'cancelled' | 'timeout' | 'idle' | 'overflow' = 'none'
   let hardTimer: NodeJS.Timeout | undefined
   let idleTimer: NodeJS.Timeout | undefined
   let graceTimer: NodeJS.Timeout | undefined
@@ -388,16 +388,24 @@ export async function runZcode(
   function finishOnce(result: AgentResult): void {
     if (session.result !== undefined) return
     clearTimers()
+    // ONE release point for every settle path, including the early returns for
+    // cancel / timeout / idle / overflow: the removal used to sit behind that
+    // return, so a cancelled run kept its listener (MI-18). `onAbort` is a
+    // hoisted declaration so this place can own it.
+    signal.removeEventListener('abort', onAbort)
     session.finish(result)
   }
 
-  function requestTerminal(reason: 'cancelled' | 'timeout' | 'idle', message: string): void {
+  function requestTerminal(
+    reason: 'cancelled' | 'timeout' | 'idle' | 'overflow',
+    message: string,
+  ): void {
     if (terminalReason !== 'none') return
     terminalReason = reason
     finishOnce({
       sessionId: bridgeSessionId,
       agentId: opts.agent,
-      status: reason === 'cancelled' ? 'cancelled' : 'timeout',
+      status: reason === 'cancelled' ? 'cancelled' : reason === 'overflow' ? 'failed' : 'timeout',
       exitCode: null,
       text: '',
       error: message,
@@ -441,12 +449,20 @@ export async function runZcode(
     else graceTimer = setTimeout(settle, grace)
   }
 
-  const reader = readLines(child.stdout, (line) => {
-    parser.handleLine(line)
-    // ABI v6: publish the backend session id as soon as a frame names it (IM-5).
-    session.pinBackendSessionId(parser.state.backendSessionId)
-    if (parser.state.terminalSeen !== undefined) armTerminalBoundary()
-  })
+  const reader = readLines(
+    child.stdout,
+    (line) => {
+      parser.handleLine(line)
+      // ABI v6: publish the backend session id as soon as a frame names it (IM-5).
+      session.pinBackendSessionId(parser.state.backendSessionId)
+      if (parser.state.terminalSeen !== undefined) armTerminalBoundary()
+    },
+    {
+      // A stream that never emits a newline would grow this reader's buffer in
+      // the host process; fail loudly and kill the group instead (MI-4).
+      onOverflow: (overflow) => requestTerminal('overflow', overflow.message),
+    },
+  )
   child.stderr.on('data', (chunk: Buffer | string) => {
     const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
     stderrTail.value = (stderrTail.value + text).slice(-8 * 1024)
@@ -472,7 +488,11 @@ export async function runZcode(
   child.stdout.on('data', touchIdle)
   touchIdle()
 
-  const onAbort = (): void => requestTerminal('cancelled', 'execution cancelled')
+  // A hoisted declaration: `finishOnce` above releases this listener, and the
+  // two are mutually recursive by design (same shape as the codex driver).
+  function onAbort(): void {
+    requestTerminal('cancelled', 'execution cancelled')
+  }
   if (signal.aborted) onAbort()
   else signal.addEventListener('abort', onAbort, { once: true })
 
@@ -488,7 +508,6 @@ export async function runZcode(
     }
 
     const state = parser.finish()
-    signal.removeEventListener('abort', onAbort)
     let status: AgentResult['status'] = state.status
     let errMsg = state.error
 

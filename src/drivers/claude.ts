@@ -971,7 +971,7 @@ export async function runStreamJsonFamily(
   const stderrTail = { value: '' }
   let scanError: unknown
   let writeError: unknown
-  let terminalReason: 'none' | 'cancelled' | 'timeout' | 'idle' = 'none'
+  let terminalReason: 'none' | 'cancelled' | 'timeout' | 'idle' | 'overflow' = 'none'
 
   proc = rt.spawn({ command: commandLine.command, args: commandLine.args, cwd: opts.cwd, env })
   const child = proc
@@ -988,12 +988,22 @@ export async function runStreamJsonFamily(
   // Attach the stdout reader BEFORE writing anything to stdin. The CLI emits a
   // startup banner before its first stdin read; a driver that writes first
   // deadlocks against it (multica claude_deadlock_test.go).
-  const reader = readLines(child.stdout, (line) => {
-    parser.handleLine(line)
-    // ABI v6: publish the backend session id as soon as the stream names it, so
-    // the kernel can persist the resume pointer before the run settles (IM-5).
-    session.pinBackendSessionId(parser.state.sessionId)
-  })
+  const reader = readLines(
+    child.stdout,
+    (line) => {
+      parser.handleLine(line)
+      // ABI v6: publish the backend session id as soon as the stream names it,
+      // so the kernel can persist the resume pointer before the run settles
+      // (IM-5).
+      session.pinBackendSessionId(parser.state.sessionId)
+    },
+    {
+      // A stream that never emits a newline (or never stops) would grow this
+      // reader's buffer inside the host process; the run fails loudly and the
+      // group is terminated instead of being truncated (MI-4).
+      onOverflow: (overflow) => requestTerminal('overflow', overflow.message),
+    },
+  )
   child.stdout.on('error', (err: unknown) => {
     scanError = err
     reader.stop()
@@ -1033,10 +1043,14 @@ export async function runStreamJsonFamily(
     session.finish(result)
   }
 
-  function requestTerminal(reason: 'cancelled' | 'timeout' | 'idle', message: string): void {
+  function requestTerminal(
+    reason: 'cancelled' | 'timeout' | 'idle' | 'overflow',
+    message: string,
+  ): void {
     if (terminalReason !== 'none') return
     terminalReason = reason
-    const status: AgentResult['status'] = reason === 'cancelled' ? 'cancelled' : 'timeout'
+    const status: AgentResult['status'] =
+      reason === 'cancelled' ? 'cancelled' : reason === 'overflow' ? 'failed' : 'timeout'
     finishOnce({
       sessionId: session.sessionId,
       agentId: opts.agent,

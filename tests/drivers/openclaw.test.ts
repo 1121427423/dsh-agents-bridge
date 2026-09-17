@@ -25,6 +25,7 @@ import {
   parseOpenclawUsage,
   parseWholeBufferOpenclawResult,
 } from '../../src/drivers/openclaw.ts'
+import { RecordingSignal } from '../helpers/recording-signal.ts'
 
 const OPENCLAW_RESULT = readFileSync(
   new URL('../fixtures/openclaw-result.ndjson', import.meta.url),
@@ -499,6 +500,53 @@ describe('run() over a fake child', () => {
     const result = await handle.done
     expect(result.status).toBe('failed')
     expect(result.error).toMatch(/older than 2026\.5\.5/)
+  })
+
+  it('arms the boundary for an event stream whose result arrives as a single-line blob (MI-5)', async () => {
+    const child = new FakeChild()
+    const deps = makeDeps({ env: { DSH_AGENTS_BRIDGE_OPENCLAW_IDLE_GRACE_MS: '10' } })
+    const backend = createBackendWithRuntime('openclaw', deps, {
+      spawn: () => child,
+      now: () => 0,
+    })
+    const handle = await backend.run(
+      // A short idle window so a boundary that never arms is observed as a
+      // timeout within this test instead of after the 10-minute default.
+      { agent: 'openclaw', prompt: 'hi', idleTimeoutMs: 50 },
+      deps,
+      new AbortController().signal,
+    )
+    // Events FIRST, then a single-line result blob — the mixed shape. stdout
+    // deliberately never ends (the production hang).
+    child.emit(OPENCLAW_EVENTS)
+    child.emit('{"payloads":[{"text":"final answer"}],"meta":{"durationMs":5}}\n')
+    const result = await handle.done
+    expect(result.status).toBe('completed')
+    expect(result.text).toContain('final answer')
+    expect(child.terminated).toBe(true)
+  })
+
+  it('releases the abort listener when a cancelled run settles (MI-18)', async () => {
+    const child = new FakeChild()
+    const deps = makeDeps()
+    const backend = createBackendWithRuntime('openclaw', deps, {
+      spawn: () => child,
+      now: () => 0,
+    })
+    const signal = new RecordingSignal()
+    const handle = await backend.run(
+      { agent: 'openclaw', prompt: 'hi' },
+      deps,
+      signal.asAbortSignal(),
+    )
+    expect(signal.listenerCount()).toBe(1)
+
+    // Cancel through the SESSION (the manager's kill path), where the abort
+    // event never fires — see the note in the generic driver's twin test.
+    await handle.cancel('operator stopped it')
+    const result = await handle.done
+    expect(result.status).toBe('cancelled')
+    expect(signal.listenerCount()).toBe(0)
   })
 
   it('cancels through the abort signal', async () => {

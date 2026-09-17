@@ -61,10 +61,10 @@ export const MAX_WAIT_TIMEOUT_MS = 60_000
 export const DEFAULT_WAIT_TIMEOUT_MS = 20_000
 
 /**
- * Cap a per-run hard deadline at the runtime's timer ceiling.
+ * Cap a per-run window (`timeoutMs` / `idleTimeoutMs`) at the timer ceiling.
  *
- * The schema leaves `timeoutMs` unbounded on purpose: 0 means "no deadline", so
- * a caller expressing "this task may take a very long time" writes a very large
+ * The schema leaves both unbounded on purpose: 0 means "no deadline", so a
+ * caller expressing "this may take a very long time" writes a very large
  * number. Node does not reject a `setTimeout` delay above `MAX_TIMER_DELAY_MS` —
  * it rewrites it to **1 ms**, which would turn that intent into an immediate
  * timeout. The value is therefore lowered HERE, at the boundary where it enters
@@ -72,8 +72,8 @@ export const DEFAULT_WAIT_TIMEOUT_MS = 20_000
  * `MAX_WAIT_TIMEOUT_MS`; the watchdog applies the same clamp again for callers
  * that reach the kernel directly.
  */
-function capRunTimeout(timeoutMs: number): number {
-  return Math.min(Math.floor(timeoutMs), MAX_TIMER_DELAY_MS)
+function capRunWindow(ms: number): number {
+  return Math.min(Math.floor(ms), MAX_TIMER_DELAY_MS)
 }
 
 /**
@@ -543,6 +543,14 @@ export function createToolDefinitions(manager: AgentManager) {
         description:
           `Hard wall-clock deadline in ms, capped at ${MAX_TIMER_DELAY_MS}. 0 or omitted = no deadline (idle watchdog only).`,
       },
+      idleTimeoutMs: {
+        type: 'integer',
+        description:
+          'No-output window in ms before the run is failed, capped at '
+          + `${MAX_TIMER_DELAY_MS}. Omitted = the per-family default (30 minutes for claude/codebuddy, who emit `
+          + 'nothing for the whole duration of a tool call; 5-10 minutes elsewhere). Lower it to catch a wedged engine '
+          + 'sooner, or raise it if this task legitimately spends longer than that in one tool call.',
+      },
       mode: {
         type: 'string',
         enum: [...TRANSPORT_MODES],
@@ -583,7 +591,8 @@ export function createToolDefinitions(manager: AgentManager) {
           ...(args.cwd === undefined ? {} : { cwd: args.cwd }),
           ...(args.model === undefined ? {} : { model: args.model }),
           ...(args.effort === undefined ? {} : { effort: args.effort }),
-          ...(args.timeoutMs === undefined ? {} : { timeoutMs: capRunTimeout(args.timeoutMs) }),
+          ...(args.timeoutMs === undefined ? {} : { timeoutMs: capRunWindow(args.timeoutMs) }),
+          ...(args.idleTimeoutMs === undefined ? {} : { idleTimeoutMs: capRunWindow(args.idleTimeoutMs) }),
           ...(args.mode === undefined ? {} : { mode: args.mode }),
         })
       } catch (err) {
@@ -641,6 +650,12 @@ export function createToolDefinitions(manager: AgentManager) {
             timeoutMs: {
               type: 'integer',
               description: `Hard wall-clock deadline in ms for this entry, capped at ${MAX_TIMER_DELAY_MS}. 0 = none.`,
+            },
+            idleTimeoutMs: {
+              type: 'integer',
+              description:
+                `No-output window in ms for this entry, capped at ${MAX_TIMER_DELAY_MS}. Omitted = the per-family `
+                + 'default; raise it for an entry whose single tool call legitimately runs longer than that.',
             },
           },
         },
@@ -753,7 +768,10 @@ export function createToolDefinitions(manager: AgentManager) {
             ...(entry.cwd === undefined ? {} : { cwd: entry.cwd }),
             ...(entry.model === undefined ? {} : { model: entry.model }),
             ...(entry.effort === undefined ? {} : { effort: entry.effort }),
-            ...(entry.timeoutMs === undefined ? {} : { timeoutMs: capRunTimeout(entry.timeoutMs) }),
+            ...(entry.timeoutMs === undefined ? {} : { timeoutMs: capRunWindow(entry.timeoutMs) }),
+            ...(entry.idleTimeoutMs === undefined
+              ? {}
+              : { idleTimeoutMs: capRunWindow(entry.idleTimeoutMs) }),
           })
           results.push({
             index,

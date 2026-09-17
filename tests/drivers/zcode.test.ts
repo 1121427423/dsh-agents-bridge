@@ -24,6 +24,7 @@ import {
   buildZcodeArgs,
   deriveZcodeProviderConfigFile,
 } from '../../src/drivers/zcode.ts'
+import { RecordingSignal } from '../helpers/recording-signal.ts'
 
 const ZCODE_TURN_FAILED = readFileSync(
   new URL('../fixtures/zcode-turn-failed.ndjson', import.meta.url),
@@ -263,6 +264,29 @@ describe('run() — the terminal event is the protocol boundary', () => {
     const result = await handle.done
     expect(result.status).toBe('cancelled')
     expect(child.terminated).toBe(true)
+  })
+
+  it('releases the abort listener when a cancelled run settles (MI-18)', async () => {
+    const child = new FakeChild()
+    const deps = makeDeps({ env: { ...IMMEDIATE_GRACE } })
+    const backend = createBackendWithRuntime('zcode', deps, {
+      spawn: () => child,
+      now: () => 7,
+    })
+    const signal = new RecordingSignal()
+    const handle = await backend.run(
+      { agent: 'zcode', prompt: 'hi' },
+      deps,
+      signal.asAbortSignal(),
+    )
+    expect(signal.listenerCount()).toBe(1)
+
+    // Cancel through the SESSION (the manager's kill path), where the abort
+    // event never fires — see the note in the generic driver's twin test.
+    await handle.cancel('operator stopped it')
+    const result = await handle.done
+    expect(result.status).toBe('cancelled')
+    expect(signal.listenerCount()).toBe(0)
   })
 
   it('never puts --model or --max-turns in argv even when the caller asks', async () => {

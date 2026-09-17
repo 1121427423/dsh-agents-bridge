@@ -67,6 +67,11 @@
 
 import type { Readable, Writable } from 'node:stream'
 
+import {
+  StreamOverflowError,
+  resolveStreamLimits,
+  type StreamLimits,
+} from '../kernel/stream-limits.ts'
 import type {
   AgentMessage,
   AgentResult,
@@ -533,9 +538,37 @@ export function errorText(err: unknown): string {
   return String(err)
 }
 
+/** Options for {@link readLines}. */
+export interface ReadLinesOptions extends StreamLimits {
+  /**
+   * Keep whitespace-only lines instead of dropping them.
+   *
+   * The protocol dialects want them gone (a blank line is not a frame), but the
+   * generic driver's contract is verbatim stdout, so it opts in (IM-9).
+   */
+  readonly preserveBlankLines?: boolean
+  /**
+   * Called once when a stream crosses {@link MAX_STREAM_LINE_BYTES} or
+   * {@link MAX_STREAM_TOTAL_BYTES}, after which the reader has detached and
+   * `flushed` has resolved.
+   *
+   * A limit breach is NOT recoverable by truncation: the caller must fail the
+   * run and terminate the process group (MI-4). The reader cannot do that
+   * itself — it has no handle on the child — so it reports instead of hiding.
+   */
+  readonly onOverflow?: (overflow: StreamOverflowError) => void
+}
+
 /**
  * Attach a line reader to a protocol stream. Multica's `newAgentStreamScanner`
- * equivalent: split on `\n`, drop `\r`, skip blank lines.
+ * equivalent: split on `\n`, drop `\r`, and (unless
+ * {@link ReadLinesOptions.preserveBlankLines}) skip blank lines.
+ *
+ * Two bounds are enforced because the plugin runs in-process: a single
+ * un-newlined run may not exceed `maxLineBytes`, and one stream may not deliver
+ * more than `maxTotalBytes` in total. Crossing either detaches the reader and
+ * reports through `onOverflow` — never a silent truncation, which downstream
+ * would parse as a complete frame (MI-4).
  *
  * Returns a promise that settles when the stream ends, plus a way to stop
  * early (the openclaw result-boundary path).
@@ -543,9 +576,16 @@ export function errorText(err: unknown): string {
 export function readLines(
   stream: Readable,
   onLine: (line: string) => void,
+  options: ReadLinesOptions = {},
 ): { flushed: Promise<void>; stop: () => void } {
+  const limits = resolveStreamLimits(options)
+  const preserveBlankLines = options.preserveBlankLines === true
   let buffer = ''
+  /** Byte length of `buffer`, maintained incrementally — see the cap below. */
+  let bufferedBytes = 0
+  let totalBytes = 0
   let stopped = false
+  let overflowed = false
   let settle: (() => void) | undefined
   const flushed = new Promise<void>((resolve) => {
     settle = resolve
@@ -556,24 +596,66 @@ export function readLines(
     settle = undefined
     done()
   }
-  const onData = (chunk: Buffer | string): void => {
-    buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+  const detach = (): void => {
+    stream.off('data', onData)
+    stream.off('end', onEnd)
+    stream.off('error', onError)
+    stream.off('close', onClose)
+  }
+  const overflow = (kind: 'line' | 'total'): void => {
+    if (overflowed) return
+    overflowed = true
+    const error =
+      kind === 'line'
+        ? new StreamOverflowError('line', bufferedBytes, limits.maxLineBytes)
+        : new StreamOverflowError('total', totalBytes, limits.maxTotalBytes)
+    // Drop the offending buffer BEFORE reporting: the whole point is that the
+    // host stops holding it.
+    buffer = ''
+    bufferedBytes = 0
+    detach()
+    finish()
+    options.onOverflow?.(error)
+  }
+  function onData(chunk: Buffer | string): void {
+    const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+    const textBytes = Buffer.byteLength(text, 'utf8')
+    totalBytes += textBytes
+    if (totalBytes > limits.maxTotalBytes) {
+      overflow('total')
+      return
+    }
+    buffer += text
+    bufferedBytes += textBytes
     let idx = buffer.indexOf('\n')
     while (idx >= 0) {
-      const line = buffer.slice(0, idx).replace(/\r$/, '')
+      const raw = buffer.slice(0, idx)
       buffer = buffer.slice(idx + 1)
-      if (line.trim() !== '') onLine(line)
+      bufferedBytes -= Buffer.byteLength(raw, 'utf8') + 1
+      const line = raw.replace(/\r$/, '')
+      if (preserveBlankLines || line.trim() !== '') onLine(line)
       idx = buffer.indexOf('\n')
     }
+    // Checked AFTER the split: `buffer` is now the single un-newlined run, so a
+    // chunk full of ordinary frames can never trip the line cap.
+    if (bufferedBytes > limits.maxLineBytes) overflow('line')
+  }
+  function onEnd(): void {
+    if (preserveBlankLines ? buffer !== '' : buffer.trim() !== '') onLine(buffer)
+    buffer = ''
+    bufferedBytes = 0
+    finish()
+  }
+  function onError(): void {
+    finish()
+  }
+  function onClose(): void {
+    finish()
   }
   stream.on('data', onData)
-  stream.on('end', () => {
-    if (buffer.trim() !== '') onLine(buffer)
-    buffer = ''
-    finish()
-  })
-  stream.on('error', () => finish())
-  stream.on('close', () => finish())
+  stream.on('end', onEnd)
+  stream.on('error', onError)
+  stream.on('close', onClose)
   return {
     flushed,
     stop: () => {
@@ -586,14 +668,37 @@ export function readLines(
 }
 
 /**
+ * Idle window for the two stream-json dialects, in ms.
+ *
+ * WHY 30 MINUTES (IM-8). claude's stream-json writes NOTHING between the
+ * assistant `tool_use` frame and the following `tool_result` frame — stdout is
+ * silent for the entire duration of the tool. The idle watchdog only sees
+ * stdout, so with a 300 s window every tool call longer than five minutes was
+ * killed as "no output" and reported as a timeout: a healthy run destroyed by
+ * its own safety net.
+ *
+ * The window therefore has to sit above the trusted upper bound of a SINGLE
+ * tool call, not above a turn: Claude Code's own per-call ceiling is 600 s
+ * (Bash `timeout` max) and a wrapping MCP server can exceed it, so 1800 s is
+ * 3x the engine's own knob. It stays a safety net rather than a budget — the
+ * hard deadline is still `timeoutMs`, and a caller that knows better can set
+ * `idleTimeoutMs` per run.
+ *
+ * `src/kernel/manager.ts` keeps an equal table on purpose (its watchdog is the
+ * outer layer and the only thing that catches a driver wedged before it arms
+ * this timer), so the two numbers MUST move together.
+ */
+export const STREAM_JSON_IDLE_TIMEOUT_MS = 1_800_000
+
+/**
  * Per-family idle-watchdog defaults, used when `AgentRunOptions.idleTimeoutMs`
  * is undefined. They are safety nets against a wedged CLI, not turn budgets —
  * the hard deadline is always `timeoutMs`. `openclaw` reuses the CLI's own
  * documented `--timeout` default (600s).
  */
 export const DEFAULT_IDLE_TIMEOUT_MS = {
-  claude: 300_000,
-  codebuddy: 300_000,
+  claude: STREAM_JSON_IDLE_TIMEOUT_MS,
+  codebuddy: STREAM_JSON_IDLE_TIMEOUT_MS,
   openclaw: 600_000,
   generic: 300_000,
   // zcode streams lifecycle events throughout a turn; 300s of SILENCE from an
