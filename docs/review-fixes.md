@@ -19,8 +19,8 @@
 | ID | 严重度 | 位置 | 一句话 | 状态 |
 |---|---|---|---|---|
 | IM-1 | Important | `src/tracks/desktop/scan.ts:708-712`（经 `registry.ts:574-579,308`） | 扫描产物仅凭文件名形状即标为可启动，`agents_probe` 随即执行它；D26 声称的允许清单只管 run 不管 probe | verified |
-| IM-2 | Important | `src/drivers/claude.ts:746-767` | CodeBuddy/WorkBuddy 的审批帧缺 `allowed:true`（真机 bundle 只读 `allowed ?? false`）→ 每个权限请求被当拒绝 | in-batch (B1) |
-| IM-3 | Important | `src/kernel/watchdog.ts:62-64,130-132` | `timeoutMs > 2^31` 被 Node 钳成 1ms → 刚 spawn 就被杀并报 timeout | in-batch (B1) |
+| IM-2 | Important | `src/drivers/claude.ts:746-767` | CodeBuddy/WorkBuddy 的审批帧缺 `allowed:true`（真机 bundle 只读 `allowed ?? false`）→ 每个权限请求被当拒绝 | **fixed**（c554a6f） |
+| IM-3 | Important | `src/kernel/watchdog.ts:62-64,130-132` | `timeoutMs > 2^31` 被 Node 钳成 1ms → 刚 spawn 就被杀并报 timeout | **fixed**（c554a6f） |
 | IM-4 | Important | `src/kernel/store.ts:26-38`（`manager.ts:178-192`） | 游离 agent 进程树在宿主重启后无人回收；pid 根本没落盘 | verified |
 | IM-5 | Important | `src/kernel/manager.ts:247,359,465` | 续跑指针只在终态落盘 → 中途重启即丢，`agents_send` 永久无法续跑 | verified |
 | IM-6 | Important | `src/kernel/store.ts:126-136,212-221` | 整表覆写：同目录两个 store 时，后写者吞掉先写者新增的行 | verified（**已亲手复现**，见 §B） |
@@ -79,12 +79,16 @@ IM-3 overflow (timeoutMs=1e12)      : fired after 1ms
 
 | 批次 | 范围 | 状态 |
 |---|---|---|
-| B1 | IM-2 · IM-3 | in-batch |
-| B2 | IM-4 · IM-5 · IM-6 · IM-7 · MI-2 · MI-3 · MI-6 · MI-7 · MI-8 | pending |
-| B3 | IM-8 · IM-9 · MI-4 · MI-5 + 待复核的 acp/codex 项 | pending |
-| B4 | IM-1 + 待复核的 scan 项 | pending |
-| B5 | MI-1 + settings/definitions/api/client 待复核项 | pending |
-| B6 | 门禁自身：测试不在类型门禁内 · 真空断言 · verify 无 CI 入口 | pending |
+| B1 | IM-2 · IM-3 | **fixed**（`c554a6f`；监理复跑 785/1 · tsc 0 · 双构建 · verify 11/11，并自验负控：把 codebuddy 新字段翻回 `false` → 新测试真红） |
+| B2 | IM-4 · IM-5 · IM-6 · IM-7 · MI-2 · MI-3 · MI-6 · MI-7 · MI-8 | **in-batch** |
+| B3 | IM-8 · IM-9 · MI-4 · MI-5 + **IM-15**（ACP `dispose()` 零调用者 → 终端孤儿）· MI-16 · MI-17 · MI-18 · MI-19 · MI-20 · MI-21 | pending |
+| B4 | IM-1 · IM-10 · IM-11 · IM-12 · IM-13 · MI-9 —— **IM-1 与 IM-10 必须同批**（前者今天被后者掩盖） | pending |
+| B5 | MI-1 · **IM-16**（settings 清空字段静默 no-op，却报 ok:true）· **IM-17**（`agents_output` nextIndex 越过未展示事件）· **IM-18**（Origin 丢端口 → 任意 loopback 端口页面可驱动 API）· **IM-19**（`textSeen` 永不复位 → 渲染粘连）· MI-10…MI-15 · MI-22 | pending |
+| B6 | 门禁自身：**IM-14**（测试文件不在类型门禁内，含 4 个真 TS2339）· 真空断言 · `verify` 无 CI 入口 | pending |
+
+**裁定完成度**：四组 24 条主张已全部裁定（scan 4 成立 / driver 1 成立 / surface 4 成立 / client+tests 1 成立），
+合计**新增 10 条成立项**（IM-10…IM-19）与 14 条降级项（MI-9…MI-22）。
+即：原始报告的 33 条 CR/IM 主张中，**最终只有 15 条以 IM 级成立**，其余降级或驳回。
 
 **串行纪律**：批次不并行 —— 两个 workbuddy 同时跑 `scripts/build.mjs` 会互相覆写
 `lib/index.js`，并发 vitest 会让门禁数字失去意义。
@@ -194,3 +198,25 @@ probe 时被执行」，理想情况给**家目录根一个显式 opt-in**；（
 其中 **4 条 TS2339 为真**（273/289×2/290）；另 4 条（TS1259 `esModuleInterop`、TS1343 `import.meta`、
 TS2322、TS2349）是**脱离工程 tsconfig 独立编译的假象**，不计入缺陷。修 IM-14 时必须用
 `tsconfig.tests.json`（继承基准 + `noEmit`）来判定，否则门禁会带进假阳性。
+
+### G-3 driver 组（1 成立 / 6 降级，已完成）
+
+| ID | 判定 | 位置 | 裁定要点 |
+|---|---|---|---|
+| IM-15 | **CONFIRMED** | `acp.ts:1088-1092,1345-1349,1399,1637` | `dispose()` 是**唯一**会杀掉所有已登记终端的代码，而它在 `src` 里**零调用者**；terminal/release 只处理引擎自己释放的，settle/cancel 只杀引擎主进程组，而每个终端子进程是用 `rt.spawn` 起在**自己独立的 detached 组**里（`kernel/spawn.ts:173`）→ 引擎「建了就忘」即留下孤儿进程 |
+| MI-16 | DOWNGRADED | `claude.ts:75-85,202` + `codebuddy.ts:78` | `--strict-mcp-config` 确实不在 `CODEBUDDY_BLOCKED_ARGS`（`filterCustomArgs` 逐字放过），但**不可达**：`opts.extraArgs` 没有任何已发布调用者填充（`definitions.ts:562-570,729-737` 逐字段构造，只给 agent/prompt/cwd/model/effort/timeoutMs/mode），host API 也没有 run 路由 → 潜在 ABI 洞而非可达缺陷 |
+| MI-17 | DOWNGRADED | `argv.ts:264-271` + `claude.ts:76` | `["-p","/some/path"]` 确实只吃掉 `-p`、把路径留成位置参数 —— 但这是 multica 权威规格的忠实移植（`claude.go:714` `"-p": blockedStandalone` + 同款 Go filter），且同样不可达。真实代价：调用方写 `-p` 会变成"错提示词"脚枪 |
+| MI-18 | DOWNGRADED | `generic-argv.ts:287-302` | 监听器确实存活（移除语句在 `:297-300` 提前 return 之后），但"保留上下文"不是增量问题：`DriverSession` 本就持有同一 run 作用域闭包，且管理器从不修剪已终态记录 → **跨切面真问题就是 IM-7**（`live` 永不驱逐）；终态后的 abort 是 no-op |
+| MI-19 | DOWNGRADED | `acp.ts:1376-1378,1405-1416,167` | 引擎给的 `outputByteLimit` 被逐字采纳、`append()` 每块重拼整个缓冲（无界保留 + 二次拷贝）。但同一引擎在该能力开关下本就能以用户身份执行任意命令（`acp.ts:193-222`）→ 越不过信任边界，属内存/健壮性而非提权 |
+| MI-20 | DOWNGRADED | `codex.ts:194-195,440-441` | 引擎给的 resume id 未经校验就进位置参数，但**不是 argv 注入**：它只是无 shell 的 detached spawn 的**单个数组元素**，加不出 token；以 `-` 开头只会让 clap 报错退出 |
+| MI-21 | DOWNGRADED | `codex.ts:700-716,744-753,762-770` | `requestTerminal` 会闩死 timeout/空文本且不检查 `sawTurnCompleted`，而结算只在 exit+flush 后 → 已完成的 codex 回合可能被计时器丢弃。真实但窗口只是终态帧之后的收尾间隙，且**没有实测到滞留的 codex**（不像 zcode/openclaw 有显式的边界即杀，D38/pitfalls #10） |
+
+### G-4 surface 组（4 成立 / 1 降级，已完成）—— 本轮最重的四条
+
+| ID | 判定 | 位置 | 裁定要点 |
+|---|---|---|---|
+| IM-16 | **CONFIRMED** | `settings.ts:247,258,265,459-482` | 清空字段被 coerce 成 `undefined`，`clean` 仍保留该键，`scope.update({k:undefined})` 到达真 provider 后其 `cloneJsonShaped` 静默丢弃 undefined 项（`dsh-settings/lib/index.js:218`）→ `mergeLayers(current,{})` 把旧 section 原样写回，而 `write()` **返回 `{ok:true}`**。**从已发布 UI 可达**：`client/settings.ts:308-310` 对每个 dirty 字段发 `drafts[k] ?? ''`，清空即 dirty。结果：用户清空字段 → 卡片显示「已保存」并自动收起 → 旧值与 `overridden` 徽标原样回来。只有每字段的 reset 按钮（走 `scope.replace`）能真正删除 |
+| IM-17 | **CONFIRMED** | `definitions.ts:1233,1250` | `messages` 被截到 `MAX_RENDERED_MESSAGES=80`，但 `nextIndex` 逐字透传 `read.nextIndex`（= `end`，即**请求的全部**事件，`manager.ts:513-519`）；且只在模型显式给 limit 时才转发。于是首读 300 事件的一轮会得到 `nextIndex=300` 与「用 sinceIndex=nextIndex 只读新事件」的提示 → **照做就静默跳过 80..299** |
+| IM-18 | **CONFIRMED** | `host/api.ts:191-197` | Origin 只比 `hostname`，**丢弃端口** → `Origin: http://localhost:9999` 对 `Host: localhost:43120` 通过；判定 3 也救不了（同机不同端口是 `same-site` 而非 `cross-site`）。**无需 CORS 即可利用**：任意 loopback 端口的页面可用 `fetch(...,{mode:'no-cors'})` 发简单请求，body 被 `readJsonBody` 逐字解析，且**不需要 token**。头部注释宣称的「跨源页面无法驱动本插件」对这种情况是假的 |
+| IM-19 | **CONFIRMED** | `definitions.ts:376-397` | `textSeen` 在 397 行置真后**永不复位** → 之后任何 text 事件都会粘到 `blocks[last]`，无论那是 tool_use/tool_result/error：`#2 [tool_use] Bash → out#3 text` 连成一行，text 丢掉自己的序号与类型，工具输出与正文黏连。`tests/tools/` 下无任何覆盖 |
+| MI-22 | DOWNGRADED | `host/api.ts:496-509` + `registry.ts:617-643` | 确实无单飞、无限流：每次 `refresh:true` 都重置 scan 记忆、同步重走 bundle（2s 预算）、扫端口、为每个身份起一个 `--version`（各 3s）。但"无界/阻塞宿主"被高估：同一栅栏本就允许 `run`（起真进程），面板只在显式点击时带 `refresh:true`，每轮有界 → 低危防御性加固，非在线 DoS |
