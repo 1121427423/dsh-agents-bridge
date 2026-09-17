@@ -18,7 +18,7 @@
 
 | ID | 严重度 | 位置 | 一句话 | 状态 |
 |---|---|---|---|---|
-| IM-1 | Important | `src/tracks/desktop/scan.ts:708-712`（经 `registry.ts:574-579,308`） | 扫描产物仅凭文件名形状即标为可启动，`agents_probe` 随即执行它；D26 声称的允许清单只管 run 不管 probe | verified |
+| IM-1 | Important | `src/tracks/desktop/scan.ts:708-712`（经 `registry.ts:574-579,308`） | 扫描产物仅凭文件名形状即标为可启动，`agents_probe` 随即执行它；D26 声称的允许清单只管 run 不管 probe | **fixed**（B4 · `7c3ea81`） |
 | IM-2 | Important | `src/drivers/claude.ts:746-767` | CodeBuddy/WorkBuddy 的审批帧缺 `allowed:true`（真机 bundle 只读 `allowed ?? false`）→ 每个权限请求被当拒绝 | **fixed**（c554a6f） |
 | IM-3 | Important | `src/kernel/watchdog.ts:62-64,130-132` | `timeoutMs > 2^31` 被 Node 钳成 1ms → 刚 spawn 就被杀并报 timeout | **fixed**（c554a6f） |
 | IM-4 | Important | `src/kernel/store.ts:26-38`（`manager.ts:178-192`） | 游离 agent 进程树在宿主重启后无人回收；pid 根本没落盘 | **fixed**（B2） |
@@ -87,8 +87,8 @@ IM-3 overflow (timeoutMs=1e12)      : fired after 1ms
 | B1 | IM-2 · IM-3 | **fixed**（`c554a6f`；监理复跑 785/1 · tsc 0 · 双构建 · verify 11/11，并自验负控：把 codebuddy 新字段翻回 `false` → 新测试真红） |
 | B2 | IM-4 · IM-5 · IM-6 · IM-7 · MI-2 · MI-3 · MI-6 · MI-7 · MI-8 | **fixed**（本分支未提交；vitest 808/1 · tsc 0 · 双构建 · verify 11/11，九条均先红后绿，见 §I） |
 | B3 | IM-8 · IM-9 · MI-4 · MI-5 + **IM-15**（ACP `dispose()` 零调用者 → 终端孤儿）· MI-16 · MI-17 · MI-18 · MI-19 · MI-20 · MI-21 | **IM-8 · IM-9 · MI-4 · MI-5 · MI-18 fixed**（见 §J）；其余（IM-15 · MI-16 · MI-17 · MI-19 · MI-20 · MI-21）依 §E-2 并入 B3b+B6 卫生批 |
-| B4 | IM-1 · IM-10 · IM-11 · IM-12 · IM-13 · MI-9 —— **IM-1 与 IM-10 必须同批**（前者今天被后者掩盖） | pending |
-| B5 | MI-1 · **IM-16**（settings 清空字段静默 no-op，却报 ok:true）· **IM-17**（`agents_output` nextIndex 越过未展示事件）· **IM-18**（Origin 丢端口 → 任意 loopback 端口页面可驱动 API）· **IM-19**（`textSeen` 永不复位 → 渲染粘连）· MI-10…MI-15 · MI-22 | pending |
+| B4 | IM-1 · IM-10 · IM-11 · IM-12 · IM-13 · MI-9 —— **IM-1 与 IM-10 必须同批**（前者今天被后者掩盖） | **fixed**（`7c3ea81`；监理复跑 869/1 并读码确认信任契约） |
+| B5 | MI-1 · **IM-16** · **IM-17** · **IM-18** · **IM-19** · MI-10…MI-15 · MI-22 | **fixed**（B5a `b1edc88` + B5b `05b45f9`；Origin oracle 六行全 ok） |
 | B6 | 门禁自身：**IM-14**（测试文件不在类型门禁内，含 4 个真 TS2339）· 真空断言 · `verify` 无 CI 入口 | pending → **并入 B3b**（见 §E-2） |
 
 **裁定完成度**：四组 24 条主张已全部裁定（scan 4 成立 / driver 1 成立 / surface 4 成立 / client+tests 1 成立），
