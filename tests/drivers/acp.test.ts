@@ -27,7 +27,9 @@ import type { AgentMessage, AgentResult, DriverDeps } from '../../src/kernel/typ
 import type { DriverRuntime, SpawnSpec, SpawnedProcess } from '../../src/drivers/argv.ts'
 import {
   ACP_BLOCKED_ARGS,
+  ACP_DEFAULT_OUTPUT_BYTE_LIMIT,
   ACP_FAILURE_STOP_REASONS,
+  ACP_MAX_OUTPUT_BYTE_LIMIT,
   ACP_SESSION_SCOPED_OPTION_IDS,
   buildAcpArgs,
   confineToRoot,
@@ -110,11 +112,65 @@ function makeWorkdir(): string {
   return dir
 }
 
+/**
+ * Terminal pids still alive when a test ends — populated ONLY by the IM-15
+ * assertion so a RED run does not leave a parked node process behind (the
+ * leaked child is a child of this process, so it would hold the worker open).
+ * The assertion always reads the pid BEFORE this cleanup ever runs.
+ */
+const leftoverTerminalPids: number[] = []
+
 afterEach(() => {
+  for (const pid of leftoverTerminalPids.splice(0)) {
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch {
+      /* already gone — which is what the green run expects */
+    }
+  }
   for (const dir of workdirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Poll until the pid is gone.
+ *
+ * SIGKILL is asynchronous, so a killed child can still be a live (unreaped)
+ * process for a few milliseconds after `handle.done`. A LEAKED process instead
+ * lives until it is stopped, so the retry cannot mask the leak it guards.
+ */
+async function waitForPidGone(pid: number, timeoutMs = 2_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (!pidAlive(pid)) return true
+    if (Date.now() >= deadline) return false
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+}
+
+/** Wait until the fixture has reported the pid of a terminal it will not release. */
+async function waitForOrphanPid(
+  read: () => readonly AgentMessage[],
+  timeoutMs = 5_000,
+): Promise<number> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const match = /orphan pid=(\d+)/.exec(texts(read()))
+    if (match !== null) return Number(match[1])
+    if (Date.now() >= deadline) return -1
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+}
 
 /**
  * Capabilities are OPT-IN through `DriverDeps.env` on purpose: advertising
@@ -147,6 +203,12 @@ const texts = (messages: readonly AgentMessage[]): string =>
 
 const ofType = (messages: readonly AgentMessage[], type: string): readonly AgentMessage[] =>
   messages.filter((m) => m.type === type)
+
+/** What the fixture reports the driver retained of its terminal output. */
+const retainedBytes = (messages: readonly AgentMessage[]): number => {
+  const match = /retained=(\d+)/.exec(texts(messages))
+  return match === null ? -1 : Number(match[1])
+}
 
 // ── argv & capability table (pure, no process) ──────────────────────────────
 
@@ -498,6 +560,103 @@ describe('acp driver, real pipes', () => {
       expect(text).toContain('exitCode')
     },
     20_000,
+  )
+
+  /**
+   * MI-19 — the engine sizes its own terminal output, the HOST pays for it.
+   *
+   * `terminal/create.outputByteLimit` is taken from the wire and the retained
+   * buffer lives in this process, so it is clamped to
+   * `ACP_MAX_OUTPUT_BYTE_LIMIT` instead of being adopted verbatim. The fixture
+   * reports what the driver actually kept, which is the only thing that can
+   * distinguish "clamped" from "the child happened to print little".
+   */
+  it(
+    'MI-19: clamps an engine-supplied outputByteLimit to the host cap',
+    async () => {
+      const { messages, result } = await runToCompletion('terminal-limit')
+      const retained = retainedBytes(messages)
+      expect(result.status).toBe('completed')
+      expect(retained).toBeGreaterThan(0)
+      expect(retained).toBeLessThanOrEqual(ACP_MAX_OUTPUT_BYTE_LIMIT)
+      // Truncation is disclosed rather than silent (the buffer was cut).
+      expect(texts(messages)).toContain('truncated=true')
+    },
+    30_000,
+  )
+
+  it(
+    'MI-19 negative control: an absent limit still yields the 50_000 default',
+    async () => {
+      const { messages } = await runToCompletion('terminal-default-limit')
+      const retained = retainedBytes(messages)
+      // The fixture prints 2 MB either way: with no engine limit the default
+      // (not the cap) is what bounds the buffer.
+      expect(retained).toBe(ACP_DEFAULT_OUTPUT_BYTE_LIMIT)
+    },
+    30_000,
+  )
+
+  /**
+   * IM-15 — the driver, not the engine, owns a terminal's lifetime.
+   *
+   * `AcpClient.dispose()` is the ONLY code that kills every tracked terminal
+   * child, and each terminal is spawned into its own group — so a client that is
+   * never disposed leaks one process per terminal the engine forgot to release.
+   * The fixture reports the child's pid and then parks it forever.
+   */
+  it(
+    'IM-15: a terminal the engine never releases does not outlive the run',
+    async () => {
+      const { messages, result } = await runToCompletion('orphan-terminal')
+      expect(result.status).toBe('completed')
+      const match = /orphan pid=(\d+)/.exec(texts(messages))
+      expect(match).not.toBeNull()
+      const pid = Number(match?.[1])
+      expect(pid).toBeGreaterThan(0)
+      // The pid was reported while the child was alive (proven by the fixture
+      // polling terminal/output for it); the run has settled, so it must be gone.
+      leftoverTerminalPids.push(pid)
+      await expect(waitForPidGone(pid)).resolves.toBe(true)
+      expect(pidAlive(pid)).toBe(false)
+    },
+    30_000,
+  )
+
+  it(
+    'IM-15 negative control: the release path still kills its terminal',
+    async () => {
+      // The pre-existing scenario releases its terminal itself; disposal must
+      // not change what the engine already owns.
+      const { messages, result } = await runToCompletion('terminal')
+      expect(result.status).toBe('completed')
+      expect(texts(messages)).toContain('TERMINAL_OK')
+    },
+    30_000,
+  )
+
+  it(
+    'IM-15: the CANCEL exit disposes the client too',
+    async () => {
+      // Both `runAcp` exits must dispose: a cancelled turn took the early-return
+      // branch, which is where an engine-created terminal used to survive.
+      const cwd = makeWorkdir()
+      const deps = makeDeps('orphan-terminal-cancel', { env: CAPS_ON })
+      const backend = createBackendWithRuntime('acp', deps, realRuntime)
+      const handle = await backend.run(
+        { agent: 'codebuddy-code-acp', prompt: 'go', cwd },
+        deps,
+        new AbortController().signal,
+      )
+      const pid = await waitForOrphanPid(() => handle.messages)
+      expect(pid).toBeGreaterThan(0)
+      await handle.cancel('test over')
+      const result = await handle.done
+      expect(result.status).toBe('cancelled')
+      leftoverTerminalPids.push(pid)
+      await expect(waitForPidGone(pid)).resolves.toBe(true)
+    },
+    30_000,
   )
 
   it(

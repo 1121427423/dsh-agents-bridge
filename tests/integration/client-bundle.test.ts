@@ -58,11 +58,21 @@ interface ModuleLoaderEntry {
   readonly factory: (require: (id: string) => unknown) => ClientModule
 }
 
-/** What the factory is expected to return (the reference plugins' shape). */
+/**
+ * What the factory is expected to return (the reference plugins' shape).
+ *
+ * `SETTINGS_SLOT` / `SETTINGS_NAMESPACE` are part of it because
+ * `src/client/index.ts` exports them (`:64`, `:72`) and this suite asserts the
+ * CARD's key against the namespace — the fields were simply missing from this
+ * local interface, which is four of the TS2339s that accumulated while tests sat
+ * outside every typecheck (IM-14).
+ */
 interface ClientModule {
   readonly inject: readonly string[]
   readonly PANEL_ID: string
   readonly INDICATOR_ID: string
+  readonly SETTINGS_SLOT: string
+  readonly SETTINGS_NAMESPACE: string
   apply(ctx: unknown): void
 }
 
@@ -170,6 +180,8 @@ function hostRequire() {
 /** A slot registry recording exactly what `apply()` registers. */
 interface Registration {
   readonly name: string
+  /** The settings card is KEYED by the settings namespace (`key` is slot-specific). */
+  readonly key?: string | undefined
   readonly id?: string | undefined
   readonly order?: number | undefined
   readonly registrant?: string | undefined

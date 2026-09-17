@@ -237,6 +237,56 @@ describe('buildCodexArgs', () => {
     expect(args).not.toContain('-C')
     expect(args).not.toContain('-s')
   })
+
+  /**
+   * MI-20 — the resume id lands in a POSITIONAL slot, so it must be an id.
+   *
+   * `codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]` reads its positionals in
+   * order: an id that starts with `-` is parsed as a flag instead (clap then
+   * rejects the whole invocation, or worse, silently consumes the prompt as the
+   * session id), and an empty one would push the prompt into the SESSION_ID
+   * slot. Validation therefore belongs in the ONE place that owns the slot.
+   */
+  describe('MI-20: a resume id that is not an id is refused, never slotted', () => {
+    it('throws a naming error for a "-"-leading id instead of placing it', () => {
+      expect(() => buildCodexArgs({ resumeSessionId: '--sandbox', prompt: 'p' })).toThrow(
+        /resume session id/i,
+      )
+      expect(() => buildCodexArgs({ resumeSessionId: '--sandbox', prompt: 'p' })).toThrow(
+        /--sandbox/,
+      )
+    })
+
+    it('throws a naming error for an empty id', () => {
+      expect(() => buildCodexArgs({ resumeSessionId: '   ', prompt: 'p' })).toThrow(
+        /resume session id/i,
+      )
+    })
+
+    it('negative control: a UUID id still lands in the resume slot', () => {
+      const args = buildCodexArgs({
+        prompt: 'p',
+        resumeSessionId: '01a0a0a0-1111-7000-8000-000000000001',
+      })
+      expect(args).toEqual([
+        'exec',
+        'resume',
+        '--json',
+        '--skip-git-repo-check',
+        '01a0a0a0-1111-7000-8000-000000000001',
+        'p',
+      ])
+    })
+
+    it('negative control: no resume id at all still means a fresh run', () => {
+      expect(buildCodexArgs({ prompt: 'p' })).toEqual([
+        'exec',
+        '--json',
+        '--skip-git-repo-check',
+        'p',
+      ])
+    })
+  })
 })
 
 describe('codexSandboxFromEnv', () => {
@@ -746,6 +796,53 @@ describe('run() over a fake child', () => {
     expect(result.status).toBe('timeout')
     expect(result.error).toBe('codex timed out after 10ms')
     expect(child.terminated).toBe(true)
+  })
+
+  /**
+   * MI-21 — a terminal frame already in hand must beat the timer.
+   *
+   * The driver settles only at exit + flush, so between `turn.completed` and the
+   * process actually dying a timer can fire. It used to latch `timeout` with
+   * empty text, discarding a turn the parser had already read — the answer was
+   * on the wire and got thrown away. zcode settles from the parser state at the
+   * same boundary; this mirrors it.
+   */
+  it('MI-21: settles from the parser state when turn.completed already arrived before the timeout', async () => {
+    const child = new FakeChild()
+    const { backend } = harness(child)
+    const handle = await backend.run(
+      { agent: 'codex', prompt: 'x', timeoutMs: 25 },
+      makeDeps(),
+      new AbortController().signal,
+    )
+    // The whole turn is on stdout — answer AND terminal frame — but the fake
+    // child deliberately stays alive, so the hard timer wins the race with the
+    // exit+flush settle.
+    child.emit(CODEX_SUCCESS)
+    const result = await handle.done
+    expect(result.status).toBe('completed')
+    expect(result.text).toBe('OK')
+    expect(child.terminated).toBe(true)
+  })
+
+  it('MI-21 negative control: without the terminal frame the same timer still reports timeout', async () => {
+    const child = new FakeChild()
+    const { backend } = harness(child)
+    const handle = await backend.run(
+      { agent: 'codex', prompt: 'x', timeoutMs: 25 },
+      makeDeps(),
+      new AbortController().signal,
+    )
+    // Identical stream MINUS `turn.completed`: nothing proves a finished turn,
+    // so the timer verdict stands and the partial text is withheld.
+    child.emit(
+      CODEX_SUCCESS.split('\n')
+        .filter((line) => !line.includes('"turn.completed"'))
+        .join('\n'),
+    )
+    const result = await handle.done
+    expect(result.status).toBe('timeout')
+    expect(result.text).toBe('')
   })
 
   it('passes the interpreter rule and a filtered launch prefix straight to spawn', async () => {

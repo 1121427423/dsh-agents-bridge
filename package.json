@@ -36,6 +36,7 @@
     "build:host": "node scripts/build.mjs",
     "build:client": "node scripts/build-client.mjs",
     "typecheck": "tsc --noEmit",
+    "typecheck:tests": "tsc --noEmit -p tsconfig.tests.json",
     "pretest": "pnpm run build",
     "test": "vitest run",
     "verify": "node scripts/verify.mjs"

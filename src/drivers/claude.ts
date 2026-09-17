@@ -71,13 +71,28 @@ import {
  * `--effort` is owned by the per-run thinking level: the driver injects it only
  * when `effort` is set, but a caller-written duplicate is dropped rather than
  * letting two conflicting values reach the CLI.
+ *
+ * `--strict-mcp-config` is not a caller knob: for codebuddy it NARROWS the MCP
+ * scope union instead of widening it (managed only; the user/project/local
+ * scopes disappear — measured, MUL-5846, see `codebuddy.ts`'s header), which is
+ * exactly what that dialect's contract forbids. It is `standalone` (never takes
+ * a value), and the claude dialect, which does manage this flag itself, shares
+ * the table so a caller cannot re-add a second copy either.
+ *
+ * `-p` is `optionalValue` — a DELIBERATE deviation from multica's Go spec
+ * (`claude.go:714` blocks it as `blockedStandalone`). There, `['-p','/tmp/x']`
+ * leaves `/tmp/x` as the first positional, and the CLI reads it as its own
+ * prompt: the caller silently talks to a path instead of their own prompt. The
+ * filter eats a following non-flag token too, so the pair disappears together.
+ * Documented in `docs/driver-pitfalls.md`.
  */
 export const CLAUDE_BLOCKED_ARGS: BlockedArgs = {
-  '-p': 'standalone', // non-interactive mode
+  '-p': 'optionalValue', // non-interactive mode (and its value, if written as a pair)
   '--output-format': 'withValue', // stream-json protocol
   '--input-format': 'withValue', // stream-json protocol
   '--permission-mode': 'withValue', // bypassPermissions for autonomous operation
   '--mcp-config': 'withValue', // driver-owned
+  '--strict-mcp-config': 'standalone', // narrows the scope union codebuddy promises
   '--effort': 'withValue', // owned by the thinking-level picker
 }
 

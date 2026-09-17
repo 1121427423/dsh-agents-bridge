@@ -339,6 +339,95 @@ async function runDeadlock() {
   return { stopReason: 'end_turn', usage: { inputTokens: 5, outputTokens: 5 } }
 }
 
+/**
+ * A terminal whose OUTPUT the engine over-sizes (MI-19).
+ *
+ * `outputByteLimit` comes straight from the engine and the driver retains the
+ * terminal's output in the HOST process, so an engine must not be able to size
+ * that buffer: the driver clamps it to `ACP_MAX_OUTPUT_BYTE_LIMIT`. The command
+ * prints 2 MB, comfortably past both the default (50 KB) and the cap, and the
+ * turn reports how much the driver actually retained.
+ *
+ * `limit === undefined` omits the field entirely, which must still yield the
+ * 50 000-byte default.
+ */
+async function runTerminalLimit(limit) {
+  let detail = 'no result'
+  try {
+    const created = await request('terminal/create', {
+      command: process.execPath,
+      args: ['-e', "process.stdout.write('A'.repeat(2_000_000))"],
+      cwd: '.',
+      ...(limit === undefined ? {} : { outputByteLimit: limit }),
+      sessionId: SESSION_ID,
+    })
+    const terminalId = created.terminalId
+    await request('terminal/wait_for_exit', { terminalId, sessionId: SESSION_ID })
+    const out = await request('terminal/output', { terminalId, sessionId: SESSION_ID })
+    detail = `retained=${out.output.length} truncated=${out.truncated}`
+    await request('terminal/release', { terminalId, sessionId: SESSION_ID })
+  } catch (err) {
+    detail = `error: ${err.message}`
+  }
+  notify(textChunk(detail))
+  return { stopReason: 'end_turn', usage: { inputTokens: 30, outputTokens: 10 } }
+}
+
+/**
+ * A terminal the engine creates and NEVER releases (IM-15).
+ *
+ * `terminal/release` is the only path the ENGINE controls, and each terminal is
+ * spawned into its own process group, so an engine that "creates and forgets"
+ * leaks one live process per terminal unless the DRIVER disposes the client on
+ * the way out. The child reports its own pid and then parks forever (a 1s
+ * interval, so the event loop never empties) — the caller asserts that pid is
+ * gone once the run has settled.
+ */
+async function runOrphanTerminal() {
+  let detail = 'no result'
+  try {
+    const pid = await createOrphanTerminal()
+    detail = pid === null ? 'no pid' : `orphan pid=${pid}`
+  } catch (err) {
+    detail = `error: ${err.message}`
+  }
+  notify(textChunk(detail))
+  return { stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 5 } }
+}
+
+/** Create a never-released terminal and return the child's pid (or null). */
+async function createOrphanTerminal() {
+  const created = await request('terminal/create', {
+    command: process.execPath,
+    args: ['-e', "console.log(`ORPHAN_PID=${process.pid}`); setInterval(() => {}, 1000)"],
+    cwd: '.',
+    sessionId: SESSION_ID,
+  })
+  const terminalId = created.terminalId
+  const deadline = Date.now() + 5_000
+  let output = ''
+  while (Date.now() < deadline) {
+    const out = await request('terminal/output', { terminalId, sessionId: SESSION_ID })
+    output = typeof out.output === 'string' ? out.output : ''
+    if (output.includes('ORPHAN_PID=')) break
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  // Deliberately NO terminal/release: the engine forgets this one.
+  const match = /ORPHAN_PID=(\d+)/.exec(output)
+  return match === null ? null : Number(match[1])
+}
+
+/**
+ * The same leak on the CANCEL exit: the terminal is created and reported, but
+ * the prompt never answers, so only `handle.cancel()` reaches the settle path.
+ */
+async function runOrphanTerminalCancel() {
+  const pid = await createOrphanTerminal()
+  notify(textChunk(pid === null ? 'no pid' : `orphan pid=${pid}`))
+  await new Promise((resolve) => setTimeout(resolve, 60_000))
+  return { stopReason: 'cancelled' }
+}
+
 const SCENARIOS = {
   success: runSuccess,
   tools: runToolCalls,
@@ -350,6 +439,12 @@ const SCENARIOS = {
   cancel: runCancel,
   'late-chunk': runLateChunk,
   deadlock: runDeadlock,
+  // MI-19: an engine-sized terminal buffer, and the absent-limit control.
+  'terminal-limit': () => runTerminalLimit(1e12),
+  'terminal-default-limit': () => runTerminalLimit(undefined),
+  // IM-15: a terminal the engine creates and never releases.
+  'orphan-terminal': runOrphanTerminal,
+  'orphan-terminal-cancel': runOrphanTerminalCancel,
 }
 
 // ── Protocol loop ────────────────────────────────────────────────────────────

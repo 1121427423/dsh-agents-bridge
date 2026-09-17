@@ -158,8 +158,19 @@ describe('buildCodebuddyArgs', () => {
   })
 
   it('blocks the same protocol flags as claude', () => {
+    // `--strict-mcp-config` is in here because it is the one flag that makes
+    // codebuddy's MCP scope union NARROWER (managed only — MUL-5846), so a
+    // caller-supplied copy is a protocol break, not a preference (MI-16).
     expect(Object.keys(CODEBUDDY_BLOCKED_ARGS).sort()).toEqual(
-      ['-p', '--effort', '--input-format', '--mcp-config', '--output-format', '--permission-mode'].sort(),
+      [
+        '-p',
+        '--effort',
+        '--input-format',
+        '--mcp-config',
+        '--output-format',
+        '--permission-mode',
+        '--strict-mcp-config',
+      ].sort(),
     )
   })
 

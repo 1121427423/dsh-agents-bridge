@@ -17,6 +17,26 @@ import { createTranslator } from '../../src/client/i18n.ts'
 import { createSupervisorStore, describeApiError, type SupervisorOptions } from '../../src/client/store.ts'
 import { DEFAULT_POLL_POLICY, type ClientRunStatus, type ClientSession } from '../../src/client/util.ts'
 
+/**
+ * The settings trio `BridgeApi` requires (IM-14).
+ *
+ * `BridgeApi` grew `settings`/`settingsWrite`/`settingsReset` with the settings
+ * card, and every fake below predates them — the store's poll suite never calls
+ * them, and nothing typechecked tests, so the drift went unseen. LOUD stubs, not
+ * a plausible empty shape: a caller arriving here should fail loudly.
+ */
+const noSettings: Pick<BridgeApi, 'settings' | 'settingsWrite' | 'settingsReset'> = {
+  async settings() {
+    throw new Error('settings() is not part of this fixture')
+  },
+  async settingsWrite() {
+    throw new Error('settingsWrite() is not part of this fixture')
+  },
+  async settingsReset() {
+    throw new Error('settingsReset() is not part of this fixture')
+  },
+}
+
 /* -------------------------------------------------------------------------- */
 /* Harness                                                                    */
 /* -------------------------------------------------------------------------- */
@@ -113,6 +133,7 @@ function fakeApi(script: {
       calls.probe += 1
       return { available: true, results: [], at: 1_000, cached: true }
     },
+    ...noSettings,
   }
   return { api, calls }
 }
@@ -209,6 +230,7 @@ describe('supervisor store — loading', () => {
       async probe() {
         return { available: true, results: [], at: 0, cached: false }
       },
+      ...noSettings,
     } satisfies BridgeApi
 
     const store = makeStore(api, clock)
@@ -467,6 +489,7 @@ describe('supervisor store — cancel', () => {
       async probe() {
         return { available: false, results: [], at: 0, cached: false }
       },
+      ...noSettings,
     } satisfies BridgeApi
     const store = makeStore(api, clock)
     store.start()
@@ -492,6 +515,7 @@ describe('supervisor store — cancel', () => {
       async probe() {
         return { available: false, results: [], at: 0, cached: false }
       },
+      ...noSettings,
     } satisfies BridgeApi
     const store = makeStore(api, clock)
     store.start()

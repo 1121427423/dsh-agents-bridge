@@ -1,0 +1,17 @@
+{
+  // IM-14 — the SECOND type gate: everything the shipped surface's tsconfig
+  // deliberately leaves out (`tests/**` + `scripts/**`). The base config has
+  // `rootDir: src` and emits declarations for the published surface; this one
+  // widens the include and emits nothing. `pnpm run typecheck:tests` runs
+  // exactly this file, and `tests/integration/typecheck.test.ts` asserts it
+  // stays clean — four real TS2339s had already accumulated in a test file that
+  // no gate ever compiled.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "rootDir": "."
+  },
+  "include": ["src", "tests", "scripts"],
+  "exclude": ["node_modules", "lib"]
+}

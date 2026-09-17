@@ -43,6 +43,27 @@ function session(sessionId: string, status: ClientRunStatus): ClientSession {
   }
 }
 
+/**
+ * The settings trio `BridgeApi` requires (IM-14).
+ *
+ * `BridgeApi` grew `settings`/`settingsWrite`/`settingsReset` with the settings
+ * card, and every fake in this file predates them — nothing typechecked tests
+ * back then, so the drift went unseen. These stubs are deliberately LOUD rather
+ * than silently returning a shape: a surface that starts calling them under this
+ * fixture should fail, not read a plausible-looking empty value.
+ */
+const noSettings: Pick<BridgeApi, 'settings' | 'settingsWrite' | 'settingsReset'> = {
+  async settings(): Promise<ClientSettingsView> {
+    throw new Error('settings() is not part of this fixture')
+  },
+  async settingsWrite() {
+    throw new Error('settingsWrite() is not part of this fixture')
+  },
+  async settingsReset() {
+    throw new Error('settingsReset() is not part of this fixture')
+  },
+}
+
 function makeStore(script: {
   readonly sessions?: () => readonly ClientSession[]
   readonly failStatus?: boolean
@@ -73,6 +94,7 @@ function makeStore(script: {
         cached: true,
       }
     },
+    ...noSettings,
   }
   return createSupervisorStore(api, createTranslator('en'), { policy: DEFAULT_POLL_POLICY, autoRefresh: true }, {
     setTimeout: () => 1,
@@ -272,6 +294,7 @@ describe('SupervisorPanel — every state is readable', () => {
       async probe() {
         return { available: true, results: [], at: 0, cached: false }
       },
+      ...noSettings,
     }
     const store = createSupervisorStore(api, createTranslator('en'), { policy: DEFAULT_POLL_POLICY, autoRefresh: true }, {
       setTimeout: () => 1,
@@ -347,6 +370,7 @@ describe('Indicator — visible only when there is something to say', () => {
         async probe() {
           return { available: false, results: [], at: 0, cached: false }
         },
+        ...noSettings,
       } satisfies BridgeApi,
       createTranslator('en'),
       { policy: DEFAULT_POLL_POLICY, autoRefresh: true },

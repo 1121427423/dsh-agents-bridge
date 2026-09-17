@@ -22,7 +22,9 @@ import type {
   SpawnedProcess,
 } from '../../src/drivers/argv.ts'
 import { clearDriverRuntime, createBackendWithRuntime } from '../../src/drivers/index.ts'
+import { buildCodebuddyArgs } from '../../src/drivers/codebuddy.ts'
 import {
+  CLAUDE_BLOCKED_ARGS,
   CLAUDE_DIALECT,
   ClaudeStreamParser,
   buildClaudeArgs,
@@ -192,6 +194,73 @@ describe('buildClaudeArgs', () => {
     // duplicate the brief on every turn (multica MUL-5392).
     expect(args).not.toContain('--append-system-prompt')
     expect(args).not.toContain('the entire runtime brief')
+  })
+})
+
+/**
+ * MI-16 — `--strict-mcp-config` is a protocol flag, not a caller knob.
+ *
+ * The codebuddy dialect's module header forbids that flag outright: measured on
+ * CodeBuddy 2.x, `--mcp-config` alone unions the managed + user + local scopes
+ * while `--mcp-config --strict-mcp-config` leaves the managed scope ALONE
+ * (MUL-5846). So a caller-supplied copy silently narrows the union the dialect
+ * promises — the exact failure the hand-written table is there to prevent. It
+ * lives in `CLAUDE_BLOCKED_ARGS` because the codebuddy table inherits it.
+ */
+describe('MI-16: --strict-mcp-config cannot be re-added by a caller', () => {
+  it('drops a caller-supplied --strict-mcp-config instead of narrowing the scope union', () => {
+    const args = buildCodebuddyArgs({
+      mcpConfigPath: '/tmp/managed-mcp.json',
+      extraArgs: ['--strict-mcp-config', '--keep-me', 'value'],
+    })
+    expect(args).not.toContain('--strict-mcp-config')
+    // The driver itself never adds it for codebuddy (strictMcpConfigWhenManaged
+    // is false), so its absence is the whole assertion.
+    expect(args).toContain('--keep-me')
+    expect(args).toContain('value')
+    // The claude dialect shares the table and must drop it too; without a
+    // managed config it never emits one of its own.
+    expect(buildClaudeArgs({ extraArgs: ['--strict-mcp-config'] })).not.toContain(
+      '--strict-mcp-config',
+    )
+    expect(CLAUDE_BLOCKED_ARGS['--strict-mcp-config']).toBe('standalone')
+  })
+
+  it('negative control: a flag that IS in the table is still dropped, a harmless extra survives', () => {
+    const args = buildCodebuddyArgs({ extraArgs: ['--output-format', 'text', '--keep-me'] })
+    // Exactly the driver's own pair survives; the caller's value token is gone.
+    expect(args.filter((a) => a === '--output-format')).toHaveLength(1)
+    expect(args).not.toContain('text')
+    expect(args).toContain('--keep-me')
+  })
+})
+
+/**
+ * MI-17 — `-p /some/path` must not leave the value as a bare positional.
+ *
+ * multica's Go spec (`claude.go:714`) blocks `-p` as `standalone`, so the token
+ * AFTER it survives and the CLI reads it as its own prompt ("reply with
+ * /tmp/x" instead of the caller's prompt). `argv.ts` already knows how to eat a
+ * following non-flag token for `optionalValue`; this is a DELIBERATE deviation
+ * from the Go reference and is documented in `docs/driver-pitfalls.md`.
+ */
+describe('MI-17: -p consumes a following bare value', () => {
+  it('drops the value token instead of leaving it as a prompt positional', () => {
+    const args = buildClaudeArgs({ extraArgs: ['-p', '/tmp/x', '--keep-me'] })
+    expect(args).not.toContain('/tmp/x')
+    expect(args).toContain('--keep-me')
+    // The driver's own `-p` survives, exactly once.
+    expect(args.filter((a) => a === '-p')).toHaveLength(1)
+  })
+
+  it('negative control: the inline form -p=/tmp/x is still blocked', () => {
+    const args = buildClaudeArgs({ extraArgs: ['-p=/tmp/x'] })
+    expect(args).not.toContain('-p=/tmp/x')
+    expect(args.filter((a) => a === '-p')).toHaveLength(1)
+  })
+
+  it('pins the deliberate deviation: the table mode is optionalValue, not standalone', () => {
+    expect(CLAUDE_BLOCKED_ARGS['-p']).toBe('optionalValue')
   })
 })
 

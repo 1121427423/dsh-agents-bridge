@@ -22,11 +22,21 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 
 import { apply, buildPromptSection, type Config } from '../src/index.ts'
-import type { ToolDefinition } from '../src/tools/definitions.ts'
+import type { ToolDefinitions } from '../src/tools/definitions.ts'
 import { AgentRunRejectedError } from '../src/kernel/types.ts'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const SLOW_CLI = path.join(here, 'fixtures', 'fake-slow-cli.mjs')
+
+/**
+ * One entry of the tool table.
+ *
+ * The export is `ToolDefinitions` (the whole table, `TOOL_NAMES`-ordered); this
+ * alias is the element the fake registry stores. It used to import a
+ * `ToolDefinition` that never existed — a name that only survived because no
+ * typecheck ever compiled the tests (IM-14).
+ */
+type ToolDefinition = ToolDefinitions[number]
 
 interface Registered {
   readonly tools: Map<string, ToolDefinition>

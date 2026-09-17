@@ -167,6 +167,18 @@ const STDERR_TAIL_BYTES = 8 * 1024
 export const ACP_DEFAULT_OUTPUT_BYTE_LIMIT = 50_000
 
 /**
+ * Hard cap on a single terminal's retained output, whatever the ENGINE asks for
+ * (MI-19).
+ *
+ * `terminal/create.outputByteLimit` arrives on the wire and the retained buffer
+ * lives in the HOST process, so adopting it verbatim lets the engine size host
+ * memory (1e12 is a legal value on the wire). The default stays 50 KB — this is
+ * only the ceiling for a caller that asks for more, and it is deliberately far
+ * below anything that could pressure the host.
+ */
+export const ACP_MAX_OUTPUT_BYTE_LIMIT = 1024 * 1024
+
+/**
  * How long to keep draining notifications after `session/prompt` answers.
  *
  * ACP peers legitimately emit the turn's final `agent_message_chunk` AFTER the
@@ -1387,9 +1399,14 @@ export class AcpClient {
       }
     }
 
-    const limit = typeof p['outputByteLimit'] === 'number' && p['outputByteLimit'] > 0
+    // The engine sizes this, the host pays for it: `outputByteLimit` arrives on
+    // the wire (and `1e12` is a perfectly legal value there), while the retained
+    // buffer is memory in THIS process. It is clamped to the host cap instead of
+    // adopted verbatim (MI-19); an absent limit still means the engine default.
+    const engineLimit = typeof p['outputByteLimit'] === 'number' && p['outputByteLimit'] > 0
       ? p['outputByteLimit']
       : ACP_DEFAULT_OUTPUT_BYTE_LIMIT
+    const limit = Math.min(engineLimit, ACP_MAX_OUTPUT_BYTE_LIMIT)
 
     // No `args` means the command is a shell line, exactly as multica does it.
     const spec =
@@ -1983,7 +2000,10 @@ export async function runAcp(
 
     if (terminalReason !== 'none' || session.result !== undefined) {
       // Cancel/timeout already settled; make sure the group is gone so nothing
-      // outlives the transcript.
+      // outlives the transcript. `dispose()` owns the TERMINALS the engine
+      // created (each in its own group), which `child.terminate()` cannot reach
+      // — an engine that never releases one would otherwise leak it (IM-15).
+      await client.dispose()
       void child.terminate().catch(() => {})
       return
     }
@@ -2024,6 +2044,13 @@ export async function runAcp(
     if (status !== 'completed' && errMsg !== '' && diagnosis !== '' && !errMsg.includes(diagnosis)) {
       errMsg = `${errMsg}: ${diagnosis}`
     }
+
+    // Both exits dispose the client: it is the ONLY owner of the terminal
+    // children the engine asked us to spawn (each in its own detached group),
+    // and settle-time `child.terminate()` only reaches the engine itself. The
+    // engine is free to create a terminal and never release it; the run ending
+    // must still leave no process behind (IM-15).
+    await client.dispose()
 
     finishOnce({
       sessionId: session.sessionId,

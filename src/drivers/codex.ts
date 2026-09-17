@@ -156,6 +156,22 @@ export interface CodexArgOptions {
 }
 
 /**
+ * Whether a value can occupy the SESSION_ID positional slot.
+ *
+ * `codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]` reads its two positionals
+ * in order, so whatever lands first IS the session id (MI-20). Two shapes
+ * cannot be ids:
+ *  - a value starting with `-` is parsed by clap as a flag, which either rejects
+ *    the whole invocation or shifts the prompt into the id slot;
+ *  - an empty/whitespace-only value does the same shift silently.
+ * Neither may reach argv — the caller gets a naming error instead.
+ */
+function isCodexResumeId(value: string): boolean {
+  const id = value.trim()
+  return id !== '' && !id.startsWith('-')
+}
+
+/**
  * `codex exec` argv.
  *
  * Order follows the verified contract: subcommand(s) → `--json` → policy flags →
@@ -170,7 +186,19 @@ export interface CodexArgOptions {
  * still has to be emitted: without it the resumed turn is not JSONL either.
  */
 export function buildCodexArgs(opts: CodexArgOptions, logger?: BridgeLogger): string[] {
-  const resuming = opts.resumeSessionId !== undefined && opts.resumeSessionId !== ''
+  // The resume id goes into a POSITIONAL slot, so it is validated before it can
+  // be placed (MI-20). One refusal point, with the offending value named.
+  const requestedResumeId = opts.resumeSessionId
+  if (requestedResumeId !== undefined && !isCodexResumeId(requestedResumeId)) {
+    throw new Error(
+      'codex resume session id must be a non-empty id that does not start with "-"; ' +
+        `got ${JSON.stringify(requestedResumeId)}`,
+    )
+  }
+  const resumeId = requestedResumeId === undefined || requestedResumeId === ''
+    ? undefined
+    : requestedResumeId
+  const resuming = resumeId !== undefined
   const args: string[] = ['exec']
   if (resuming) args.push('resume')
   args.push('--json')
@@ -191,7 +219,9 @@ export function buildCodexArgs(opts: CodexArgOptions, logger?: BridgeLogger): st
     args.push('-c', `model_reasoning_effort="${opts.effort}"`)
   }
   args.push(...filterCustomArgs(opts.extraArgs, CODEX_BLOCKED_ARGS, logger))
-  if (resuming) args.push(opts.resumeSessionId ?? '')
+  // No `?? ''` fallback: an empty value is refused above, so the slot can only
+  // ever receive an id a resume would actually accept (MI-20).
+  if (resumeId !== undefined) args.push(resumeId)
   args.push(opts.prompt)
   return args
 }
@@ -700,12 +730,51 @@ export async function runCodex(
     session.finish(result)
   }
 
+  /**
+   * Settle from the parser state when a terminal turn frame is already in hand
+   * (MI-21) — the codex half of zcode's `armTerminalBoundary`.
+   *
+   * The driver only settles at exit + flush, so a turn that ENDED on the wire
+   * but whose process lingers is exactly the window a timer lands in. Latching
+   * `timeout` with empty text there discards an answer the parser had already
+   * read. A lifecycle terminal IS the protocol boundary: report what the dialect
+   * said, then kill the group.
+   */
+  function settleFromParsedTerminal(): boolean {
+    const state = parser.state
+    if (!state.sawTurnCompleted && !state.sawTurnFailed) return false
+    const failed = state.sawTurnFailed
+    let errMsg = ''
+    if (failed) {
+      errMsg = state.turnFailure !== '' ? state.turnFailure : state.lastError
+      if (errMsg === '') errMsg = 'codex reported a failed turn without details'
+    }
+    finishOnce({
+      sessionId: session.sessionId,
+      agentId: opts.agent,
+      status: failed ? 'failed' : 'completed',
+      exitCode: null,
+      // Same contract as the exit-path settle: a failed run reports no text, so
+      // a partial transcript can never be mistaken for an answer.
+      text: failed ? '' : state.finalAgentText,
+      ...(errMsg === '' ? {} : { error: errMsg }),
+      ...(state.usage === undefined ? {} : { usage: state.usage }),
+      durationMs: now() - startedAt,
+      ...(state.threadId === '' ? {} : { backendSessionId: state.threadId }),
+    })
+    // Graceful signal → grace window → process-group kill, owned by the runtime.
+    void child.terminate().catch(() => {})
+    return true
+  }
+
   function requestTerminal(
     reason: 'cancelled' | 'timeout' | 'idle' | 'overflow',
     message: string,
   ): void {
     if (terminalReason !== 'none') return
     terminalReason = reason
+    // A finished turn outranks the verdict of whatever timer fired (MI-21).
+    if (settleFromParsedTerminal()) return
     finishOnce({
       sessionId: session.sessionId,
       agentId: opts.agent,

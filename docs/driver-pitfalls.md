@@ -13,6 +13,8 @@
 | 5 | **claude 故意不转发 `--append-system-prompt`，codebuddy 转发**（multica 有专门测试） | 两个 dialect 分开配置，不共用一套 flag 策略 |
 | 6 | 子进程 env 处理不能粗暴剥离全局前缀 | 只剔除 `CLAUDECODE` / `CLAUDE_CODE_ENTRYPOINT` / `EXECPATH` / `SESSION_ID` / `SSE_PORT` 与 `CLAUDECODE_*`，**保留用户态 `CLAUDE_CODE_*`**（曾因前缀剥离在 Windows 删掉 `CLAUDE_CODE_GIT_BASH_PATH`） |
 | 7 | 并发读写 stdin/stdout 会死锁 | 先挂 stdout reader 再写 stdin；stdin 保持打开以自动批准 `control_request`（对应 multica `claude_deadlock_test.go` 的存在原因） |
+| 28 | **`--strict-mcp-config` 不是调用方旋钮**：在 codebuddy 上它把 MCP 作用域从 `managed + user + local` **收窄成 managed only**（实测，MUL-5846）——与「managed 只是并入用户既有作用域」的契约正相反 | 进 blocked 表（claude/codebuddy **共用**该表），调用方再写一份会被丢；claude 侧由驱动在拿托管 config 时自行注入。codebuddy 的 `CODEBUDDY_BLOCKED_ARGS` 与 `CLAUDE_BLOCKED_ARGS` 必须同表（MI-16） |
+| 29 | **`-p /some/path` 会把路径留成位置参数**：multica 的 Go 规格（`claude.go:714`，`blockedStandalone`）只吃掉 `-p` 本身，后随 token 变成 CLI 的**第一个位置参数**，也就是它自己的 prompt | **对 multica 规格的有意偏离**：本地把 `-p` 记成 `optionalValue`，`argv.ts` 连后随的**非旗标 token** 一起吃（`-p=/tmp/x` 这种内联形式照旧被拦）。理由：静默把调用方的 prompt 换成 `/tmp/x`，比多丢一个 token 危险得多（MI-17） |
 
 ## openclaw / autoclaw（NDJSON 家族）
 
