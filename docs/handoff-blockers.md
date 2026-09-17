@@ -381,3 +381,22 @@ copilot.tencent.com**，两次产出回合后断线。按规程记录、不无�
   paid slug `minimax/minimax-m3`、或在 hermes 内 `/model` 选一个可用模型、或用 `hermes fallback add`
   配后备 provider。改完复跑同一条 `scripts/acceptance.ts hermes "Reply with exactly: OK"`，
   期望看到 `[text] OK` 而不是 404 话术。**不要把这条当代码缺陷去查。**
+
+## 记录 10 — `deepseek-v4.1-flash` 触发 429 频率限制：两个施工批次同时阵亡（**配额故障，只记录；已按用户给定的模型链继续**）
+
+- **现象（原样）**：`2026-09-18 02:47`，两个并行派出的 workbuddy（WorkBuddy CLI，`--model deepseek-v4.1-flash`）
+  在同一分钟里先后终止，`stream-json` 的 `result` 事件均为 `subtype: error_during_execution`、`is_error: true`、
+  `num_turns` 分别 **392**（批次 1）与 **103**（批次 2）。两者的最后一条助手文本都是：
+  `429 您的使用量已超出频率限制，将在 2026-09-18 22:55:03 UTC+8 重置，您也可以切换其他模型继续使用。`
+- **性质**：**模型配额/频率限制**（与本文件记录 6「免费模型配额用尽」同族）。**不是**本仓库的代码缺陷，
+  也不该去改桥的驱动或重试逻辑。
+- **监理这边同时是一次真实失误（记在我头上）**：我在**同一分钟并行派了两个** workbuddy，把配额烧穿。
+  本仓纪律只写了「不要并发跑两套 build/vitest」，**没有写「不要并发派多个施工代理」** —— 现在有了证据，两个都要避免。
+- **用户的处置指令（2026-09-18 03:00 左右）**：切换到 **`glm-5.3-flash`**；若它也限额，切 **`hy4-preview`**；
+  两者都限额就由监理收尾。WorkBuddy CLI 的 `--help` 里 `--model` 的受支持清单即含
+  `glm-5.3-flash` 与 `hy4-preview`，另有 `--fallback-model`（**仅在上游“过载”时自动回退**，不覆盖请求悬挂）。
+- **实测（监理亲跑）**：`glm-5.3-flash` 可用（探针 2 轮返回 `PONG`）；`hy4-preview` 可用（`PONG2`）。
+  但 `glm-5.3-flash` 在**长时间 agentic 会话**里出现过一次**请求悬挂**（流 5 分钟零增长、CPU 近乎空闲），
+  遂按用户给定的链改派 `hy4-preview` 重跑同一批。**这条与记录 6 一样只记录，不写进桥的代码。**
+- **对交付的影响（如实）**：「会话终态主动通知」那一块因此**由监理自建**（`b3c732c`），
+  没有第二方独立复核 —— 已在 `docs/review-fixes.md` §U-0 / §U-5 与 `docs/handoff-2026-09-18.md` §5 显式标注为**待复核**。
