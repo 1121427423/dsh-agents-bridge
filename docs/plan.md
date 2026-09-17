@@ -35,6 +35,7 @@
 | D32 | **argv 规则 `[interpreter, executable, ...argsPrefix, …]` 全树只有一份实现**：`src/kernel/command-line.ts#buildCommandLine`；**版本探测与跑路径必须用同一个构造函数、喂同一份 `CommandSpec`**。`drivers/argv.ts` 再导出、`kernel/spawn.ts#buildArgv` 委托，二者都不再实现规则 | 探测曾自己拼 argv，只读 `ResolvedIdentity.interpreterPath`（**仅描述符钉了 interpreter 时才有值**，即桌面轨道），而 CLI 轨道的 shim 修复写的是 `command.interpreter` → `claude`/`codex`/`codebuddy-code` 被当**裸 shim** 探测，子进程以 `env: node: No such file or directory` 退出；桌面三个身份**同一行代码**却正常。规则放在 `kernel/` 是因为 `kernel/**` 不许 import `drivers/**`（D3），反向依赖早已存在 | ✅ 已实现（真机复验 + `tests/integration/argv-shape.test.ts` 新 describe，已验证会真红） |
 | D33 | **版本号只能是版本号**：`defaultVersionProbe` 分开收 stdout / stderr，版本只从 **stdout** 解析；stderr / spawn 失败 / 超时成为 `diagnostic`，由 `probeOne` 落到 `notes` 的自解释行 `[probe] --version failed: …`。**不占用 `health.detail`**（那里已承载凭据说明） | 原实现把 stdout 与 stderr 一起喂给 `parseVersion`，其「无 semver → 取第一行非空文本」的回退**把子进程的错误信息当成了版本号**，同时该身份仍是 `available: true` / `launch: 'ok'` —— 操作员看到的正是这一行。契约不变：探测实现永不能让 `probe()` 失败，未知版本不是错误 | ✅ 已实现（`tests/kernel/registry-node-shim.test.ts` 已验证会真红） |
 | D34 | **本插件有自己的 settings 命名空间 `dsh-agents-bridge`**（= 包名）；schema **不声明任何默认值**（默认值只由内核定义一次）；**每个字段必须标注生效时机**（`live` 每次调用读 / `reload` 构造时快照）；客户端卡片注册在 **keyed 槽位 `settings.plugin.item`** 上，键即命名空间 | 三个非显然的实测事实：① 一方的 `ConfigurablePluginsTab` **只按命名空间派发**该槽位（"a served namespace no card claims renders nothing"）——只注册命名空间**不会**出现任何 UI；② `ctx.settings.register()` 才返回可写的 scope（`installSection` 只给读的 getter），所以面板要用 `register` 并自己补回 unload 回落；③ `defaultCwd` 每次 run 都读（`manager.ts:401`）而策略字段在构造时快照（`manager.ts:160-168`）——不逐字段标注，就会得到一个"保存了但不生效"的开关 | ✅ 已实现（隔离 `DSH_HOME` 真机往返 + 734 passed / 1 skipped） |
+| D35 | **「有没有被用户覆盖」是 provider 的回答，不是我们的推断**：`userLayer()` 返回**三态**（`known:false` = 这个 provider 不描述命名空间；`known:true, user:{}` = 它查了、且没有任何覆盖），只有 `known:false` 才走值比较回退，且回退基准是 **schema 解析结果**而不是 composition entry；**provider 的写必须 `await`**（它的 scope 方法是 `async`） | 三个都只能在真机上看见：① 真实 provider 对**没有存过 section** 的命名空间会**省略 `user` 键**（`...detachedUser === void 0 ? {} : {user}`），而我们把它和"无法描述"混成一态 → 卡片在**操作员从未改过**的 `settings.yaml` 上把三个列表字段标成"已被用户覆盖"；② 它把缺省的 `z.array()` 解析成 `[]`（而非 `undefined`），所以回退拿 `entry` 当基准时 `[] !== undefined` 必然误报；③ scope 的 `update`/`replace` 是 `async`（`dsh-settings/lib/index.js:410,424`），丢掉返回的 promise 会让**写入失败仍报 `ok: true`**，并留下一个 unhandled rejection —— Node 默认 `--unhandled-rejections=throw`，那会**打死整个宿主进程** | ✅ 已实现（4 条新用例先真红后真绿；真机复验 5 个字段全部 `overridden: false`） |
 
 ## 任务拆分（3 个并行工作流）
 
@@ -563,16 +564,32 @@ schema 库拖进浏览器包（实测客户端产物 0 次 `schemastery` / `node
 边界 → ~/.dsh/settings.yaml 的 sha256 前后一致（未改动）
 ```
 
-**这次活体跑抓到一个单测照不到的 bug**：真实 provider 的 `describe()` 不用我假设的字段名命名
-命名空间 → 走了"没有用户层信息"的回退分支，而回退用 `!==` 比较**数组**，把三个列表字段
-全标成"已被用户覆盖"（`[] !== []`）。修法：结构化比较（`sameValue`）+ `describe` 的键
-按 `ns ?? namespace ?? name` 三种形状试；并补了一条专门覆盖该回退分支的单测。
-**这是"活体跑一次"与"单测全绿"之间的差距，不是运气。**
+**第一次活体跑抓到的 bug，和第二次活体跑证明「第一次修错了层」** —— 这段记录两次，因为第二次才是
+真正定性的那次：
+
+- **第一次**（隔离 home）：以为问题是"回退分支用 `!==` 比数组"，于是加了结构化比较 `sameValue`，
+  并让 `describe` 的键按 `ns ?? namespace ?? name` 三种形状试。单测绿了。
+- **第二次**（操作员真实 `DSH_HOME`，重启到新构建的宿主）：**三个列表字段仍然报"已被用户覆盖"**，
+  而那份 `settings.yaml` 里根本没有 `dsh-agents-bridge` 节。查真实 provider 源码才发现真正的原因：
+  它对**没有存过 section** 的命名空间**省略 `user` 键**（`dsh-settings/lib/index.js:360-374` 的
+  `...detachedUser === void 0 ? {} : { user: detachedUser }`），而代码把"没有 `user` 键"与
+  "这个 provider 不描述命名空间"**混成了同一个 `undefined`** → 永远走回退分支 → 回退再拿
+  `entry`（列表键是 `undefined`）当基准去比 provider 物化出来的 `[]`，必然误报。
+  修法是**三态**（`known:false` / `known:true, user:{}`）＋ 回退基准改成 **schema 解析结果**（D35）。
+- **同一次核对还发现一个更严重的东西**：provider 的 scope `update`/`replace` 是 `async`
+  （`:410,424`），而已有代码**丢掉了返回的 promise** —— 写入失败会**报 `ok: true`**，
+  并留下 unhandled rejection，而 Node 默认 `--unhandled-rejections=throw`，**那会打死整个宿主进程**。
+  两个都补了"先真红后真绿"的用例。
+- **教训**：第一次那个修法不是白修（结构化比较本身是对的），但它修的是**回退分支内部**，
+  而缺陷在**进入回退分支的条件**上。单测的 fake 两种形状都没模拟（它总是给 `user`、
+  且 `get()` 不做 schema 物化），所以两种修法都能骗过单测 —— **"测试替身与真身形状不一致"本身
+  就是一类缺陷**，这轮把 fake 换成了照抄真实 provider 行为的 `fileProviderFake`。
 
 **没做的（有意为之，且不假装做过）**：没有在真实浏览器里点那张卡片。已证到的是：
 产物注册了正确的 keyed 槽位（`node:vm` 求值**构建产物**断言）、宿主真机服务了该命名空间、
-两条路由真机往返正确、隔离 home 的 `settings.yaml` 真的被写/清。**视觉渲染本身未验证** ——
-要它可信，需要在 GUI 里打开「设置 → 插件」看一眼，那是操作员（或未来带浏览器的工作流）的事。
+两条路由真机往返正确（含拒绝路径）、隔离 home 的 `settings.yaml` 真的被写/清、
+操作员真实 home 上 5 个字段全部 `overridden: false`。**视觉渲染本身未验证** ——
+要它可信，需要在 GUI 里打开「设置 → 插件 → 可配置」看一眼，那是操作员的事。
 
 ## 阶段状态
 
@@ -663,9 +680,9 @@ schema 库拖进浏览器包（实测客户端产物 0 次 `schemastery` / `node
 | 指标 | 值 |
 |---|---|
 | TS 文件 | **98** 个 `.ts`（src 47 / tests 50 / scripts 1；另有 `scripts/*.mjs` 3 个）—— `find src tests scripts -name '*.ts' \| wc -l` |
-| 测试 | **734 个通过 + 1 skipped（45 passed \| 1 skipped 文件）** —— 基线 704/1；工作流 H 新增 6 个、D31 新增 3 个、`node-shim-note` 新增 6 个、`settings-surface` 新增 15 个（`tests/settings/settings.test.ts` 10 + `tests/host/settings-route.test.ts` 4 + `tests/client/plugin.test.ts` keyed 槽位 1），零删除、零跳过 |
+| 测试 | **740 个通过 + 1 skipped（45 passed \| 1 skipped 文件）** —— 基线 704/1；工作流 H 新增 6 个、D31 新增 3 个、`node-shim-note` 新增 6 个、`settings-surface` 新增 15 个（`tests/settings/settings.test.ts` 10 + `tests/host/settings-route.test.ts` 4 + `tests/client/plugin.test.ts` keyed 槽位 1）、**D35 新增 6 个**（同一文件 10 → 16），零删除、零跳过 |
 | `tsc --noEmit` | 0 错误 |
-| 构建产物 · `lib/index.js` | 322.1 KB（esbuild，`@deepseek-ai/*` 全部 external） |
+| 构建产物 · `lib/index.js` | 322.8 KB（esbuild，`@deepseek-ai/*` 全部 external） |
 | 构建产物 · `lib/client.js` | 70.2 KB（web platform，`react` 系列 external；带 `window.__ModuleLoader__.load({ id: <包名>, factory })` 包装） |
 | 工具面 | **9 个**（`agents_probe` / `run` / `run_many` / `status` / `wait` / `output` / `usage` / `cancel` / `send`） |
 | 合同校验 | **`verify_plugin.py` 11/11 PASS**（`pnpm run verify`；等价命令 `python3 /Users/king/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py .`，原始输出见「工作流 G」）。另有监理自检 `.wb-harness/check-contract.mjs` **19/19**（工具，不入交付物） |
@@ -673,5 +690,6 @@ schema 库拖进浏览器包（实测客户端产物 0 次 `schemastery` / `node
 | 真机验收 · web 宿主 API | `dsh --profile web`（standalone harness，127.0.0.1:43121）实测：`host api route mounted {"path":"/agents-bridge/api"}`，`loaded` 仍报 `"tools":9`；`POST /agents-bridge/api/status` 与 `/probe` 返回真实数据，跨站请求 403。命令与原始输出见「工作流 H」一节 |
 | 真机验收 · **无 node 的宿主 PATH**（本缺陷的原始症状） | 协调者在**合并后**的树上复跑：`env PATH=/usr/bin:/bin:/usr/sbin:/sbin ./bin/dsh --profile web --no-open` → `claude` 2.8.4 / `codex` 0.154.0 / `codebuddy-code` 2.151.0 / `codebuddy-code-acp` 2.151.0（修复前这四行是 `version: "env: node: No such file or directory"`），桌面三身份 `workbuddy` 2.137.1 / `workbuddy-ai` 2.137.1 / `autoclaw` 2026.6.8 前后一致；同一宿主上 `host api route mounted` 照常 |
 | 真机验收 · **设置面板数据面**（隔离 `DSH_HOME`） | `DSH_HOME=/tmp/wb-settings-home` + 最小 profile：读 → 写 → 回读（`overridden` 正确）→ 非法值被指名拒绝 → reset 后 `settings.yaml` 中该键消失；`~/.dsh/settings.yaml` 的 sha256 前后一致（未触碰）。**视觉渲染未验证**（没在真浏览器里点过卡片） |
+| 真机验收 · **`overridden` 不再误报**（D35，操作员真实 `DSH_HOME`，只读） | 重启到修复后构建的 web 宿主：`POST /agents-bridge/api/settings` → `writable: true`、**`overridden` 命中的字段列表为 `[]`**（修复前是 `allowedCwd`/`deniedCwd`/`allowedAgents` 三个），列表字段 `value: []`（provider 物化）、`defaultCwd`/`maxConcurrent` 为 `undefined`；`{"patch":{"maxConcurrent":0}}` 回 `ok:false, "maxConcurrent must be a positive integer (got 0)"` 且 `~/.dsh/settings.yaml` sha256 不变（`02c15fdf6a3db339…`，无 `dsh-agents-bridge` 节）|
 | 真机验收 · AutoClaw | `status=completed`、`text: AUTOCLAW_OK`、8404 ms（**合并后的树上复跑**，`scripts/acceptance.ts autoclaw`） |
 | 真机验收 · WorkBuddy | 国际版 `workbuddy-ai`：`status=completed`、`text: FINAL_OK`、6273 ms（**合并后的树上复跑**）。国内版 `workbuddy` 上游 ETIMEDOUT，见 `docs/handoff-blockers.md` 记录 1 |

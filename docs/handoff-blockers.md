@@ -232,3 +232,34 @@ text: OK1
   是操作员的决定，不是工作流能自行绕过的东西。
 - **人工待办**：**只有一个选择** —— 等配额重置（2026-09-18 02:36 +08:00）后 `--resume`，
   或明确改用另一个模型重派。**不要把 `429` 当成代码缺陷去查。**
+
+---
+
+## 记录 7 — `command-code / qwen3.8-flash` 报 400 `developer is not one of [...]`（**上游角色词表不兼容，只记录、不改配置**）
+
+- **时间**：2026-09-17 15:2x（本机 CST），操作员报告。
+- **现象（逐字，操作员提供）**：
+  `400: {"error":{"message":"developer is not one of ['system', 'assistant', 'user', 'tool', 'function']",`
+  `"type":"invalid_request_error","code":"invalid_parameter_error"}}`
+- **根因（已定位到行，**只读**核对，未改任何配置）**：
+  - 出角色的地方是 `~/.dsh/profiles/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js:910`：
+    ```js
+    const useDeveloperRole = model.reasoning && compat.supportsDeveloperRole;
+    const role = useDeveloperRole ? "developer" : "system";
+    ```
+    两个条件**同时**为真才会把系统提示发成 `role: "developer"`。
+  - `compat.supportsDeveloperRole` 的探测默认值在同文件 `:1279`：
+    `isOpenRouterDeveloperRoleModel || (!isNonStandard && !isOpenRouter)`
+    —— 即「按标准 OpenAI 端点对待」时就为真；而 `:1329` 允许模型条目的 `compat` 覆盖它。
+  - DSH 侧把它当作**可选兼容开关**暴露出来（`@deepseek-ai/dsh-llm-pi-ai/lib/index.js:381,409,931`，
+    `COMPLETIONS_COMPAT_GATE` 里 `supportsDeveloperRole: "offer"`），所以这是
+    **模型条目的 compat 字段**问题，不是消息内容问题。
+- **判定**：这是**上游/模型配置**层面的角色词表不兼容。`command-code` 的网关只认
+  `system|assistant|user|tool|function`，而该模型条目被判为「支持 developer 角色」。
+- **未做（有意为之）**：**没有**去改 `~/.dsh/settings.yaml`、`~/.dsh/profiles/**`、任何 provider 或
+  模型条目，也**没有**为了复现而切换本会话的模型 —— 交接边界 §0 把配置面划在仓库之外。
+- **人工待办（唯一动作，在配置文件里，不在本仓库）**：给 `command-code / qwen3.8-flash` 的模型条目
+  加上 `compat: { supportsDeveloperRole: false }`（或把该 provider 标为非标准端点）。
+  改完 `dsh --profile web --no-open` 重启即可验证；**不要**在本仓库里找「消息里的 developer 角色」——
+  桥只搬运模型输出，不构造发给模型的角色。若将来 pi-ai 在收到该 400 时自动降级重试，本记录随之作废。
+
