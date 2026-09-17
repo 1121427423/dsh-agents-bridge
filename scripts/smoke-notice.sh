@@ -84,7 +84,7 @@ EOF
 )
 
 LOG="$(mktemp -t dsh-notice-smoke.XXXXXX)"
-printf '\n--- running (this takes about a minute) ---\n'
+printf '\n--- running (a fast model: ~1 min; a slow one can take several) ---\n'
 NODE_BIN="${NODE:-$(command -v node || echo /opt/homebrew/bin/node)}"
 
 case "$DSH_BIN" in
@@ -96,7 +96,7 @@ printf '\n=== host lines that decide whether the path is live ===\n'
 grep -E 'job registry available|session completion notices are on|no job registry available yet' "$LOG" || true
 
 printf '\n=== the model'"'"'s answer (the notice must appear in (a) WITHOUT it polling) ===\n'
-sed -n '/^(a)/,$p' "$LOG" | head -40
+tail -30 "$LOG"
 printf '\n(full transcript: %s)\n' "$LOG"
 printf '\nINTERPRETATION\n'
 printf '  A notice quoted in (a) + `session completion notices are on` above  -> the C path works.\n'
