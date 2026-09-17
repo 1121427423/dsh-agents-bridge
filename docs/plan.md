@@ -353,13 +353,15 @@ $ python3 /Users/king/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py 
   `lib/client.js` 没有 `window.__ModuleLoader__.load({ id: "<包名>" … })` 包装，宿主根本不会注册
   这个 client half（详见「工作流 G」）。修复后 **11/11 PASS**，命令与原始输出见该节。
   仍然保留协调者的可复现自检（`.wb-harness/check-contract.mjs`，监理工具、不入交付物，
-  合并后的树上 18/18），覆盖且逐条标注所依赖的决策：`exports['.']` 必须是字符串（D17）、
+  合并后的树上 **19/19**；它import 构建脚本导出的 `HOST_EXTERNALS` / `CLIENT_EXTERNALS` 常量而不是
+  字符串匹配源码——G 把这两个常量抽成共享导出后，旧的字面量匹配曾误报一次失败），
+  覆盖且逐条标注所依赖的决策：`exports['.']` 必须是字符串（D17）、
   `exports['./client']` 存在、`dsh.bundle.patch` 指向真实文件、`dsh.client.{inject,platform}`、
   两个 build 产物**同时**出现在 `files[]` 与磁盘上、`types` 入口、两个 bundle 都保持
-  `@deepseek-ai/*` external（不变量 4）、注册都在 `ctx.effect()` 内（不变量 3）、
-  `agents_run` 不 await 会话结束（不变量 1）。
-  **仍未核验**（需宿主侧实机安装）：DSH 版本兼容区间、插件 id 注册表规则、cordis schema 一致性
-  —— 这三项不得当作已通过。
+  `@deepseek-ai/*` external 且 client 侧 `react` 系列也 external（不变量 4 / 双 React 会崩 slot）、
+  注册都在 `ctx.effect()` 内（不变量 3）、`agents_run` 不 await 会话结束（不变量 1）。
+  **仍未核验**（需把插件真装进 profile 并让浏览器挂载）：DSH 版本兼容区间、loader 启动、
+  cordis schema 一致性、以及 client half 在真实浏览器里的挂载 —— **这几项不得当作已通过**。
 - [ ] 安装冒烟：装进 `desktop` profile → 重启 DSH → `/agents-bridge-hello` 与 `agents_probe` 可见（**待用户确认，因为需重启正在运行的会话**）
 - [ ] **P1 验收：WorkBuddy 跑通一次真实任务（证据：agents_output 事件流）** — 前置已证：codebuddy headless 实测可跑（findings §5.1）。**注**：国内版 `workbuddy` 的上游当时 ETIMEDOUT（见 `docs/handoff-blockers.md` 记录 1）；国际版 `workbuddy-ai` 已用同一命令栈跑通（`status=completed`，`text: OK1`，11.6s，证据见 handoff-blockers §1.2）。两者是不同身份/不同上游，不能互相顶替，故国内版这一条仍留未勾。
   - **协调者在合并后的树上复跑（2026-09-17）**：`scripts/acceptance.ts workbuddy-ai "Reply with exactly: FINAL_OK" --model=deepseek-v4.1-flash`
@@ -423,13 +425,13 @@ $ python3 /Users/king/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py 
 
 | 指标 | 值 |
 |---|---|
-| TS 文件 | 92 个（src 43 / tests 46 / scripts 4） |
+| TS 文件 | 93 个（src 43 / tests 46 / scripts 4） |
 | 测试 | **704 个通过 + 1 skipped（42 个文件）** —— 基线 696/1（41 文件）；G 新增 8 个（`tests/integration/client-bundle.test.ts`），零删除、零跳过 |
 | `tsc --noEmit` | 0 错误 |
 | 构建产物 · `lib/index.js` | 310.1 KB（esbuild，`@deepseek-ai/*` 全部 external） |
 | 构建产物 · `lib/client.js` | 59.5 KB（web platform，`react` 系列 external；带 `window.__ModuleLoader__.load({ id: <包名>, factory })` 包装） |
 | 工具面 | **9 个**（`agents_probe` / `run` / `run_many` / `status` / `wait` / `output` / `usage` / `cancel` / `send`） |
-| 合同校验 | **`verify_plugin.py` 11/11 PASS**（`pnpm run verify`；等价命令 `python3 /Users/king/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py .`，原始输出见「工作流 G」）。另有监理自检 `.wb-harness/check-contract.mjs` 18/18（工具，不入交付物） |
+| 合同校验 | **`verify_plugin.py` 11/11 PASS**（`pnpm run verify`；等价命令 `python3 /Users/king/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py .`，原始输出见「工作流 G」）。另有监理自检 `.wb-harness/check-contract.mjs` **19/19**（工具，不入交付物） |
 | 端到端集成 | `tests/integration/pipeline.test.ts`（真子进程 + 真 stream-json 解析 + 取消 + usage + resume 指针）全绿；`tests/integration/argv-shape.test.ts`（每个内置身份的最终 argv 形状，5 个用例）全绿 |
 | 真机验收 · AutoClaw | `status=completed`、`text: AUTOCLAW_OK`、8404 ms（**合并后的树上复跑**，`scripts/acceptance.ts autoclaw`） |
 | 真机验收 · WorkBuddy | 国际版 `workbuddy-ai`：`status=completed`、`text: FINAL_OK`、6273 ms（**合并后的树上复跑**）。国内版 `workbuddy` 上游 ETIMEDOUT，见 `docs/handoff-blockers.md` 记录 1 |
