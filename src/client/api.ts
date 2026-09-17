@@ -282,29 +282,40 @@ export function createBridgeApi(
     const timer = controller === undefined
       ? undefined
       : setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
-    let response: Response
+    // The watchdog covers the WHOLE exchange, headers AND body. Clearing it once
+    // the headers arrived left a stalled body loading forever with no error
+    // (MI-12), so a failed body read is treated like a failed fetch.
     try {
-      response = await fetchImpl(`${base}/${method}`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(payload),
-        ...(controller === undefined ? {} : { signal: controller.signal }),
-      })
-    } catch (error) {
-      // A network-level rejection is the "plugin not installed on this host /
-      // host restarted" case, which the panel renders as an empty state rather
-      // than an error page.
-      throw new ApiError('network', 'network', 0, error instanceof Error ? error.message : String(error))
+      let response: Response
+      try {
+        response = await fetchImpl(`${base}/${method}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+          ...(controller === undefined ? {} : { signal: controller.signal }),
+        })
+      } catch (error) {
+        // A network-level rejection is the "plugin not installed on this host /
+        // host restarted" case, which the panel renders as an empty state rather
+        // than an error page.
+        throw new ApiError('network', 'network', 0, error instanceof Error ? error.message : String(error))
+      }
+      let body: unknown = null
+      try {
+        body = await response.json()
+      } catch (error) {
+        // The watchdog fired, or the connection died mid-body: the same "host is
+        // gone" case as a refused fetch, and it must not be mistaken for a
+        // non-JSON body (which parses as an ordinary envelope failure below).
+        if (controller?.signal.aborted === true) {
+          throw new ApiError('network', 'network', 0, error instanceof Error ? error.message : String(error))
+        }
+        body = null
+      }
+      return parseEnvelope(response.status, body)
     } finally {
       if (timer !== undefined) clearTimeout(timer)
     }
-    let body: unknown = null
-    try {
-      body = await response.json()
-    } catch {
-      body = null
-    }
-    return parseEnvelope(response.status, body)
   }
 
   return {

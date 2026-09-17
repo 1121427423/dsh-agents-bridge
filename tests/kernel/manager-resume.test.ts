@@ -78,12 +78,14 @@ describe('send() on a session that is still running', () => {
     const started = await manager.run({ agent: 'claude', prompt: 'going', timeoutMs: 0 })
     await sleep(150)
     void manager.cancel(started.sessionId, 'stopping')
-    // Either it is still running, or it is already terminal and the later
-    // assertions cover the other branch; neither may be silence.
+    // The precondition is ASSERTED, not assumed. The old `if (status ===
+    // 'running')` skipped its only assertion whenever spawn or the fixture
+    // failed, so the test went green having checked nothing (MI-15). `cancel()`
+    // is fire-and-forget and its terminal transition needs an await, so the
+    // status read here is deterministic — no branch is needed.
     const status = manager.status(started.sessionId)?.status
-    if (status === 'running') {
-      await expect(manager.send(started.sessionId, 'ping')).rejects.toThrow(/still running/)
-    }
+    expect(status).toBe('running')
+    await expect(manager.send(started.sessionId, 'ping')).rejects.toThrow(/still running/)
   })
 })
 

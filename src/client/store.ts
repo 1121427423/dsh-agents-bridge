@@ -157,6 +157,17 @@ export function createSupervisorStore(
   let transcriptLoading = false
   let transcriptError: string | undefined
   /**
+   * Whether the OPEN transcript's session has ended, as reported by the output
+   * read itself.
+   *
+   * The `sessions` row cannot answer this while a transcript is open: the list
+   * poller is paused (`schedule()` pauses on `selectedId !== undefined`), so the
+   * row is frozen at whatever it said when the transcript opened. Without this
+   * flag a session that finishes while the human is watching keeps the 1.2s
+   * transcript poll running forever on a transcript that cannot change.
+   */
+  let transcriptTerminal = false
+  /**
    * The transcript's own timer, separate from the list poller.
    *
    * Declared with the rest of the state (NOT next to its helpers below the
@@ -273,6 +284,7 @@ export function createSupervisorStore(
       if (selectedId !== sessionId) return
       transcript = mergeMessages(transcript, read.messages)
       transcriptNextIndex = read.nextIndex
+      transcriptTerminal = read.terminal
       transcriptError = undefined
     } catch (caught) {
       if (selectedId !== sessionId) return
@@ -356,6 +368,7 @@ export function createSupervisorStore(
       selectedId = sessionId
       transcript = []
       transcriptNextIndex = 0
+      transcriptTerminal = false
       transcriptError = undefined
       seen = new Set([...seen, sessionId])
       counts = countAttention(sessions, seen)
@@ -372,6 +385,7 @@ export function createSupervisorStore(
       selectedId = undefined
       transcript = []
       transcriptNextIndex = 0
+      transcriptTerminal = false
       transcriptError = undefined
       stopTranscriptTimer()
       emit()
@@ -423,6 +437,10 @@ export function createSupervisorStore(
   function startTranscriptTimer(): void {
     stopTranscriptTimer()
     if (selectedId === undefined || !started) return
+    // The list row is frozen while a transcript is open, so it is only half the
+    // answer: `transcriptTerminal` carries what the OUTPUT read reported, which
+    // is the only signal that stays current with the poller paused (MI-10).
+    if (transcriptTerminal) return
     const session = sessions.find(entry => entry.sessionId === selectedId)
     if (session === undefined || session.terminal) return
     transcriptTimer = clock.setTimeout(() => {

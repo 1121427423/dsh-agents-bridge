@@ -279,6 +279,10 @@ probe 时被执行」，理想情况给**家目录根一个显式 opt-in**；（
 | MI-14 | DOWNGRADED | `docs/plan.md:790` | 跳测机制实为**三种**（`acp-e2e.test.ts:70` 的 `describe.runIf`；`desktop.test.ts:138` 与 `scan.test.ts:823` 的 `describe.skipIf` 宿主探测，各 2 例），指标表只写了第一种。"静默消失"被推翻：vitest 会把 skipIf 记为 skipped，干净机器上是 +4 skipped，不是 4 个幽灵通过 |
 | MI-15 | DOWNGRADED | `tests/kernel/manager-resume.test.ts:84-86` | `if (status === 'running')` 能静默跳过唯一断言，但**不是**"快宿主"导致（`void manager.cancel()` 的终态要等 await，83 行读取发生在 cancel 的同步前缀内）。真正的洞是**未断言的前置条件**：spawn/fixture 失败会让该测试零断言地变绿 |
 
+**B5b 状态（2026-09-18）**：本节 **MI-10 · MI-11 · MI-12 · MI-13 · MI-14 · MI-15 六条全部 fixed**——
+逐条先红后绿 + 负控留证（MI-15 另证「旧 `if` + 坏 fixture → 真空绿」），落地记录见 **§N**。
+以下「裁定要点」保留裁定时的原始记述，FIX/TEST 判据见 §F 与 §N。
+
 **监理独立核对（IM-14）**：`tsc --noEmit --skipLibCheck tests/integration/client-bundle.test.ts` 报 8 条，
 其中 **4 条 TS2339 为真**（273/289×2/290）；另 4 条（TS1259 `esModuleInterop`、TS1343 `import.meta`、
 TS2322、TS2349）是**脱离工程 tsconfig 独立编译的假象**，不计入缺陷。修 IM-14 时必须用
@@ -484,14 +488,16 @@ TS2322、TS2349）是**脱离工程 tsconfig 独立编译的假象**，不计入
 | B3b | `3f149c0` | IM-15 · MI-16 · MI-17 · MI-19 · MI-20 · MI-21 · IM-14 | 857/1 · **新装的 `tsc -p tsconfig.tests.json` 0 错** · **MI-16/MI-17 oracle 由 `true` 翻 `false`** |
 | B4 | `7c3ea81` | IM-1 · IM-10 · IM-11 · IM-12 · IM-13 · MI-9 | 同轮门禁 · 读码确认信任契约（**候选而非引擎** + 操作员 opt-in + provenance 只作自洽检查） |
 | B5a | `b1edc88` | IM-16 · IM-17 · IM-18 · IM-19 · MI-1 · MI-22 | 869/1 · tsc(src+tests) 0 · 双构建 · verify 11/11 · **Origin oracle 六行全 `ok`** |
+| B5b | 本分支未提交 | MI-10 · MI-11 · MI-12 · MI-13 · MI-14 · MI-15 | 874/1 · tsc(src+tests) 0 · 双构建（367.7kb / 74.7kb）· verify 11/11 · 六条先红后绿 + 负控，见 §N |
 
-**终态门禁（最终树，监理亲跑）**：`vitest` **869 passed / 1 skipped（870）** · `tsc --noEmit` **0** ·
+**终态门禁（B5a 末态，监理亲跑；B5b 落地后的新数字见 §N 与上表 B5b 行）**：`vitest` **869 passed / 1 skipped（870）** · `tsc --noEmit` **0** ·
 `tsc --noEmit -p tsconfig.tests.json` **0** · 双构建 OK（`lib/index.js` 367.6kb / `lib/client.js` 73.8kb）·
 `verify_plugin.py` **11/11 PASS**。
 
-**唯一未修（6 条）**：**MI-10 · MI-11 · MI-12 · MI-13 · MI-14 · MI-15** —— client 组，全部是复核后的
+**唯一未修（6 条）→ 已于 B5b 全部 fixed（见 §N）**：**MI-10 · MI-11 · MI-12 · MI-13 · MI-14 · MI-15** —— client 组 + docs 指标表，全部是复核后的
 **降级项**（真实但被高估），无 IM 级遗漏。每条的位置、判定理由、修复方向与测试配方都在 **§G-2** 的
-对应行（FIX/TEST）里，可直接派一批收掉，无需重读本文件以外的东西。
+对应行（FIX/TEST）里。以下为裁定时的原始记述：六条已于 2026-09-18 的 B5b 逐条先红后绿完成，
+末态门禁 **874 passed / 1 skipped（875）**、`tsc` 双门禁 0、双构建 OK、`verify_plugin.py` 11/11。
 
 **记账缺口（如实记）**：B3b 未按其 brief 追加 `## K` 记录、也未翻 §A 状态；本节即权威补齐。
 B5a 按约定只追加 §L、未改旧行（它明确注明"请监理复核后按 §L 翻状态"）。**因此看 §A/§E 的状态列会读到
@@ -502,3 +508,86 @@ B5a 按约定只追加 §L、未改旧行（它明确注明"请监理复核后�
 （`--mcp-config` 由 runner 追加，不在 args builder 里）；④ IM-9 oracle 参数过期（修复新增
 `preserveBlankLines`，旧脚本没传）。执行方 2 次（B3 的 MI-18 对照、B5a 报告内自述）。
 **共同教训：修复若改的是接缝而非症状，旧 oracle 会失效 —— 此时先怀疑判据，而不是宣判修复失败。**
+
+## N. B5b 落地记录（client 组 + docs 指标表，2026-09-18）
+
+收尾批：§G-2 的 **MI-10 · MI-11 · MI-12 · MI-13 · MI-14 · MI-15** 六条（client 五条 + 指标表一条，
+全部是复核后的降级项）。树未提交（按要求保持 dirty），**零 `git stash` / `checkout` / `reset`**。
+每条均按其 brief 的 FIX/TEST 配方**先红后绿**，红与负控均为实测。命令统一为
+`node node_modules/vitest/vitest.mjs run <file> -t "<name>"`。
+
+**MI-10 transcript 终态轮询**（`src/client/store.ts:169,287,371,388,441-443`）
+- 修法：新增 `transcriptTerminal`，在 `loadTranscript` 成功分支捕获 `read.terminal`，在
+  `openSession`/`closeSession` 复位，并加入 `startTranscriptTimer` 的守卫。列表行在 transcript
+  打开期间被 `schedule()` 冻结，只有 output 读到的终态是当前信号。
+- 新测试：`tests/client/store.test.ts:440`（fakeApi 的 output 返回 `terminal: true`，openSession('a') 后
+  断言 `calls.output === 1` 且 `clock.pendingCount() === 0`）。
+- 红（=负控，修复前只查 sessions 行）：`expected 1 to be +0`（store.test.ts:457）。
+- 绿：`tests/client/store.test.ts` 22 passed。
+
+**MI-11 indicator 点击目标**（`src/client/indicator.ts:53-62`）
+- 修法：onClick 优先 `sessions.find(s => s.status === 'failed' && !seen.has(s.sessionId))`，取不到再回退
+  到首个 failed。
+- 新测试：`tests/client/components.test.ts:352`（较新的已见失败 `startedAt=200` 排在较旧未见失败
+  `startedAt=100` 之前；点击后断言 `selectedId === 'older-unseen'`、`unseenFailures === 0`）。
+- 红（=负控，旧 finder）：`expected 'newer-seen' to be 'older-unseen'`（components.test.ts:374）。
+- 绿：`tests/client/components.test.ts` 26 passed。
+
+**MI-12 20s 看门狗覆盖 body**（`src/client/api.ts:280-317`）
+- 修法：把 fetch **与** `response.json()` 收进同一个 try/finally，timer 在 finally 里清；body 读取
+  失败且 `controller.signal.aborted` 时报 `ApiError('network')`，不再被当成「非 JSON 体」。
+- 新测试：`tests/client/api.test.ts:213`（fake timers；fetch 返回 `{status:200, json: 永不 settle 且
+  监听 abort}`；推进 20s 后断言 network ApiError）。
+- 红（=负控，旧的提前 clear 点）：`expected 'pending' to be an instance of ApiError`（api.test.ts:240，
+  即永不 settle；测试用 race 哨兵避免超时式红）。
+- 绿：`tests/client/api.test.ts` 19 passed。
+
+**MI-13 损坏 store 回显**（`src/kernel/store.ts:169-180`）
+- 修法：`JSON.parse` 的 catch 不再记录 `err.message`（V8 在首个 token 非法时逐字回显文件开头），
+  改为 `error: 'session store is not valid JSON', bytes: raw.length`。
+- 新测试：`tests/kernel/store-robustness.test.ts:166`（文件内容 `TOP-SECRET-HEAD this is not json`；
+  断言日志既不含 `Unexpected token` 也不含 V8 会回显的 `raw.slice(0,10)`，且仍含 `not valid JSON`
+  与字节数）。
+- 红（=负控，`err.message` 版本）：日志实含
+  `"error":"Unexpected token 'T', \"TOP-SECRET\"... is not valid JSON"`。
+- 绿：`tests/kernel/store-robustness.test.ts` 24 passed。
+
+**MI-14 docs 指标表跳测记账**（`docs/plan.md:790` + 新 `tests/meta/docs-metrics.test.ts`）
+- 修法：`| 测试 |` 行的跳测描述改写为「三种机制且是宿主条件」：① `acp-e2e.test.ts` 的
+  `DSH_ACP_E2E=1`（`describe.runIf`）；② `tracks/desktop.test.ts` 与 ③ `tracks/scan.test.ts` 的
+  `describe.skipIf` 各 2 例，点名 `/Applications/WorkBuddy.app` 与 `/Applications/WorkBuddy AI.app`
+  两个宿主探测；并写明本机两套 bundle 都在故只跳 1 例、干净机器上是 +4 skipped。
+- 新测试：`tests/meta/docs-metrics.test.ts`（读 `docs/plan.md` 的 `| 测试 |` 行，断言其同时点名
+  三种机制的两个文件与两个 bundle 路径）。
+- 红（=负控，改回旧句）：`expected '| 测试 | **779 个通过 + 1 skipped…' to contain 'desktop.test.ts'`。
+- 绿：`tests/meta/docs-metrics.test.ts` 1 passed。
+
+**MI-15 manager-resume 真空断言**（`tests/kernel/manager-resume.test.ts:76-89`）
+- 修法：删掉 `if (status === 'running')`，改为 `expect(status).toBe('running')` +
+  **无条件** `await expect(manager.send(...)).rejects.toThrow(/still running/)`。
+- 负控 A（旧 `if` + 指向不存在脚本的 fixture，会话从未 `running`）：**真空绿**
+  （`1 passed | 6 skipped`，零断言）。
+- 红（修好的断言 + 同一个坏 fixture）：`AssertionError: expected 'failed' to be 'running'`
+  （manager-resume.test.ts:87）。
+- 绿（恢复 `SLOW_CLI` fixture）：7 passed；单测连跑 5 次全绿（不依赖 cancel 的 await）。
+- 无残留：`grep -rn "missing-cli-does-not-exist" tests/ src/` → 空。
+
+**逐条门禁（每完成一条即全跑，均为真实数字）**
+
+| 完成项 | vitest | `tsc --noEmit` | `tsc -p tsconfig.tests.json` | build.mjs | build-client.mjs | verify_plugin.py |
+|---|---|---|---|---|---|---|
+| MI-10 | 870 passed / 1 skipped（871） | 0 | 0 | 367.6kb | 73.9kb | 11/11 |
+| MI-11 | 871 / 1（872） | 0 | 0 | 367.6kb | 74.4kb | 11/11 |
+| MI-12 | 872 / 1（873） | 0 | 0 | 367.6kb | 74.7kb | 11/11 |
+| MI-13 | 873 / 1（874） | 0 | 0 | 367.7kb | 74.7kb | 11/11 |
+| MI-14 | 874 / 1（875） | 0 | 0 | 367.7kb | 74.7kb | 11/11 |
+| MI-15（终态） | 874 / 1（875） | 0 | 0 | 367.7kb | 74.7kb | 11/11 |
+
+文件与行区间：`src/client/store.ts:159-169,285-289,368-374,385-391,437-448` ·
+`src/client/indicator.ts:50-64` · `src/client/api.ts:280-317` · `src/kernel/store.ts:169-180` ·
+`docs/plan.md:790` · `tests/client/store.test.ts:105-109,440-459` ·
+`tests/client/components.test.ts:352-377` · `tests/client/api.test.ts:13,213-243` ·
+`tests/kernel/store-robustness.test.ts:166-186` · `tests/kernel/manager-resume.test.ts:76-89` ·
+`tests/meta/docs-metrics.test.ts`（新增）。
+
+至此 §A / §E-2 列出的 **41 条主张全部固定**；§M 的「唯一未修（6 条）」已清零。

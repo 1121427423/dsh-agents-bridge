@@ -105,7 +105,7 @@ function fakeApi(script: {
   readonly sessions?: () => readonly ClientSession[]
   readonly failStatus?: boolean
   readonly failOutput?: boolean
-  readonly output?: (sessionId: string, sinceIndex: number) => { readonly nextIndex: number; readonly messages: readonly { index: number; type: string; text?: string; at: number }[] }
+  readonly output?: (sessionId: string, sinceIndex: number) => { readonly nextIndex: number; readonly messages: readonly { index: number; type: string; text?: string; at: number }[]; readonly terminal?: boolean }
 } = {}) {
   const calls = { status: 0, output: 0, cancel: 0, probe: 0 }
   const api: BridgeApi = {
@@ -434,6 +434,27 @@ describe('supervisor store — transcript', () => {
     expect(store.getSnapshot().counts.unseenFailures).toBe(1)
     await store.openSession('bad')
     expect(store.getSnapshot().counts.unseenFailures).toBe(0)
+    store.stop()
+  })
+
+  it('STOPS the transcript poll once the session reports terminal (MI-10)', async () => {
+    // While a transcript is open the list poller is paused (`schedule()` sees
+    // `selectedId !== undefined`), so the in-memory row keeps saying `running`
+    // even after the session has finished. The output read is the only source
+    // that knows, and `loadTranscript` used to drop `read.terminal`, leaving a
+    // 1.2s poll running forever on a transcript that can no longer change.
+    const clock = fakeClock()
+    const { api, calls } = fakeApi({
+      sessions: () => [session('a', 'running')],
+      output: () => ({ nextIndex: 0, messages: [], terminal: true }),
+    })
+    const store = makeStore(api, clock)
+    store.start()
+    await settle()
+    await store.openSession('a')
+
+    expect(calls.output).toBe(1)
+    expect(clock.pendingCount()).toBe(0)
     store.stop()
   })
 

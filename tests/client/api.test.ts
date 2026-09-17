@@ -10,7 +10,7 @@
  * @module tests/client/api
  */
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { API_BASE, ApiError, createBridgeApi, normalizeProbe, normalizeSession, parseEnvelope } from '../../src/client/api.ts'
 import { API_PREFIX } from '../../src/host/api.ts'
@@ -208,6 +208,40 @@ describe('createBridgeApi', () => {
       },
     })) as unknown as typeof fetch, API_BASE)
     await expect(api.status()).rejects.toBeInstanceOf(ApiError)
+  })
+
+  it('aborts a STALLED response body, not just a stalled header (MI-12)', async () => {
+    // The 20s watchdog used to be cleared as soon as the headers arrived, so a
+    // host that answered and then stalled the body left the panel loading
+    // forever with no error. The watchdog must cover the whole exchange.
+    vi.useFakeTimers()
+    try {
+      const api = createBridgeApi((async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const signal = init?.signal
+        return {
+          ok: true,
+          status: 200,
+          // A real fetch's body stream rejects when the request is aborted;
+          // this mirrors the stalled body the watchdog exists to catch.
+          json: () => new Promise((_resolve, reject) => {
+            signal?.addEventListener('abort', () => reject(new Error('aborted mid-body')))
+          }),
+        } as unknown as Response
+      }) as typeof fetch, API_BASE)
+
+      const outcome = api.status().then(
+        () => 'resolved' as const,
+        (error: unknown) => error,
+      )
+      await vi.advanceTimersByTimeAsync(20_000)
+      // `race` against a sentinel so an unfixed build fails on the assertion
+      // rather than on a test timeout.
+      const settled = await Promise.race([outcome, Promise.resolve('pending' as const)])
+      expect(settled).toBeInstanceOf(ApiError)
+      expect((settled as ApiError).kind).toBe('network')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('keeps the route prefix in sync with the host half', () => {

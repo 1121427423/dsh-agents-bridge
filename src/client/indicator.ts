@@ -50,7 +50,16 @@ export function Indicator({ store, translator, sessionId }: IndicatorProps): Rea
         className: 'abg-indicator',
         'data-status': 'failed',
         title: translator.t('indicatorFailedTitle', { n: unseenFailures }),
-        onClick: () => void store.openSession(snapshot.sessions.find(session => session.status === 'failed')?.sessionId ?? ''),
+        // Prefer the first failure the human has NOT opened: that is the one the
+        // badge is counting, and opening it is what clears the badge. Rows sort
+        // newest-terminal-first, so a failure that was already seen can lead the
+        // list — falling back to it would open the wrong transcript and leave
+        // `unseenFailures` stuck (MI-11).
+        onClick: () => void store.openSession(
+          snapshot.sessions.find(session => session.status === 'failed' && !snapshot.seen.has(session.sessionId))?.sessionId
+          ?? snapshot.sessions.find(session => session.status === 'failed')?.sessionId
+          ?? '',
+        ),
       },
       createElement('span', { className: 'abg-indicator__dot' }),
       createElement('span', null, translator.t('indicatorFailed', { n: unseenFailures })),

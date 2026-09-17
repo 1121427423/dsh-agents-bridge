@@ -163,6 +163,26 @@ describe('corrupt and half-written files degrade to empty', () => {
     })
   }
 
+  it('does not echo a damaged file back through the warning (MI-13)', () => {
+    // V8 quotes the START of the input when the FIRST token is invalid, so
+    // logging `err.message` writes the head of a damaged sessions.json into the
+    // log. The warning must say what happened, not reproduce the file.
+    const raw = 'TOP-SECRET-HEAD this is not json'
+    fs.writeFileSync(path.join(dir, 'sessions.json'), raw)
+    const log = logger()
+    const store = createSessionStore({ dir, logger: log })
+
+    store.reload()
+
+    const payload = log.warn.mock.calls.map((call) => JSON.stringify(call)).join('\n')
+    expect(payload).not.toContain('Unexpected token')
+    // `raw.slice(0, 10)` is exactly what V8 would have echoed.
+    expect(payload).not.toContain(raw.slice(0, 10))
+    // Still diagnostic: what went wrong and how big the file was.
+    expect(payload).toContain('not valid JSON')
+    expect(payload).toContain(String(raw.length))
+  })
+
   it('still accepts new writes after degrading from a corrupt file', () => {
     fs.writeFileSync(path.join(dir, 'sessions.json'), '{corrupt')
     const store = createSessionStore({ dir })

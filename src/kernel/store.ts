@@ -169,10 +169,14 @@ export function createSessionStore(options: SessionStoreOptions = {}): SessionSt
     let parsed: unknown
     try {
       parsed = JSON.parse(raw)
-    } catch (err) {
+    } catch {
+      // NOT `err.message`: when the FIRST token is invalid V8 quotes the start
+      // of the input verbatim, so a damaged `sessions.json` would write its own
+      // head bytes into the log. Report the fact and the size, not the content.
       logger?.warn('session store is corrupt; starting empty', {
         filePath,
-        error: err instanceof Error ? err.message : String(err),
+        error: 'session store is not valid JSON',
+        bytes: raw.length,
       })
       return []
     }

@@ -349,6 +349,33 @@ describe('Indicator — visible only when there is something to say', () => {
     store.stop()
   })
 
+  it('opens the first UNSEEN failure, not whichever failed row sorts first (MI-11)', async () => {
+    // Terminal rows sort newest-first, so a failure the human has ALREADY
+    // opened can sit ahead of one they have not. Clicking the badge must open
+    // the unseen row (and so clear it), not the first `failed` row in the list.
+    const newerSeen = { ...session('newer-seen', 'failed'), startedAt: 200 }
+    const olderUnseen = { ...session('older-unseen', 'failed'), startedAt: 100 }
+    const store = makeStore({
+      sessions: () => [newerSeen, olderUnseen],
+      output: (_id, since) => ({ nextIndex: since, messages: [] }),
+    })
+    store.start()
+    await store.refresh()
+    await store.openSession('newer-seen')
+    store.closeSession()
+
+    expect(store.getSnapshot().sessions.map(row => row.sessionId)).toEqual(['newer-seen', 'older-unseen'])
+    expect(store.getSnapshot().counts.unseenFailures).toBe(1)
+
+    const element = Indicator({ store, translator: createTranslator('en') }) as StubElement
+    expect(element.props['data-status']).toBe('failed')
+    ;(element.props.onClick as () => void)()
+
+    expect(store.getSnapshot().selectedId).toBe('older-unseen')
+    expect(store.getSnapshot().counts.unseenFailures).toBe(0)
+    store.stop()
+  })
+
   it('shows a quiet idle chip once loaded, and drops it when nothing is drivable', async () => {
     const store = makeStore({ sessions: () => [session('a', 'completed')] })
     await store.refresh()
