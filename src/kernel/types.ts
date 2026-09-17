@@ -473,8 +473,21 @@ export type BackendFactory = (deps: DriverDeps) => AgentBackend
 
 /** The facade the tool surface talks to (implemented by the kernel). */
 export interface AgentManager {
-  /** Probe every registered identity; `refresh` bypasses the probe cache. */
-  probe(opts?: { readonly refresh?: boolean }): Promise<readonly ProbeResult[]>
+  /**
+   * Probe every registered identity.
+   *
+   * `refresh` bypasses the probe cache, re-resolving executables and re-running
+   * `--version`. `rescan` (ABI, additive/optional) is the OTHER verb: it ALSO
+   * discards the memoised app-bundle scan, and is the only way a probe can
+   * notice an app installed while this host has been running (RR-MI-1). It
+   * implies `refresh`, and it shares the registry's single-flight with every
+   * other pass, so concurrent rescans walk the roots once.
+   *
+   * The two are separate because their costs are: the bundle walk is a
+   * synchronous filesystem sweep, so folding it into every `refresh` is what
+   * MI-8 forbade.
+   */
+  probe(opts?: { readonly refresh?: boolean; readonly rescan?: boolean }): Promise<readonly ProbeResult[]>
   /** Start a run and return immediately with a live snapshot. */
   run(opts: AgentRunOptions): Promise<SessionSnapshot>
   status(sessionId: string): SessionSnapshot | undefined

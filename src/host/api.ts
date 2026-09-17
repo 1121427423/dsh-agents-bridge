@@ -535,13 +535,27 @@ export function createApiHandlers(deps: HostApiDeps): Record<string, (payload: R
      * asks for this route only on mount / on an explicit refresh; without
      * `refresh` a recent result is served from the host's own cache so a page
      * reload cannot re-run discovery.
+     *
+     * `rescan: true` is the second, heavier verb: it re-walks the app-bundle
+     * roots, which is the only way an app installed while this host has been
+     * running can ever appear (RR-MI-1). Two rules follow, and both are load
+     * bearing:
+     *
+     *  - it must IMPLY `refresh` — the same pass re-resolves versions, and an
+     *    operator who just installed an app wants its version too;
+     *  - it must BYPASS this route's own cache. Serving a rescan from a memo
+     *    taken a second earlier is precisely the complaint: "I installed it and
+     *    the panel still cannot see it".
      */
     async probe(payload): Promise<ProbePayload> {
       const refresh = payload['refresh'] === true
-      if (!refresh && probeCache !== undefined && now() - probeCache.value.at < probeCacheMs) {
+      const rescan = payload['rescan'] === true
+      if (!refresh && !rescan && probeCache !== undefined && now() - probeCache.value.at < probeCacheMs) {
         return { ...probeCache.value, cached: true }
       }
-      const results = await manager.probe(refresh ? { refresh: true } : {})
+      const results = await manager.probe(
+        rescan ? { refresh: true, rescan: true } : refresh ? { refresh: true } : {},
+      )
       const value: ProbePayload = {
         available: results.some(result => result.available),
         results,

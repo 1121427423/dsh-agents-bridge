@@ -111,6 +111,47 @@ function asStatus(value: unknown): ClientRunStatus {
   return RUN_STATUSES.includes(value as ClientRunStatus) ? (value as ClientRunStatus) : 'failed'
 }
 
+/** A finite, non-negative integer, or `undefined`. */
+function asCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : undefined
+}
+
+/**
+ * Normalize the terminal result the `status` route forwards.
+ *
+ * The host serializes the kernel's whole `AgentResult` here, so this is where
+ * the exit code a human needs to read a finished run finally becomes a typed,
+ * validated field. It is WHITELISTED rather than cast, for the same reason
+ * every other row field is: this object is handed to the renderer, and
+ * `sessionPreview` calls `.replace` on `error`. An unchecked cast meant a host
+ * (or a proxy) sending `error: 42` threw inside React's render and blanked the
+ * panel — the one outcome this half exists to prevent.
+ *
+ * `usage` is kept only when BOTH token counts are real numbers: half a usage
+ * figure renders as `↑0 ↓7`, which is a fabrication, whereas omitting it says
+ * the honest "usage not reported".
+ */
+export function normalizeResult(raw: unknown): ClientSession['result'] {
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const value = raw as Record<string, unknown>
+  const usage = typeof value['usage'] === 'object' && value['usage'] !== null
+    ? (value['usage'] as Record<string, unknown>)
+    : undefined
+  const inputTokens = asCount(usage?.['inputTokens'])
+  const outputTokens = asCount(usage?.['outputTokens'])
+  const error = typeof value['error'] === 'string' && value['error'] !== '' ? value['error'] : undefined
+  // `null` is the ABI's explicit "no exit status", so it collapses to absent
+  // rather than to `0` (which would claim success).
+  const exitCode = asCount(value['exitCode'])
+  return {
+    status: asStatus(value['status']),
+    text: typeof value['text'] === 'string' ? value['text'] : '',
+    ...(error === undefined ? {} : { error }),
+    ...(exitCode === undefined ? {} : { exitCode }),
+    ...(inputTokens === undefined || outputTokens === undefined ? {} : { usage: { inputTokens, outputTokens } }),
+  }
+}
+
 /**
  * Normalize one session row.
  *
@@ -126,9 +167,7 @@ export function normalizeSession(raw: unknown): ClientSession | undefined {
   if (typeof value.sessionId !== 'string' || value.sessionId === '') return undefined
   const status = asStatus(value.status)
   const lastMessage = normalizeMessage(value.lastMessage)
-  const result = typeof value.result === 'object' && value.result !== null
-    ? (value.result as ClientSession['result'])
-    : undefined
+  const result = normalizeResult(value.result)
   return {
     sessionId: value.sessionId,
     agentId: typeof value.agentId === 'string' ? value.agentId : 'unknown',
@@ -251,7 +290,16 @@ export interface BridgeApi {
   status(): Promise<{ readonly sessions: readonly ClientSession[]; readonly concurrency: { readonly running: number; readonly limit: number }; readonly now: number }>
   output(sessionId: string, sinceIndex: number, limit?: number): Promise<ClientOutputPayload>
   cancel(sessionId: string, reason?: string): Promise<{ readonly sessionId: string; readonly cancelled: boolean; readonly status: ClientRunStatus; readonly note: string }>
-  probe(refresh?: boolean): Promise<{ readonly available: boolean; readonly results: readonly ClientProbeResult[]; readonly at: number; readonly cached: boolean }>
+  /**
+   * Probe the engines.
+   *
+   * `refresh` re-resolves versions (the cheap-but-not-free half). `rescan` is
+   * ADDITIVE and separately opt-in: it also re-walks the app-bundle roots, so a
+   * bundle installed since the last scan becomes visible (RR-MI-1b). It implies
+   * `refresh`. Kept as a second positional flag rather than an options object so
+   * every existing `probe(true)` / `probe()` caller keeps working unchanged.
+   */
+  probe(refresh?: boolean, rescan?: boolean): Promise<{ readonly available: boolean; readonly results: readonly ClientProbeResult[]; readonly at: number; readonly cached: boolean }>
   /** The plugin's own settings namespace, as the settings card needs it. */
   settings(): Promise<ClientSettingsView>
   /** Persist a patch into the settings user layer (the only write path). */
@@ -370,8 +418,14 @@ export function createBridgeApi(
       }
     },
 
-    async probe(refresh) {
-      const value = (await call('probe', refresh === true ? { refresh: true } : {})) as Record<string, unknown>
+    async probe(refresh, rescan) {
+      // A re-scan implies a version refresh: the host re-resolves anyway, and
+      // sending the implication explicitly keeps the request self-describing
+      // rather than depending on the reader knowing the host's rule.
+      const value = (await call('probe', {
+        ...(refresh === true || rescan === true ? { refresh: true } : {}),
+        ...(rescan === true ? { rescan: true } : {}),
+      })) as Record<string, unknown>
       return {
         available: value['available'] === true,
         results: Array.isArray(value['results'])

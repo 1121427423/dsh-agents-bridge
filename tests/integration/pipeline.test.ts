@@ -172,6 +172,24 @@ describe('agents pipeline (kernel + drivers + adapter)', () => {
     expect(claude?.family).toBe('claude')
   })
 
+  it('forwards an explicit `rescan` through the facade (RR-MI-1b)', async () => {
+    // The chain that lets an operator SHOW a newly installed app to the panel
+    // is: panel → client api → host route → `AgentManager.probe` → registry.
+    // Every link must carry the verb. This is the facade link, and the oracle
+    // is array IDENTITY rather than a result diff: the registry serves a memo
+    // for its TTL, so a plain re-probe hands back the very same array, while a
+    // pass that actually re-ran (which `rescan` forces) cannot.
+    //
+    // Without this the facade could accept `rescan` and quietly drop it, and
+    // the panel's "rescan installs" button would do exactly what Refresh does.
+    const manager = makeManager(FAKE_CLI)
+    const cold = await manager.probe()
+    // The negative control: the memo IS in play, so the next assertion is not
+    // vacuous (a registry that re-ran every time would pass it for free).
+    expect(await manager.probe()).toBe(cold)
+    expect(await manager.probe({ rescan: true })).not.toBe(cold)
+  })
+
   it('probes without reading the host: scan: false walks nothing', async () => {
     // The hermeticity PROOF for this suite, and it is DELIBERATELY written
     // against the filesystem syscall rather than against the result count.

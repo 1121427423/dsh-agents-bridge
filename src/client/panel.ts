@@ -86,10 +86,11 @@ function engineRow(result: ClientProbeResult, translator: Translator): ReactElem
 }
 
 /** The engine availability strip. */
-function EngineStrip({ snapshot, translator, onRefresh }: {
+function EngineStrip({ snapshot, translator, onRefresh, onRescan }: {
   readonly snapshot: SupervisorSnapshot
   readonly translator: Translator
   readonly onRefresh: () => void
+  readonly onRescan: () => void
 }): ReactElement {
   const summary = useMemo(() => summarizeEngines(snapshot.engines.results), [snapshot.engines.results])
   const ok = summary.total > 0 && summary.available > 0
@@ -108,9 +109,24 @@ function EngineStrip({ snapshot, translator, onRefresh }: {
       createElement('span', null, `${translator.t('enginesTitle')} · ${headline}`),
       summary.withModels > 0 ? createElement('span', null, ` · ${translator.t('enginesModels', { n: summary.withModels })}`) : null,
       createElement('span', { className: `${ROOT_CLASS}__spacer` }),
-      // Re-probing is the EXPENSIVE path (`refresh: true` re-resolves
-      // executables), so it is an explicit human action, never automatic.
+      // TWO verbs, deliberately not one button. Re-probing versions is the
+      // cheap half (and the expensive-looking path: `refresh` re-resolves
+      // executables), while RE-WALKING the bundle roots is a synchronous
+      // filesystem sweep whose only purpose is to notice an app installed since
+      // the host started. Folding them together would either tax every refresh
+      // with the walk (MI-8) or leave the walk undiscoverable (RR-MI-1b), so
+      // the walk gets its own labelled button and its reason in the tooltip.
       createElement('button', { type: 'button', className: `${ROOT_CLASS}__btn`, onClick: onRefresh }, translator.t('refresh')),
+      createElement(
+        'button',
+        {
+          type: 'button',
+          className: `${ROOT_CLASS}__btn`,
+          title: translator.t('rescanInstallsTitle'),
+          onClick: onRescan,
+        },
+        translator.t('rescanInstalls'),
+      ),
     ),
     snapshot.engines.error === undefined
       ? null
@@ -139,6 +155,11 @@ function SessionRow({
 }): ReactElement {
   const elapsed = formatDuration(sessionElapsed(session, now))
   const preview = sessionPreview(session)
+  // The exit status is the outcome of the run, so it sits next to the status
+  // badge rather than in the metadata foot. A running row has no result yet,
+  // and `null` (the ABI's "no exit status": a cancel, a restored row) renders
+  // nothing at all — never a fabricated 0.
+  const exitCode = session.status === 'running' ? undefined : session.result?.exitCode
   return createElement(
     'div',
     { className: `${ROOT_CLASS}__row`, 'data-status': session.status },
@@ -147,13 +168,22 @@ function SessionRow({
       { className: `${ROOT_CLASS}__rowHead` },
       createElement('span', { className: `${ROOT_CLASS}__agent`, title: session.sessionId }, session.agentId),
       createElement('span', { className: `${ROOT_CLASS}__badge`, 'data-status': session.status }, statusLabel(session.status, translator.current())),
+      exitCode === undefined
+        ? null
+        : createElement(
+            'span',
+            { className: `${ROOT_CLASS}__exit`, 'data-exit': exitCode === 0 ? 'ok' : 'error' },
+            translator.t('exitCode', { code: exitCode }),
+          ),
       createElement('span', { className: `${ROOT_CLASS}__spacer` }),
       createElement('span', { className: `${ROOT_CLASS}__mono`, title: `${translator.t('started')} ${new Date(session.startedAt).toLocaleString()}` }, elapsed),
     ),
     createElement(
       'div',
       { className: `${ROOT_CLASS}__preview${preview === '' ? ` ${ROOT_CLASS}__preview--empty` : ''}` },
-      preview === '' ? (session.status === 'running' ? translator.t('waitingForAgent') : translator.t('noEventsYet')) : preview,
+      preview === ''
+        ? (session.status === 'running' ? translator.t('waitingForAgent') : translator.t('noOutputKept'))
+        : preview,
     ),
     createElement(
       'div',
@@ -215,8 +245,15 @@ function TranscriptView({
       ? createElement(
           'div',
           { className: `${ROOT_CLASS}__state` },
-          createElement('div', { className: `${ROOT_CLASS}__stateTitle` }, translator.t('noEventsYet')),
-          createElement('div', null, translator.t('waitingForAgent')),
+          // Same rule as the list row: a FINISHED session with nothing retained
+          // (a restarted host, a spilled transcript) must not be described as
+          // an agent that is still working.
+          createElement(
+            'div',
+            { className: `${ROOT_CLASS}__stateTitle` },
+            session?.terminal === true ? translator.t('noOutputKept') : translator.t('noEventsYet'),
+          ),
+          session?.terminal === true ? null : createElement('div', null, translator.t('waitingForAgent')),
         )
       : createElement(
           'div',
@@ -354,6 +391,7 @@ export function SupervisorPanel({ store, translator }: PanelProps): ReactElement
       snapshot,
       translator,
       onRefresh: () => void store.refreshEngines(),
+      onRescan: () => void store.rescanEngines(),
     }),
     snapshot.error !== undefined && snapshot.loaded
       ? createElement(
