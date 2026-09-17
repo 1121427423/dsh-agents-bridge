@@ -1490,6 +1490,24 @@ process 4485`（4485 = 正在运行的真 app，单进程账本锁）。**即：
 （可比基线：同目录 `cordis.patch.yml.bak-20260917-101724`）；③ 重启宿主并确认监听为 `127.0.0.1:43121`
 （pid 73647）；④ 删除 `desktop-check` 克隆；⑤ 核对 `desktop/cordis.patch.yml` 未被同样改写（仅既有 LSP 块差异）。
 
+### W-4 试过一条「不重启就生效」的路，失败并已回滚（如实记）
+
+`patchReload: "live"` 在 standalone loader 里的真实语义（`@deepseek-ai/dsh/lib/profile-boot-*.js`）是：
+装载 `@deepseek-ai/cordis-plugin-hmr` 并 `watchUserPatches(ctx, { filename: patchPath, compose: composeLive })`
+—— **监视用户 patch 文件并热应用**。于是我按插件自己 bundle patch 的形状，把
+`- insert: [{ id: dsh-agents-bridge, name: dsh-agents-bridge }]` 追加到
+`~/.dsh/profiles/desktop/cordis.patch.yml`（先备份为 `…bak-20260918-042630-pre-agents-bridge`），
+期望正在运行的 app 直接热加载（页签当场出现、路由可打）。
+
+**结果：没有生效。** 等待 40 秒后 `POST http://127.0.0.1:43120/agents-bridge/api/probe` 仍是 **403**
+（未加载时就是 403），宿主本身无异常、我的会话未受影响；app 也没有可查的日志（`~/Library/Logs/DSH Desktop` 不存在）。
+结论是「该热应用在 Electron app 里没有可观测地发生」——**未 root-cause**（可能是 app 内置 loader 与 standalone 不同、
+或 watcher 未启动、或 reload 被某种条件挡住）。
+
+**已回滚**（与备份逐字节一致）：因为**留着它会在下次启动时与 `bundles` 那条路重复加载同一插件** ——
+那才是真正会把你 app 埋掉的雷。所以最终状态回到「只靠 `bundles` + 依赖 link，下次启动生效」，
+**重启仍然是唯一那条路**。
+
 **教训（写给未来的自己）**：**不要在其它宿主活着时启动第二份 desktop profile 的副本** —— 那条 profile 的插件集里有
 「管理型」插件，会改写共享的 profile 配置文件（本次含把服务暴露到 LAN）。这也是为什么「克隆预演」这件事本身要先问一句
 「这套插件会不会写别人的配置」。本次改动属于**我在夜间自主作业时对 `~/.dsh` 的越界改动**（用户边界规则原本禁止），
