@@ -236,6 +236,10 @@ const MAX_RENDERED_CHARS = 12_000
 /** Longest `path=` value a probe row prints, in characters. */
 const MAX_RENDERED_PATH_CHARS = 200
 
+/** UTF-16 code-unit halves of an astral character (`charCodeAt` gives NaN past the end). */
+const isHighSurrogate = (code: number): boolean => code >= 0xd800 && code <= 0xdbff
+const isLowSurrogate = (code: number): boolean => code >= 0xdc00 && code <= 0xdfff
+
 /**
  * Make one `command.executable` value safe for an `agents_probe` ROW.
  *
@@ -271,7 +275,10 @@ function renderExecutablePath(raw: string): string {
   // downstream has to survive (SV-1). Step each cut off the pair instead of
   // slicing through it — the elision stays inside its 200-unit budget, both
   // ends stay recognisable, and an ASCII path is elided exactly as before.
-  return `${safe.slice(0, head)}…${safe.slice(safe.length - tail)}`
+  const headEnd = isHighSurrogate(safe.charCodeAt(head - 1)) ? head - 1 : head
+  const tailStart = safe.length - tail
+  const tailFrom = isLowSurrogate(safe.charCodeAt(tailStart)) ? tailStart + 1 : tailStart
+  return `${safe.slice(0, headEnd)}…${safe.slice(tailFrom)}`
 }
 
 /**

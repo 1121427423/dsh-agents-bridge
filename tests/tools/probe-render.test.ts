@@ -159,3 +159,101 @@ describe('agents_probe render — the executable path is a sink (RR-IM-5)', () =
     expect(text).not.toContain(secret)
   })
 })
+
+/**
+ * SV-1 — the middle elision must not cut a surrogate pair in half.
+ *
+ * Both cuts are counted in UTF-16 CODE UNITS, and an astral character (an emoji
+ * in a bundle directory name, which is attacker-chosen under `~/Applications`)
+ * is TWO of them. When one straddles a cut, `slice` emitted a lone half: a 😀
+ * landing on code unit 99 rendered as `…s/s/a\ud83d…t/t/t` — a row carrying
+ * invalid UTF-16, which is what the model and every log sink downstream of it
+ * has to parse. The fold and the length bound were still honoured, so this is a
+ * correctness/encoding defect, not a row-forgery one.
+ */
+describe('agents_probe render — eliding never splits a surrogate pair (SV-1)', () => {
+  /** A `path=` row rendered for one executable, with the elision applied. */
+  function renderedPath(executable: string): string {
+    const manager = pool.create(FAST, { scan: false })
+    const tools = toolsFor(manager)
+    const text = renderTool(tools, 'agents_probe', {}, [
+      { id: 'emoji', displayName: 'Emoji', family: 'generic', available: true, executable },
+    ])
+    return /path=(\S+)/.exec(text)?.[1] ?? ''
+  }
+
+  /**
+   * Exactly `n` characters of path filler, built from short `segN/` chunks.
+   *
+   * The broad redaction pattern (`[A-Za-z0-9_-]{32,}`) would swallow a long
+   * run of one letter and shorten the path below the elision threshold, so the
+   * filler has to stay under it — otherwise the test passes with no elision at
+   * all, which is the one way this file can lie.
+   */
+  function filler(n: number): string {
+    let out = ''
+    while (out.length + 5 <= n) out += `seg${String(out.length % 10)}/`
+    return out + 'b'.repeat(n - out.length)
+  }
+
+  /**
+   * A long path whose 😀 occupies code units `[at, at + 1]`.
+   *
+   * Every other character is ASCII and every component is short, so neither
+   * the whitespace fold nor the credential redaction touches it — this measures
+   * the elision alone.
+   */
+  function longPathWithEmojiAt(at: number, total = 320): string {
+    const head = `/Applications/${filler(at - '/Applications/'.length)}`
+    const suffix = '/bin/codebuddy'
+    return `${head}😀${filler(total - head.length - 2 - suffix.length)}${suffix}`
+  }
+
+  /** A surrogate with no partner: the defect, stated as a property of the text. */
+  const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
+
+  const HEAD_CUT = 100
+  const TAIL_CUT = 99
+  const TOTAL = 320
+
+  it('does not split a pair that straddles the HEAD cut', () => {
+    // The emoji's HIGH surrogate sits at code unit 99 — the last unit the head
+    // keeps — so the naive `slice(0, 100)` ends on a dangling half.
+    const executable = longPathWithEmojiAt(HEAD_CUT - 1, TOTAL)
+    expect(executable.charCodeAt(HEAD_CUT - 1)).toBe(0xd83d)
+    expect(executable.length).toBe(TOTAL)
+
+    const rendered = renderedPath(executable)
+    expect(rendered).toContain('…')
+    expect(LONE_SURROGATE.test(rendered)).toBe(false)
+    expect(rendered.length).toBeLessThanOrEqual(200)
+    // Both ends are still the ones an operator acts on.
+    expect(rendered.startsWith('/Applications/')).toBe(true)
+    expect(rendered.endsWith('/bin/codebuddy')).toBe(true)
+  })
+
+  it('does not split a pair that straddles the TAIL cut', () => {
+    // The emoji's LOW surrogate is the first unit the tail keeps.
+    const executable = longPathWithEmojiAt(TOTAL - TAIL_CUT - 1, TOTAL)
+    expect(executable.charCodeAt(executable.length - TAIL_CUT)).toBe(0xde00)
+    expect(executable.length).toBe(TOTAL)
+
+    const rendered = renderedPath(executable)
+    expect(rendered).toContain('…')
+    expect(LONE_SURROGATE.test(rendered)).toBe(false)
+    expect(rendered.length).toBeLessThanOrEqual(200)
+    expect(rendered.startsWith('/Applications/')).toBe(true)
+    expect(rendered.endsWith('/bin/codebuddy')).toBe(true)
+  })
+
+  it('negative control — a pure-ASCII long path is elided exactly as before', () => {
+    const executable = longPathWithEmojiAt(HEAD_CUT - 1, TOTAL).replace('😀', 'x')
+    expect(executable).toMatch(/^[\x20-\x7E]+$/)
+
+    const rendered = renderedPath(executable)
+    // Byte-for-byte the pre-existing behaviour: 100 units, the ellipsis, 99
+    // units. A code-point-wise rewrite would have to agree with this too.
+    expect(rendered).toBe(`${executable.slice(0, HEAD_CUT)}…${executable.slice(executable.length - TAIL_CUT)}`)
+    expect(rendered).toHaveLength(200)
+  })
+})
