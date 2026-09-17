@@ -139,6 +139,11 @@ function SessionRow({
 }): ReactElement {
   const elapsed = formatDuration(sessionElapsed(session, now))
   const preview = sessionPreview(session)
+  // The exit status is the outcome of the run, so it sits next to the status
+  // badge rather than in the metadata foot. A running row has no result yet,
+  // and `null` (the ABI's "no exit status": a cancel, a restored row) renders
+  // nothing at all — never a fabricated 0.
+  const exitCode = session.status === 'running' ? undefined : session.result?.exitCode
   return createElement(
     'div',
     { className: `${ROOT_CLASS}__row`, 'data-status': session.status },
@@ -147,13 +152,22 @@ function SessionRow({
       { className: `${ROOT_CLASS}__rowHead` },
       createElement('span', { className: `${ROOT_CLASS}__agent`, title: session.sessionId }, session.agentId),
       createElement('span', { className: `${ROOT_CLASS}__badge`, 'data-status': session.status }, statusLabel(session.status, translator.current())),
+      exitCode === undefined
+        ? null
+        : createElement(
+            'span',
+            { className: `${ROOT_CLASS}__exit`, 'data-exit': exitCode === 0 ? 'ok' : 'error' },
+            translator.t('exitCode', { code: exitCode }),
+          ),
       createElement('span', { className: `${ROOT_CLASS}__spacer` }),
       createElement('span', { className: `${ROOT_CLASS}__mono`, title: `${translator.t('started')} ${new Date(session.startedAt).toLocaleString()}` }, elapsed),
     ),
     createElement(
       'div',
       { className: `${ROOT_CLASS}__preview${preview === '' ? ` ${ROOT_CLASS}__preview--empty` : ''}` },
-      preview === '' ? (session.status === 'running' ? translator.t('waitingForAgent') : translator.t('noEventsYet')) : preview,
+      preview === ''
+        ? (session.status === 'running' ? translator.t('waitingForAgent') : translator.t('noOutputKept'))
+        : preview,
     ),
     createElement(
       'div',
@@ -215,8 +229,15 @@ function TranscriptView({
       ? createElement(
           'div',
           { className: `${ROOT_CLASS}__state` },
-          createElement('div', { className: `${ROOT_CLASS}__stateTitle` }, translator.t('noEventsYet')),
-          createElement('div', null, translator.t('waitingForAgent')),
+          // Same rule as the list row: a FINISHED session with nothing retained
+          // (a restarted host, a spilled transcript) must not be described as
+          // an agent that is still working.
+          createElement(
+            'div',
+            { className: `${ROOT_CLASS}__stateTitle` },
+            session?.terminal === true ? translator.t('noOutputKept') : translator.t('noEventsYet'),
+          ),
+          session?.terminal === true ? null : createElement('div', null, translator.t('waitingForAgent')),
         )
       : createElement(
           'div',

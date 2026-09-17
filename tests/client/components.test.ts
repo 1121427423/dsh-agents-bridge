@@ -213,6 +213,69 @@ describe('SupervisorPanel — every state is readable', () => {
     store.stop()
   })
 
+  it('reads a finished row as a RECORD: its final elapsed time and its exit code', async () => {
+    // Requirement: "已完成" must be a record, not a grey line. Two finished rows
+    // with DIFFERENT exit codes and DIFFERENT durations, so neither assertion
+    // can be satisfied by one hardcoded string.
+    const store = makeStore({
+      sessions: () => [
+        {
+          sessionId: 'ok', agentId: 'claude', status: 'completed', startedAt: 0, endedAt: 2_000,
+          messageCount: 4, terminal: true, lastMessage: { index: 3, type: 'text', text: 'all done', at: 3 },
+          result: { status: 'completed', text: 'all done', exitCode: 0 },
+        },
+        {
+          sessionId: 'bad', agentId: 'codex', status: 'failed', startedAt: 0, endedAt: 65_000,
+          messageCount: 2, terminal: true, result: { status: 'failed', text: '', error: 'engine exited 3', exitCode: 3 },
+        },
+      ],
+    })
+    const { text } = await renderPanel(store)
+    expect(text).toContain(DICTS.en.exitCode.replace('{code}', '0'))
+    expect(text).toContain(DICTS.en.exitCode.replace('{code}', '3'))
+    // Elapsed is FROZEN at endedAt for a finished row (2s / 1m05s), never the
+    // live ticker — a finished record that keeps counting is a lie.
+    expect(text).toContain('2s')
+    expect(text).toContain('1m05s')
+    store.stop()
+  })
+
+  it('does not put an exit code on a row that has not finished', async () => {
+    const store = makeStore({ sessions: () => [session('a', 'running')] })
+    const { text } = await renderPanel(store)
+    expect(text).not.toMatch(/exit \d/)
+    store.stop()
+  })
+
+  it('never tells the reader a FINISHED session is "still working"', async () => {
+    // The exact shape the host produces for a session restored from disk (or one
+    // whose transcript the finished-LRU spilled): a real terminal status, real
+    // timings, no last message, no result text, no exit code. The row used to
+    // render `noEventsYet` — "the agent is still working; output will arrive as
+    // it goes" — which is simply false about a finished record.
+    //
+    // No `exitCode` key at all, not `exitCode: null`: on the wire the ABI sends
+    // `null`, and `normalizeSession` collapses that to "absent" at the boundary
+    // (see `tests/client/api.test.ts`).
+    const store = makeStore({
+      sessions: () => [
+        {
+          sessionId: 'r1', agentId: 'claude', status: 'completed', startedAt: 0, endedAt: 4_000,
+          messageCount: 0, terminal: true, result: { status: 'completed', text: '' },
+        },
+      ],
+    })
+    const { text } = await renderPanel(store)
+    expect(text).not.toContain(DICTS.en.noEventsYet)
+    expect(text).not.toContain(DICTS.en.waitingForAgent)
+    expect(text).toContain(DICTS.en.noOutputKept)
+    // ...and it is still a RECORD: identity, status and frozen wall time.
+    expect(text).toContain('claude')
+    expect(text).toContain(DICTS.en.completed)
+    expect(text).toContain('4s')
+    store.stop()
+  })
+
   it('shows the engine strip with availability and credential state', async () => {
     const store = makeStore({ sessions: () => [] })
     const { text } = await renderPanel(store)

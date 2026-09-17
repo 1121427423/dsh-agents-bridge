@@ -13,6 +13,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import { API_BASE, ApiError, createBridgeApi, normalizeProbe, normalizeSession, parseEnvelope } from '../../src/client/api.ts'
+import { sessionPreview } from '../../src/client/util.ts'
 import { API_PREFIX } from '../../src/host/api.ts'
 
 /** One recorded request. */
@@ -139,6 +140,46 @@ describe('normalizeSession', () => {
   it('normalizes a last message, defaulting its type to log', () => {
     const normalized = normalizeSession({ sessionId: 's1', lastMessage: { text: 'hi' } })
     expect(normalized?.lastMessage).toEqual({ index: 0, type: 'log', text: 'hi', at: 0 })
+  })
+
+  it('keeps the terminal outcome a row needs to read as a record', () => {
+    // The `status` route serializes the kernel's whole `SessionSnapshot`, so a
+    // finished row arrives WITH its `AgentResult`: the exit code is how a human
+    // tells "the engine ran and said no" from "the bridge gave up", and it is
+    // the one outcome field the row was dropping on the floor.
+    const normalized = normalizeSession({
+      sessionId: 's1',
+      status: 'failed',
+      result: { status: 'failed', exitCode: 3, text: 'boom', error: 'engine exited 3' },
+    })
+    expect(normalized?.result?.exitCode).toBe(3)
+    expect(normalized?.result?.error).toBe('engine exited 3')
+  })
+
+  it('reports "no exit code" as absent, not as the string "null"', () => {
+    // `AgentResult.exitCode` is `number | null`, and null is the ABI's honest
+    // "this run has no exit status" (a cancel, a restore). A row must render
+    // nothing rather than the word "null" or a fabricated 0.
+    expect(normalizeSession({ sessionId: 's1', status: 'cancelled', result: { status: 'cancelled', exitCode: null } })?.result)
+      .not.toHaveProperty('exitCode')
+  })
+
+  it('narrows a malformed result field to a fallback instead of forwarding it to the renderer', () => {
+    // The list row hands `result.error` straight to `previewText`, which calls
+    // `.replace` on it. A non-string used to travel through the unchecked cast
+    // and throw INSIDE React render — which blanks the entire panel, the one
+    // thing this half is not allowed to do.
+    const normalized = normalizeSession({
+      sessionId: 's1',
+      status: 'failed',
+      result: { status: 'failed', error: 42, text: 'kept', usage: { inputTokens: 'many', outputTokens: 7 } },
+    })
+    expect(normalized?.result?.error).toBeUndefined()
+    expect(normalized?.result?.text).toBe('kept')
+    // Half a token figure is worse than none: `↑0 ↓7` invents the zero.
+    expect(normalized?.result?.usage).toBeUndefined()
+    expect(() => sessionPreview(normalized!)).not.toThrow()
+    expect(sessionPreview(normalized!)).toBe('kept')
   })
 })
 

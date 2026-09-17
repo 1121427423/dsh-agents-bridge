@@ -49,6 +49,14 @@ export interface ClientSession {
     readonly status: ClientRunStatus
     readonly text?: string | undefined
     readonly error?: string | undefined
+    /**
+     * The child's exit status, as `AgentResult.exitCode` carries it.
+     *
+     * `undefined` (the ABI's `null`) means "this run has no exit status" — a
+     * cancel, or a row restored from a previous host — and the row must render
+     * NOTHING for it rather than a fabricated `0`.
+     */
+    readonly exitCode?: number | undefined
     readonly usage?: { readonly inputTokens: number; readonly outputTokens: number } | undefined
   } | undefined
 }

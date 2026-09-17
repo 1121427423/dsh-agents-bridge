@@ -58,6 +58,10 @@ export interface Dict {
   readonly sessionOutputTitle: string
   readonly noEventsYet: string
   readonly waitingForAgent: string
+  /** Row suffix carrying a finished run's exit status (`exit 0`). */
+  readonly exitCode: string
+  /** Row body for a FINISHED run that kept no output (restored, or spilled). */
+  readonly noOutputKept: string
   readonly enginesTitle: string
   readonly enginesAvailable: string
   readonly enginesNone: string
@@ -155,6 +159,8 @@ const zh: Dict = {
   sessionOutputTitle: '输出',
   noEventsYet: '还没有事件。这个 agent 仍在工作，输出会陆续到达。',
   waitingForAgent: '等待第一个事件…',
+  exitCode: '退出码 {code}',
+  noOutputKept: '这次调用没有保留输出（会话已结束）。',
   enginesTitle: '引擎可用性',
   enginesAvailable: '{n}/{total} 个引擎可用',
   enginesNone: '本机没有可驱动的引擎',
@@ -245,6 +251,8 @@ const en: Dict = {
   sessionOutputTitle: 'Output',
   noEventsYet: 'No events yet. The agent is still working; output will arrive as it goes.',
   waitingForAgent: 'Waiting for the first event…',
+  exitCode: 'exit {code}',
+  noOutputKept: 'No output retained for this run — it has already finished.',
   enginesTitle: 'Engine availability',
   enginesAvailable: '{n}/{total} engines available',
   enginesNone: 'No drivable engine on this host',

@@ -111,6 +111,47 @@ function asStatus(value: unknown): ClientRunStatus {
   return RUN_STATUSES.includes(value as ClientRunStatus) ? (value as ClientRunStatus) : 'failed'
 }
 
+/** A finite, non-negative integer, or `undefined`. */
+function asCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : undefined
+}
+
+/**
+ * Normalize the terminal result the `status` route forwards.
+ *
+ * The host serializes the kernel's whole `AgentResult` here, so this is where
+ * the exit code a human needs to read a finished run finally becomes a typed,
+ * validated field. It is WHITELISTED rather than cast, for the same reason
+ * every other row field is: this object is handed to the renderer, and
+ * `sessionPreview` calls `.replace` on `error`. An unchecked cast meant a host
+ * (or a proxy) sending `error: 42` threw inside React's render and blanked the
+ * panel — the one outcome this half exists to prevent.
+ *
+ * `usage` is kept only when BOTH token counts are real numbers: half a usage
+ * figure renders as `↑0 ↓7`, which is a fabrication, whereas omitting it says
+ * the honest "usage not reported".
+ */
+export function normalizeResult(raw: unknown): ClientSession['result'] {
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const value = raw as Record<string, unknown>
+  const usage = typeof value['usage'] === 'object' && value['usage'] !== null
+    ? (value['usage'] as Record<string, unknown>)
+    : undefined
+  const inputTokens = asCount(usage?.['inputTokens'])
+  const outputTokens = asCount(usage?.['outputTokens'])
+  const error = typeof value['error'] === 'string' && value['error'] !== '' ? value['error'] : undefined
+  // `null` is the ABI's explicit "no exit status", so it collapses to absent
+  // rather than to `0` (which would claim success).
+  const exitCode = asCount(value['exitCode'])
+  return {
+    status: asStatus(value['status']),
+    text: typeof value['text'] === 'string' ? value['text'] : '',
+    ...(error === undefined ? {} : { error }),
+    ...(exitCode === undefined ? {} : { exitCode }),
+    ...(inputTokens === undefined || outputTokens === undefined ? {} : { usage: { inputTokens, outputTokens } }),
+  }
+}
+
 /**
  * Normalize one session row.
  *
@@ -126,9 +167,7 @@ export function normalizeSession(raw: unknown): ClientSession | undefined {
   if (typeof value.sessionId !== 'string' || value.sessionId === '') return undefined
   const status = asStatus(value.status)
   const lastMessage = normalizeMessage(value.lastMessage)
-  const result = typeof value.result === 'object' && value.result !== null
-    ? (value.result as ClientSession['result'])
-    : undefined
+  const result = normalizeResult(value.result)
   return {
     sessionId: value.sessionId,
     agentId: typeof value.agentId === 'string' ? value.agentId : 'unknown',

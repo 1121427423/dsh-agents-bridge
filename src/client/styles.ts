@@ -195,6 +195,14 @@ const CSS = `
 .${ROOT_CLASS}__badge[data-status='cancelled'],
 .${ROOT_CLASS}__badge[data-status='timeout'] { color: var(--dsw-alias-state-warn-primary, inherit); }
 .${ROOT_CLASS}__spacer { flex: 1 1 auto; }
+.${ROOT_CLASS}__exit {
+  flex: none;
+  font-family: var(--dsw-font-mono, ui-monospace, monospace);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--dsw-font-xxxs-11-font-size, 11px);
+  color: var(--dsw-alias-label-secondary, inherit);
+}
+.${ROOT_CLASS}__exit[data-exit='error'] { color: var(--dsw-alias-state-error-primary, inherit); }
 .${ROOT_CLASS}__mono {
   font-family: var(--dsw-font-mono, ui-monospace, monospace);
   font-variant-numeric: tabular-nums;
