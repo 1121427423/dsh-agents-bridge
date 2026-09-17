@@ -202,10 +202,76 @@ describe('MI-6: exited settles on the child\'s exit, not a descendant\'s', () =>
       command: { executable: '/bin/sh' },
       args: ['-c', 'exit 7'],
     })
+    const pid = handle.pid
     const startedAt = Date.now()
     const exit = await handle.exited
     expect(exit.code).toBe(7)
-    // `close` wins the race, so the drain window is not paid.
+    // `close` wins the race, so the drain window is not paid — and therefore
+    // RR-IM-4's drain-path group kill is never reached.
     expect(Date.now() - startedAt).toBeLessThan(POST_EXIT_DRAIN_MS)
+    expect(processGone(pid!)).toBe(true)
+  })
+})
+
+describe('RR-IM-4: the drain path must not leave the group alive', () => {
+  it('kills a descendant that inherited the pipes once the child exits', async () => {
+    // The case MI-6 exists for: the child exits 0 but backgrounded a helper (a
+    // dev server, a test runner, an MCP helper) that inherited stdout/stderr.
+    // Reaching the drain window is the SIGNAL that something still holds the
+    // pipes — i.e. the group outlived the child — so settlement must kill it.
+    // Otherwise the driver's settle-time `terminate()` is a no-op (cancel()
+    // short-circuits on `exit !== undefined`) and the tree survives the run.
+    const lines: string[] = []
+    const handle = spawnDetached({
+      command: { executable: '/bin/sh' },
+      args: ['-c', 'sleep 30 & echo "pid:$!"; exit 0'],
+      onStdoutLine: (line) => lines.push(line),
+    })
+    const shellPid = handle.pid
+    let spawnedDescendant: number | undefined
+    try {
+      const exit = await handle.exited
+      expect(exit.code).toBe(0)
+
+      const reported = lines.find((line) => line.startsWith('pid:'))
+      if (reported === undefined) {
+        throw new Error(`the fixture never reported the descendant pid (lines: ${JSON.stringify(lines)})`)
+      }
+      const descendantPid = Number(reported.slice(4))
+      spawnedDescendant = descendantPid
+      expect(descendantPid).toBeGreaterThan(0)
+
+      // SIGKILL is delivered, not necessarily reaped, by the time `exited`
+      // resolves: give the OS a bounded moment to notice, as the overflow test
+      // does. The claim under test is that the tree does not survive.
+      const deadline = Date.now() + 2_000
+      while (!processGone(descendantPid) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      expect(processGone(descendantPid)).toBe(true)
+    } finally {
+      // Never leave the fixture's own `sleep 30` behind if the guard failed.
+      if (spawnedDescendant !== undefined && !processGone(spawnedDescendant)) {
+        process.kill(spawnedDescendant, 'SIGKILL')
+      }
+      if (shellPid !== undefined && !processGone(shellPid)) {
+        process.kill(shellPid, 'SIGKILL')
+      }
+    }
+  })
+
+  it('negative control: a run with no descendant is unaffected', async () => {
+    // The fast path must stay a fast path: no drain window, no signal, and the
+    // child is simply gone because it exited.
+    const handle = spawnDetached({
+      command: { executable: '/bin/sh' },
+      args: ['-c', 'exit 0'],
+    })
+    const pid = handle.pid
+    const startedAt = Date.now()
+    const exit = await handle.exited
+    expect(exit.code).toBe(0)
+    expect(Date.now() - startedAt).toBeLessThan(POST_EXIT_DRAIN_MS)
+    expect(processGone(pid!)).toBe(true)
   })
 })

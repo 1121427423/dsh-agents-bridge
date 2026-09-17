@@ -39,6 +39,11 @@ const KILL_CONFIRM_MS = 2_000
  * bounded drain gives real trailing output a chance to arrive and then settles
  * on the `exit` observation rather than hanging. `close` still wins whenever it
  * arrives first, so the common case is unchanged.
+ *
+ * Reaching the drain branch means the pipes are still HELD, i.e. the group
+ * outlived the child, so that branch SIGKILLs the process group before settling
+ * (RR-IM-4): without it the descendant survived the run, because a driver's
+ * settle-time `terminate()` is a no-op once `exit` is set.
  */
 export const POST_EXIT_DRAIN_MS = 300
 /**
@@ -291,12 +296,22 @@ export function killProcessGroup(pid: number, logger?: BridgeLogger): boolean {
 }
 
 /**
- * The two OS facts the post-restart orphan reap needs, behind one seam so a
+ * The three OS facts the post-restart orphan reap needs, behind one seam so a
  * manager test can observe the kill without a real orphan process.
  */
 export interface ProcessReaper {
   /** Epoch ms when `pid` started, or `undefined` when it is gone/unreadable. */
   startTimeMs(pid: number): number | undefined
+  /**
+   * True while some process with this pid exists.
+   *
+   * RR-IM-2: recovery needs this for the OWNER pid — the host process that wrote
+   * the `running` row — because "the owner is still running" is the fact that
+   * distinguishes a live session on another host from an orphan, and it is not
+   * derivable from a start time (a dead pid has none, and a live one may be a
+   * recycled stranger). `EPERM` counts as alive: the process exists.
+   */
+  isAlive(pid: number): boolean
   /** SIGKILL the process group led by `pid`. Returns true when delivered. */
   killGroup(pid: number): boolean
 }
@@ -305,6 +320,7 @@ export interface ProcessReaper {
 export function createProcessReaper(logger?: BridgeLogger): ProcessReaper {
   return {
     startTimeMs: (pid) => processStartTimeMs(pid),
+    isAlive: (pid) => !processGone(pid),
     killGroup: (pid) => killProcessGroup(pid, logger),
   }
 }
@@ -437,6 +453,21 @@ export function spawnDetached(request: SpawnRequest): SpawnHandle {
       drainTimer = setTimeout(() => {
         drainTimer = undefined
         const observed = exitObservation ?? { code: null, signal: null }
+        // RR-IM-4: reaching this branch at all IS the evidence that the group
+        // outlived the child — `close` would have won the race otherwise — so
+        // the descendant holding our pipes (a backgrounded dev server, a test
+        // runner, an MCP helper) is still alive and must not survive the run.
+        // The driver's settle-time `terminate()` cannot clean it up: `cancel()`
+        // short-circuits on `exit !== undefined`, which is deliberate (it is
+        // what stops a cancel racing a normal exit from signalling a pid the OS
+        // may since have recycled).
+        //
+        // Killing HERE rather than dropping that short-circuit is the narrower
+        // fix: the timer fires ~POST_EXIT_DRAIN_MS after the child exited, so
+        // the pgid cannot plausibly have been recycled, and the clean-exit path
+        // (where `close` wins) never signals anything at all. Same reasoning as
+        // the output-overflow path above.
+        sendSignal('SIGKILL')
         settle(
           {
             code: observed.code,

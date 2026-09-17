@@ -33,9 +33,15 @@ export type TerminalStatus = Exclude<AgentRunStatus, 'running'>
  * A long agent run can emit tens of thousands of events (every tool call, every
  * token batch). The buffer used to grow without bound for the whole life of the
  * host, so RSS rose monotonically with the number of runs a model started. The
- * cap is a drop-oldest ring with ONE synthetic `status` event at the head that
- * says how many events were discarded, so a reader is told the transcript is a
- * tail rather than silently shown a truncated view.
+ * cap is a drop-oldest ring.
+ *
+ * The ring carries an ABSOLUTE base: `dropped` counts the events it has
+ * discarded and an event's index is `dropped + its position in the buffer`, so
+ * an index never moves and never re-bases. The discarded events are reported as
+ * {@link AgentSession.dropped} data (rendered as a notice by the surface)
+ * instead of as a synthetic `status` event inside the window: a marker in the
+ * window would occupy an index slot and shift every absolute position, which is
+ * exactly the re-basing this ring must not do.
  *
  * 500 is far more than any single `agents_output` window needs: the tool reads
  * incrementally and a model that wants the beginning of a very long run is
@@ -69,6 +75,21 @@ export type AgentMessageInput = Omit<AgentMessage, 'at'> & { readonly at?: numbe
 export interface AgentSession extends AgentSessionHandle {
   /** Append one event. `at` defaults to now. Ignored after the terminal state. */
   push(message: AgentMessageInput): void
+  /**
+   * The RETAINED window, oldest first. Never contains a synthetic event: every
+   * entry is a real driver message whose absolute index is `firstIndex + i`.
+   */
+  readonly messages: readonly AgentMessage[]
+  /**
+   * Absolute index of `messages[0]` — i.e. how many events the ring discarded.
+   *
+   * Zero until the first trim. This is the base every caller-visible index is
+   * measured from, and it is what makes a cursor absolute: a reader that asks
+   * for an index below it has genuinely LOST those events (RR-IM-1).
+   */
+  readonly firstIndex: number
+  /** How many oldest events the ring has discarded. Always `firstIndex`. */
+  readonly dropped: number
   /**
    * Copy newly produced events from a driver-owned buffer.
    * Returns how many were copied (0 = nothing new).
@@ -133,32 +154,17 @@ export function createAgentSession(init: AgentSessionInit): AgentSession {
   /**
    * Drop the oldest events once the buffer exceeds {@link MAX_TRANSCRIPT_MESSAGES}.
    *
-   * Once anything has been dropped one slot is reserved for the synthetic
-   * marker, so `snapshot().messageCount` (marker included) never exceeds the
-   * cap. The marker is generated on read rather than stored, so it cannot be
-   * mistaken for a real driver event by `lastMessage`.
+   * `dropped` advances by the number discarded, which is the whole point
+   * (RR-IM-1): it is the ABSOLUTE base of the window, so trimming moves the base
+   * without re-numbering anything. Nothing synthetic is inserted into the
+   * buffer — a marker here would take an index slot and shift every position
+   * after it, which is the re-basing bug this ring must not have.
    */
   function trim(): void {
-    const capacity = dropped > 0 ? MAX_TRANSCRIPT_MESSAGES - 1 : MAX_TRANSCRIPT_MESSAGES
-    const overflow = buffer.length - capacity
+    const overflow = buffer.length - MAX_TRANSCRIPT_MESSAGES
     if (overflow <= 0) return
     buffer.splice(0, overflow)
     dropped += overflow
-    // The first overflow flips `capacity` down by one; drop again if needed.
-    const second = buffer.length - (MAX_TRANSCRIPT_MESSAGES - 1)
-    if (second > 0) {
-      buffer.splice(0, second)
-      dropped += second
-    }
-  }
-
-  function truncationMarker(): AgentMessage {
-    return Object.freeze({
-      type: 'status',
-      level: 'warn',
-      content: `transcript truncated: dropped ${dropped} earlier event(s) to bound memory`,
-      at: Date.now(),
-    }) as AgentMessage
   }
 
   function complete(completion: SessionCompletion): AgentResult {
@@ -212,8 +218,15 @@ export function createAgentSession(init: AgentSessionInit): AgentSession {
     agentId: init.agentId,
     startedAt,
     get messages() {
-      if (dropped === 0) return buffer
-      return [truncationMarker(), ...buffer]
+      // The retained window only: no synthetic marker, so `messages[i]` is
+      // always the real event at absolute index `firstIndex + i`.
+      return buffer
+    },
+    get firstIndex() {
+      return dropped
+    },
+    get dropped() {
+      return dropped
     },
     done,
     async cancel(reason?: string): Promise<void> {
@@ -240,9 +253,11 @@ export function createAgentSession(init: AgentSessionInit): AgentSession {
     },
     snapshot(): SessionSnapshot {
       const last = buffer.length > 0 ? buffer[buffer.length - 1] : undefined
-      // The synthetic truncation marker counts toward the reported total, so a
-      // caller can see the transcript is capped rather than silently short.
-      const messageCount = buffer.length + (dropped > 0 ? 1 : 0)
+      // ABSOLUTE event count (retained + discarded), not the window length: it
+      // is the index just past the newest event, so it doubles as a valid
+      // `sinceIndex` cursor ("read only what is new") even after trimming.
+      // See `SessionOutput.firstIndex` / `.dropped` for the truncation notice.
+      const messageCount = dropped + buffer.length
       return Object.freeze({
         sessionId: init.sessionId,
         agentId: init.agentId,

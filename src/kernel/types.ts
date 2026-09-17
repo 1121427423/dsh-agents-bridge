@@ -61,6 +61,17 @@
  *          before the run settles (IM-5). Optional, so every existing driver
  *          handle still satisfies the interface unchanged.
  *
+ *  v7  RR-IM-1, ADDITIVE ONLY (2 optional fields on `SessionOutput`):
+ *        - `SessionOutput.firstIndex?` / `.dropped?`: the transcript cursor is
+ *          ABSOLUTE. The cap is a drop-oldest ring, so the retained window can
+ *          start above zero; `messages[i]` sits at absolute index
+ *          `firstIndex + i`, `nextIndex` is absolute and monotonic, and
+ *          `dropped` is the explicit "you fell behind" signal. Both fields are
+ *          optional, so an existing caller (or a stub `AgentManager`) that reads
+ *          only `messages` / `nextIndex` compiles and behaves exactly as
+ *          before — the change is that `nextIndex` no longer re-bases when the
+ *          ring trims, which is the defect it fixes.
+ *
  * @module dsh-agents-bridge/kernel/types
  */
 
@@ -368,6 +379,28 @@ export interface SessionOutput {
   readonly messages: readonly AgentMessage[]
   /** Pass back as `sinceIndex` for the next incremental read. */
   readonly nextIndex: number
+  /**
+   * ABSOLUTE index of the first message in `messages` (ABI, additive).
+   *
+   * The transcript is a drop-oldest ring, so the window can start above zero.
+   * `messages[i]` is the event at absolute index `firstIndex + i`, and an index
+   * NEVER moves: the base advances as the ring discards, it never re-bases
+   * (RR-IM-1). A caller that needs stable positions (the client's merge-by-index
+   * transcript) can rely on this.
+   */
+  readonly firstIndex?: number
+  /**
+   * How many events the caller LOST because the ring discarded them before this
+   * read (ABI, additive).
+   *
+   * `0` for a reader that kept up. Non-zero is the explicit "you fell behind"
+   * signal: the read still starts at `firstIndex` and `nextIndex` is absolute,
+   * so nothing after the gap is skipped — but the caller is told the transcript
+   * is not the whole story instead of being silently shown a shorter one. The
+   * surface renders this as a notice; it is deliberately NOT a synthetic
+   * message inside `messages`, which would steal an index slot.
+   */
+  readonly dropped?: number
 }
 
 /** Minimal logger seam so kernel/drivers stay host-agnostic and testable. */
@@ -408,8 +441,14 @@ export interface AgentSessionHandle {
    * accepted the session" and "the run finished" would otherwise lose the resume
    * pointer permanently and `agents_send` could never continue that
    * conversation (IM-5). The terminal `AgentResult.backendSessionId` stays
-   * authoritative: a driver that discovers a resume was rejected reports no id
-   * there, and the manager clears the pointer accordingly.
+   * authoritative: a driver that discovers a resume was REJECTED reports no id
+   * there AND clears this getter (the claude dialect does it with
+   * `DriverSession.settleBackendSessionId('')`), and a getter that has gone
+   * silent while the manager holds a mid-run pin is read as an explicit CLEAR —
+   * the manager then drops the pin instead of re-installing it, so no dead
+   * pointer is persisted (RR-IM-3). A driver that leaves this getter answering
+   * (a cancel or timeout that never learned whether the conversation is
+   * resumable) keeps the pin, which is IM-5's durability guarantee.
    */
   readonly backendSessionId?: string
   /**

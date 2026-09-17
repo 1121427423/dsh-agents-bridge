@@ -134,6 +134,69 @@ function wedgedBackend(): { backend: AgentBackend; reads: () => number } {
   return { backend, reads: () => reads }
 }
 
+/**
+ * A backend whose handle stays RUNNING and whose event buffer the TEST drives.
+ *
+ * `output()` syncs from the handle on every read, so "the cursor was already
+ * past the cap when more events arrived" is a deterministic step rather than a
+ * race against the manager's poll interval (RR-IM-1).
+ */
+function streamingBackend(): {
+  backend: AgentBackend
+  push: (content: string) => void
+  finish: () => void
+} {
+  const messages: AgentMessage[] = []
+  let resolveDone: (result: AgentResult) => void = () => {}
+  let sessionId = ''
+  let agentId = 'claude'
+  const done = new Promise<AgentResult>((resolve) => {
+    resolveDone = resolve
+  })
+  const backend: AgentBackend = {
+    family: 'claude',
+    async run(opts) {
+      sessionId = `stream_${opts.agent}`
+      agentId = opts.agent
+      const startedAt = Date.now()
+      return {
+        sessionId,
+        agentId: opts.agent,
+        startedAt,
+        get messages() {
+          return messages
+        },
+        done,
+        async cancel() {},
+        snapshot: () => ({
+          sessionId,
+          agentId: opts.agent,
+          status: 'running',
+          startedAt,
+          messageCount: messages.length,
+          terminal: false,
+        }),
+      }
+    },
+  }
+  return {
+    backend,
+    push: (content) => {
+      messages.push({ type: 'text', content, at: messages.length })
+    },
+    finish: () => {
+      resolveDone({
+        sessionId,
+        agentId,
+        status: 'completed',
+        exitCode: 0,
+        text: 'ok',
+        durationMs: 1,
+      })
+    },
+  }
+}
+
 function managerFor(backend: AgentBackend) {
   return pool.add(
     createAgentManager({
@@ -155,14 +218,20 @@ describe('IM-7: transcripts are capped and terminal sessions are evicted', () =>
     await waitTerminal(manager, started.sessionId)
 
     const snapshot = manager.status(started.sessionId)
-    expect(snapshot?.messageCount).toBeLessThanOrEqual(MAX_TRANSCRIPT_MESSAGES)
+    // The count is ABSOLUTE (events ever seen), so it stays a valid cursor even
+    // though the ring only retains MAX positions (RR-IM-1).
+    expect(snapshot?.messageCount).toBe(MAX_TRANSCRIPT_MESSAGES + 250)
 
     const output = manager.output(started.sessionId)
     expect(output?.messages.length).toBeLessThanOrEqual(MAX_TRANSCRIPT_MESSAGES)
-    // The head is the synthetic marker, so a reader is told the transcript is a
-    // tail rather than silently shown a shorter one.
-    expect(output?.messages[0]?.type).toBe('status')
-    expect(output?.messages[0]?.content).toContain('transcript truncated')
+    // The truncation is DATA on the read (`dropped` + `firstIndex`), not a
+    // synthetic event squatting on an index inside the window: a reader that
+    // fell behind is told how much it lost, and the first event it does get
+    // still carries its true absolute position.
+    expect(output?.messages[0]?.type).toBe('text')
+    expect(output?.messages[0]?.content).not.toContain('transcript truncated')
+    expect(output?.dropped).toBe(250)
+    expect(output?.firstIndex).toBe(250)
     // The newest events survive: drop-OLDEST, not drop-newest.
     expect(output?.messages[output.messages.length - 1]?.content).toBe(
       `event-${MAX_TRANSCRIPT_MESSAGES + 249}`,
@@ -216,5 +285,72 @@ describe('MI-7: forcing a terminal state stops the poll and finishes the run', (
     const atTerminal = reads()
     await sleep(400)
     expect(reads()).toBe(atTerminal)
+  })
+})
+
+describe('RR-IM-1: agents_output cursors are absolute and never wedge', () => {
+  it('drains a capped transcript with no gap, no duplicate, and keeps delivering past the cap', async () => {
+    const { backend, push, finish } = streamingBackend()
+    const manager = managerFor(backend)
+    const started = await manager.run({ agent: 'claude', prompt: 'flood', timeoutMs: 0 })
+    await sleep(50)
+    const id = started.sessionId
+
+    // The transcript is ALREADY capped when the reader first looks: this is the
+    // lagging reader, and the read must say what it lost instead of silently
+    // starting from a position that looks like 0.
+    const total = 700
+    for (let index = 0; index < total; index += 1) push(`event-${index}`)
+
+    let cursor = 0
+    let droppedSeen = 0
+    const seen: string[] = []
+    const cursors: number[] = []
+    for (let guard = 0; guard < 100; guard += 1) {
+      const read = manager.output(id, { sinceIndex: cursor, limit: 80 })
+      if (read === undefined) throw new Error('output() stopped answering for a live session')
+      cursors.push(read.nextIndex)
+      droppedSeen = Math.max(droppedSeen, read.dropped ?? 0)
+      for (const message of read.messages) seen.push(message.content ?? '')
+      if (read.nextIndex === cursor) break
+      cursor = read.nextIndex
+    }
+
+    // (c) the loss is explicit, not a silent skip.
+    expect(droppedSeen).toBe(total - MAX_TRANSCRIPT_MESSAGES)
+    // (a) every RETAINED event exactly once, in absolute order, no duplicates,
+    // and no synthetic marker occupying an index slot.
+    expect(seen).toHaveLength(MAX_TRANSCRIPT_MESSAGES)
+    expect(seen[0]).toBe(`event-${total - MAX_TRANSCRIPT_MESSAGES}`)
+    expect(seen[seen.length - 1]).toBe(`event-${total - 1}`)
+    expect(new Set(seen).size).toBe(seen.length)
+    expect(seen).toEqual(
+      Array.from({ length: seen.length }, (_, offset) => `event-${total - MAX_TRANSCRIPT_MESSAGES + offset}`),
+    )
+    // (b) the cursor advanced to the ABSOLUTE end and never moved backwards.
+    // Every read that returned events moved it STRICTLY forward; the last read
+    // returned nothing (it was already at the end) and reported the same index.
+    expect(cursor).toBe(total)
+    expect(cursors.length).toBeGreaterThan(2)
+    const advances = cursors.slice(0, -1)
+    for (let index = 1; index < advances.length; index += 1) {
+      expect(advances[index]!).toBeGreaterThan(advances[index - 1]!)
+    }
+    expect(cursors[cursors.length - 1]).toBe(cursors[cursors.length - 2])
+
+    // The wedge this finding is about: the cursor is now at the absolute end
+    // while the ring holds only MAX array positions. A caught-up reader must
+    // still receive new events (the old array-position cursor sat at 500 here
+    // and returned nothing forever).
+    for (let index = total; index < total + 40; index += 1) push(`event-${index}`)
+    const resumed = manager.output(id, { sinceIndex: cursor, limit: 80 })
+    expect(resumed?.messages.map((message) => message.content)).toEqual(
+      Array.from({ length: 40 }, (_, offset) => `event-${total + offset}`),
+    )
+    expect(resumed?.nextIndex).toBe(total + 40)
+    expect(resumed?.dropped).toBe(0)
+
+    finish()
+    await waitTerminal(manager, id)
   })
 })

@@ -130,7 +130,7 @@ describe('createAgentSession', () => {
 })
 
 describe('transcript bound (IM-7)', () => {
-  it('keeps the newest events and prepends one synthetic truncation marker', () => {
+  it('keeps the newest events and reports the absolute base it dropped', () => {
     const session = createAgentSession({ sessionId: 's1', agentId: 'claude' })
     const total = MAX_TRANSCRIPT_MESSAGES + 100
     for (let index = 0; index < total; index += 1) {
@@ -139,15 +139,20 @@ describe('transcript bound (IM-7)', () => {
 
     const messages = session.messages
     expect(messages.length).toBeLessThanOrEqual(MAX_TRANSCRIPT_MESSAGES)
-    // Drop-oldest: the first real event is gone, the last one is present.
-    expect(messages[1]?.content).toBe(`e${total - (messages.length - 1)}`)
+    // Drop-oldest: the oldest events are gone, the newest one is present.
+    expect(messages[0]?.content).toBe(`e${session.dropped}`)
     expect(messages[messages.length - 1]?.content).toBe(`e${total - 1}`)
-    // One marker at the head, and only one.
-    expect(messages[0]?.type).toBe('status')
-    expect(messages[0]?.content).toContain('transcript truncated')
-    expect(messages.filter((m) => m.content?.includes('transcript truncated'))).toHaveLength(1)
-    // The reported count includes the marker, so it never exceeds the cap.
-    expect(session.snapshot().messageCount).toBeLessThanOrEqual(MAX_TRANSCRIPT_MESSAGES)
+    // The retained window holds ONLY real driver events. RR-IM-1: a synthetic
+    // marker inside it would occupy an index slot and shift every absolute
+    // position, so the truncation is reported as `dropped`/`firstIndex` data
+    // (rendered as a notice by the surface) instead of as a fake event.
+    expect(messages.filter((m) => m.content?.includes('transcript truncated'))).toHaveLength(0)
+    expect(session.dropped).toBe(total - messages.length)
+    expect(session.firstIndex).toBe(session.dropped)
+    // `messageCount` counts events ever seen (absolute), so it is a valid
+    // cursor: `sinceIndex: messageCount` is exactly "read only what is new".
+    expect(session.snapshot().messageCount).toBe(total)
+    expect(session.snapshot().messageCount).toBe(session.firstIndex + messages.length)
   })
 
   it('bounds a sync() from a driver buffer too, not just push()', () => {
@@ -159,14 +164,50 @@ describe('transcript bound (IM-7)', () => {
     }))
     expect(session.sync(source)).toBe(source.length)
     expect(session.messages.length).toBeLessThanOrEqual(MAX_TRANSCRIPT_MESSAGES)
-    expect(session.snapshot().messageCount).toBeLessThanOrEqual(MAX_TRANSCRIPT_MESSAGES)
+    expect(session.dropped).toBe(source.length - session.messages.length)
+    expect(session.messages[0]?.content).toBe(`s${session.dropped}`)
   })
 
-  it('does not allocate a marker while the transcript fits', () => {
+  it('does not drop or re-base while the transcript fits', () => {
     const session = createAgentSession({ sessionId: 's1', agentId: 'claude' })
     session.push({ type: 'text', content: 'a' })
     session.push({ type: 'text', content: 'b' })
     expect(session.messages.map((m) => m.content)).toEqual(['a', 'b'])
+    expect(session.dropped).toBe(0)
+    expect(session.firstIndex).toBe(0)
     expect(session.snapshot().messageCount).toBe(2)
+  })
+})
+
+describe('RR-IM-1: the cursor is an ABSOLUTE, monotonic index', () => {
+  it('re-bases the retained window without moving an event to a different index', () => {
+    const session = createAgentSession({ sessionId: 's1', agentId: 'claude' })
+    const total = MAX_TRANSCRIPT_MESSAGES + 200
+    for (let index = 0; index < total; index += 1) {
+      session.push({ type: 'text', content: `e${index}` })
+    }
+
+    // A lagging reader asks for index 0: the ring already discarded 200 events,
+    // so the window starts at absolute 200 — and says so, rather than silently
+    // showing a shorter transcript whose positions look like "the beginning".
+    expect(session.dropped).toBe(200)
+    expect(session.firstIndex).toBe(200)
+    expect(session.messages[0]?.content).toBe('e200')
+    expect(session.messages.length).toBe(MAX_TRANSCRIPT_MESSAGES)
+    expect(session.snapshot().messageCount).toBe(total)
+
+    // Trim again: the BASE moves, but the mapping from window position to
+    // absolute index does not. `firstIndex + k` is the index of the k-th
+    // retained event before and after, which is what a cursor needs.
+    for (let index = total; index < total + 350; index += 1) {
+      session.push({ type: 'text', content: `e${index}` })
+    }
+    expect(session.dropped).toBe(550)
+    expect(session.firstIndex).toBe(550)
+    expect(session.messages[0]?.content).toBe('e550')
+    expect(session.messages[session.messages.length - 1]?.content).toBe('e1049')
+    expect(session.snapshot().messageCount).toBe(1050)
+    const positionOf600 = session.messages.findIndex((message) => message.content === 'e600')
+    expect(session.firstIndex + positionOf600).toBe(600)
   })
 })

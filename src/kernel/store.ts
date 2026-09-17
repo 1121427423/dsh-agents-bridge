@@ -46,9 +46,24 @@ export interface StoredSession {
    * Persisted so a host that dies mid-run can still reap the detached process
    * TREE it left behind: the child is its own process-group leader (`detached:
    * true`), so the pid is also the pgid. Absent once the run settles, and never
-   * trusted blindly on recovery — see `recoverOrphans` in `manager.ts`.
+   * trusted blindly on recovery — see `ownerIsGone` / `reapOrphan` in
+   * `manager.ts`.
    */
   readonly pid?: number
+  /**
+   * OWNER EVIDENCE (RR-IM-2): the host process that wrote this `running` row.
+   *
+   * `pid` alone cannot answer "is the run above still live?" — a persisted
+   * `running` row may belong to ANOTHER host sharing the same store dir, and a
+   * recycled pid makes the child check alone unsound. Recovery therefore reaps
+   * a row only when the owner is verifiably gone, and this pair is the evidence:
+   * the owner's pid plus the moment that process started, so a recycled owner
+   * pid is detectable too. Both are additive; a row written before this field
+   * existed carries no evidence and is never signalled.
+   */
+  readonly ownerPid?: number
+  /** Epoch ms when `ownerPid` started, as observed by the writing host. */
+  readonly ownerStartedAt?: number
 }
 
 export interface SessionStoreOptions {
@@ -120,11 +135,17 @@ function coerceSession(value: unknown): StoredSession | undefined {
     const raw = value[key]
     if (typeof raw === 'number' && Number.isFinite(raw)) out[key] = raw
   }
-  // `pid` is the one numeric field that is not a timestamp: a live process-group
-  // id must be a positive integer, and anything else is treated as absent rather
-  // than forwarded to `process.kill`.
-  const pid = value['pid']
-  if (typeof pid === 'number' && Number.isInteger(pid) && pid > 0) out['pid'] = pid
+  // `pid` and `ownerPid` are the numeric fields that are not timestamps: a
+  // process id must be a positive integer, and anything else is treated as
+  // absent rather than forwarded to `process.kill`.
+  for (const key of ['pid', 'ownerPid'] as const) {
+    const raw = value[key]
+    if (typeof raw === 'number' && Number.isInteger(raw) && raw > 0) out[key] = raw
+  }
+  const ownerStartedAt = value['ownerStartedAt']
+  if (typeof ownerStartedAt === 'number' && Number.isFinite(ownerStartedAt)) {
+    out['ownerStartedAt'] = ownerStartedAt
+  }
   for (const key of ['backendSessionId', 'cwd', 'model', 'resumedFrom'] as const) {
     const raw = value[key]
     if (typeof raw === 'string' && raw !== '') out[key] = raw

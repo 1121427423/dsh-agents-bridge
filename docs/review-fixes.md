@@ -599,14 +599,14 @@ B5a 按约定只追加 §L、未改旧行（它明确注明"请监理复核后�
 
 ### O-1 accepted · Important（6 条，分 3 批）
 
-| ID | 位置 | 修复动作 | 验收 |
-|---|---|---|---|
-| RR-IM-1 | `session.ts:141-152,212-215` + `manager.ts:725-733` | 让游标**绝对化**：`SessionOutput` 带 `dropped`/`firstIndex`，`messages` 不再内嵌合成 marker（或映射时扣除），`output()` 把绝对 `sinceIndex` 映射进保留窗口并返回绝对 `nextIndex` | 背板发 700 事件、循环按 `nextIndex` 轮询：每个保留事件恰好读一次，不漏不重；游标 ≥500 不再卡死 |
-| RR-IM-2 | `manager.ts:289-304` + `store.ts` 的 running 行 | 持久化**所有者证据**（写行宿主的 pid + 该进程启动时间，或 boot-unique id）；只在所有者确证已死时回收进程组 | 管理器 A 跑真进程（行含活 pid）→ 于同目录起管理器 B → 断言 A 的子进程仍活、行仍 `running` |
-| RR-IM-3 | `manager.ts:378-379` | 区分「从未见过」与「被驱动清掉」：驱动侧置 cleared 标志并在终态传播，管理器**不得**回退到 pin | 假 handle 运行中给 `live-A`、终态省略该字段 → 断言 store 无指针 |
-| RR-IM-4 | `spawn.ts:434-454,494-501` | drain 路径上「管道仍被持有」应视为「组可能仍活」：结算前 SIGKILL 进程组；或不要因 `exit!==undefined` 短路 `cancel()` | `sh -c 'sleep 30 & exit 0'` 记录后代 pid → `done` 后 `processGone(pid)` 为真 |
-| RR-IM-5 | `scan.ts:886/768/730` → probe `path=` | executable 保留原值，在**输出端**做 `oneLine` + 截断 + `redactSecrets` | 目录名含 `\n` 的假 bundle → 渲染行数不增加 |
-| RR-IM-6 | `acp.ts:2075-2088` | `failBeforePrompt` 也 `await client.dispose()`（幂等），或收敛为单一 `settleAndDispose()` | fixture 先 `terminal/create` 再让 `session/new` 报错 → `done` 后 `process.kill(pid,0)` 抛 ESRCH |
+| ID | 位置 | 修复动作 | 验收 | 状态 |
+|---|---|---|---|---|
+| RR-IM-1 | `session.ts:141-152,212-215` + `manager.ts:725-733` | 让游标**绝对化**：`SessionOutput` 带 `dropped`/`firstIndex`，`messages` 不再内嵌合成 marker（或映射时扣除），`output()` 把绝对 `sinceIndex` 映射进保留窗口并返回绝对 `nextIndex` | 背板发 700 事件、循环按 `nextIndex` 轮询：每个保留事件恰好读一次，不漏不重；游标 ≥500 不再卡死 | **fixed**（批次 A · §P，树未提交） |
+| RR-IM-2 | `manager.ts:289-304` + `store.ts` 的 running 行 | 持久化**所有者证据**（写行宿主的 pid + 该进程启动时间，或 boot-unique id）；只在所有者确证已死时回收进程组 | 管理器 A 跑真进程（行含活 pid）→ 于同目录起管理器 B → 断言 A 的子进程仍活、行仍 `running` | **fixed**（批次 A · §P，树未提交） |
+| RR-IM-3 | `manager.ts:378-379` | 区分「从未见过」与「被驱动清掉」：驱动侧置 cleared 标志并在终态传播，管理器**不得**回退到 pin | 假 handle 运行中给 `live-A`、终态省略该字段 → 断言 store 无指针 | **fixed**（批次 A · §P，树未提交） |
+| RR-IM-4 | `spawn.ts:434-454,494-501` | drain 路径上「管道仍被持有」应视为「组可能仍活」：结算前 SIGKILL 进程组；或不要因 `exit!==undefined` 短路 `cancel()` | `sh -c 'sleep 30 & exit 0'` 记录后代 pid → `done` 后 `processGone(pid)` 为真 | **fixed**（批次 A · §P，树未提交） |
+| RR-IM-5 | `scan.ts:886/768/730` → probe `path=` | executable 保留原值，在**输出端**做 `oneLine` + 截断 + `redactSecrets` | 目录名含 `\n` 的假 bundle → 渲染行数不增加 | 待批次 B（本批未动） |
+| RR-IM-6 | `acp.ts:2075-2088` | `failBeforePrompt` 也 `await client.dispose()`（幂等），或收敛为单一 `settleAndDispose()` | fixture 先 `terminal/create` 再让 `session/new` 报错 → `done` 后 `process.kill(pid,0)` 抛 ESRCH | 待批次 C（本批未动） |
 
 批次：**A = RR-IM-1..4（kernel，一个模块）** · **B = RR-IM-5（tracks+tools）** · **C = RR-IM-6（drivers/acp）**。
 
@@ -635,3 +635,137 @@ RR-MI-4（`registry.ts:460-467`：scanNote 无人可见）—— 与 RR-MI-1 同
 ### O-5 needs-confirmation：无
 
 RR-IM-2 的所有者令牌是**附加字段**、不改既有语义；RR-MI-9 的 schema `minimum` 亦是附加约束。均无需业务裁决。
+
+## P. 批次 A 落地记录（RR-IM-1..4）（2026-09-18）
+
+范围：§O-1 的 **RR-IM-1 · RR-IM-2 · RR-IM-3 · RR-IM-4**（纯 kernel，一个模块）。
+**RR-IM-5（tracks+tools）与 RR-IM-6（drivers/acp）本批未动**，仍为「待批次 B/C」。
+树按约定**未提交**（保持 dirty，HEAD 仍 `f0760d5`）；**零 `git stash` / `checkout` / `reset`**，零负控残留
+（本批的负控与判别实验都做成常驻测试，没有临时改源码再回滚的动作）。红/绿命令统一为
+`/opt/homebrew/bin/node node_modules/vitest/vitest.mjs run <file>`。
+
+### P-1 RR-IM-1 · transcript 游标绝对化
+
+**修法**（`src/kernel/session.ts:141-167,218-231,253-261` · `src/kernel/manager.ts:190-200,847-880` · `src/kernel/types.ts:64-73,378-403`）
+- 环只保留真实事件：`messages` 返回 `buffer` 本身，**不再内嵌合成 marker**；新增 `firstIndex`（= 被丢弃数）与
+  `dropped`。合成的 `truncationMarker()` 整个删除——它就是「占用索引位、把每个绝对位置往后挪」的元凶。
+- `trim()` 简化为单次 `splice` + `dropped += overflow`（不再为 marker 留槽位再补刀），窗口恒为 `MAX_TRANSCRIPT_MESSAGES`。
+- `snapshot().messageCount` 改为**绝对**计数 `dropped + buffer.length`，于是它本身就是「最新事件的下一个索引」，
+  `agents_wait` 在没有 `sinceIndex` 时回落到它仍然是正确游标。
+- `manager.output()`：`end = firstIndex + messages.length`（绝对），`cursor = clampIndex(sinceIndex, end)`，
+  `startIndex = max(cursor, firstIndex)`，`nextIndex = firstIndex + stop`，并新增
+  `firstIndex` / `dropped: max(0, startIndex - cursor)`。游标越过保留窗口时**不再静默跳过**：返回从窗口起点开始的
+  事件并报告丢了多少；被追平时 `dropped: 0` 且下一个事件一到就继续前进（旧代码在数组位置 500 处永久卡死）。
+- `SessionOutput` 两个新字段**可选**，ABI 记为 **v7（additive）**；`src/client` / `src/tools` 的既有
+  `messages`/`nextIndex` 读取方式不变（新字段的消费见「如实记账」）。
+
+**测试**：`tests/kernel/session.test.ts:132-199`（窗口/base/messageCount、不re-base、同步路径同样受限）·
+`tests/kernel/manager-lifecycle.test.ts:212-239,291-352`（700 事件、`{sinceIndex, limit: 80}` 轮询）·
+`tests/kernel/manager-lifecycle.test.ts:144-198` 新增 `streamingBackend()`（测试自行 `push`，`output()` 读时同步，
+不依赖 100ms 轮询，无时序抖动）。
+
+**红（=修复前源码，即负控）**：`… run tests/kernel/session.test.ts tests/kernel/manager-lifecycle.test.ts`
+→ `6 failed | 11 passed`，其中
+`AssertionError: expected 'transcript truncated: dropped 101 earlier event(s) to bound memory' to be 'eundefined'`
+（marker 占了 0 号位）· `expected undefined to be 500`（无 `dropped`）· `expected undefined to be 200`（无 `firstIndex`）·
+`expected 500 to be 750`（`messageCount` 是窗口长度）· `expected +0 to be 200`（manager 侧：落后读者**悄悄跳过**了
+200 条，`dropped` 根本没暴露）。
+**绿**：同命令 `17 passed`；验收三条：① 收到的 500 条恰好 `event-200..event-699`、无重复无洞
+② `nextIndex` 一路严格递增到**绝对** 700（不是数组 500），追加 40 条后仍立即读到
+③ 落后读者的 `dropped === 200`。**负控（常驻）**：未丢弃时 `dropped === 0`/`firstIndex === 0`；
+无后代（无裁剪）会话的 `nextIndex` 与 `messageCount` 一致。
+
+### P-2 RR-IM-2 · running 行带所有者证据
+
+**修法**（`src/kernel/store.ts:43-66,137-149` · `src/kernel/spawn.ts:296-326` · `src/kernel/manager.ts:272-390,499-514`）
+- `StoredSession` 增 **`ownerPid?` / `ownerStartedAt?`**（写该 running 行的宿主进程 pid + 该进程自身启动时刻），
+  `coerceSession` 按「正整数 / 有限数」强制转换；二者**附加**，老行没有证据 = 未知。
+- `ProcessReaper` 增 `isAlive(pid)`（真实实现 `!processGone(pid)`，EPERM 视为存活），使所有者存活判定可注入。
+- 新 `ownerIsGone(record)`：**没有证据 → false**（不杀、不覆盖）；`isAlive(owner)` 为真且启动时刻吻合 → false；
+  只有「owner 已无进程」或「owner pid 已被回收成别的进程（启动时刻不符）」才判 true。
+- 恢复循环只在 `ownerIsGone` 为真时把行改 `failed` 并调用 `reapOrphan`；改写的行**丢掉 pid 与 owner 证据**
+  （旧代码 `{...record}` 保留了 pid，下一次重启还会再杀一遍）。进程组信号仍保留原有的子 pid 启动时刻比对。
+- `toStoreRecord` 只在**running** 行上写 `pid + ownerPid + ownerStartedAt`；终态行一律不带。
+
+**测试**：`tests/kernel/manager-recover.test.ts:62-109`（`seedRunningRow`/`orphanReaper` 提到模块级）·
+`:111-206`（正控=owner 确证已死 → 杀；负控=子 pid 被回收/启动时刻不可得/无 pid 行 → 不杀）·
+`:208-297`（**真 fixture**：A 跑 `fake-slow-cli` 行含活 pid → 同目录起 B → A 的子进程仍活、行仍 `running`、
+A 自己仍认为 running；无 owner 证据 → 不杀且**不覆写**；owner pid 被回收 → 仍会回收）。
+
+**红（=修复前源码）**：`… run tests/kernel/manager-recover.test.ts` → `4 failed | 5 passed`
+（首次 5 failed，含 helper 作用域错，已先行修正）
+`expected 4242 to be undefined`（stale 行仍带 pid，下次重启会再杀）·
+`expected undefined to be 13225`（ownerPid 根本没落盘）·
+`expected [ 4242 ] to deeply equal []`（**无任何所有者证据**的行也被杀了——正是「第二宿主杀活树」的机制）。
+**绿**：`9 passed`。**负控（常驻）**：上列三条负控 + 正控一条；「B 不杀 A」用**真进程**断言
+（`processGone(childPid) === false`、落盘行 `status === 'running'`），不靠 mock。
+
+### P-3 RR-IM-3 · 被驱动清掉的指针不得被 pin 复位
+
+**修法**（`src/kernel/manager.ts:148-162,466-490,613-631` · `src/kernel/types.ts` 的
+`AgentSessionHandle.backendSessionId` 文档改为与实现一致）
+- 判据落在「驱动自己的 getter 从**应答**变成**沉默**」：驱动终态结果缺该字段、`handle.backendSessionId`
+  变 `undefined`、而 manager 中途确实 pin 过 → 这是**显式清除**（claude 拒绝续跑时
+  `DriverSession.settleBackendSessionId('')` 的唯一形状）；三者缺一（尤其没有 pin）就是「从未见过」。
+- `LiveSession.driverClearedPointer` 在该判定成立时置位；`toStoreRecord` 的终态分支在置位时**返回 undefined**，
+  不再回落到 `pinnedBackendSessionId`。
+- 取消/超时路径不受影响：`requestTerminal` 只产出「无 id 的结果」而**不**清 getter，且强制终态时走的是
+  `outcome === undefined` 分支 → 保留 pin（IM-5 的取消回落语义完整保留）。
+
+**测试**：`tests/kernel/manager-resume.test.ts:194-274`（`resumeRefusingBackend`：运行中 getter 给
+`fake-session-0001`，终态省略字段；`clear:false` 为负控）· `:276-330`。
+
+**红（=修复前源码）**：`… run tests/kernel/manager-resume.test.ts` → `1 failed | 8 passed`，
+`AssertionError: expected 'fake-session-0001' to be undefined`（manager-resume.test.ts:299：终态行把驱动刚清掉的
+id 又写回磁盘）。**绿**：`9 passed`（含「重启后 `status()` 无指针」与「`agents_send` 报 cannot resume」）。
+**负控（常驻）**：`clear:false` 时终态行**仍带** `fake-session-0001`——证明守卫钉的是「清除」而不是「字段缺失」。
+
+### P-4 RR-IM-4 · drain 路径必须收掉进程组
+
+**修法**（`src/kernel/spawn.ts:43-48,453-471`）
+- **选择：在 drain 分支结算前 `sendSignal('SIGKILL')`**（不取消 `cancel()` 的 `exit !== undefined` 短路）。
+  理由写进代码：能走到这个分支**本身就是证据**——`close` 没能在 300ms 内赢下竞争，说明管道仍被持有，
+  即组比子进程活得久；而在此时（子进程退出后约 300ms）pgid 不可能已被回收，正是 `cancel()` 短路要防的那个
+  回收风险不存在于这里。反方案（去掉短路）会让**每次正常退出**都补发一次信号，把 pid 回收风险摊到干净路径上，
+  因此被否。干净路径（`close` 先赢）依旧**一个信号都不发**。
+
+**测试**：`tests/kernel/spawn.test.ts:216-274`（fixture `sh -c 'sleep 30 & echo "pid:$!"; exit 0'`，从 stdout 行
+取后代 pid，`exited` 后有界轮询 `processGone`；`finally` 兜底 SIGKILL 以免守卫失效时留下 `sleep 30`）。
+
+**红（=修复前源码）**：`… run tests/kernel/spawn.test.ts` → `1 failed | 15 passed`，
+`AssertionError: expected false to be true`（2s 有界等待后后代仍活）。**绿**：`16 passed`。
+**负控（常驻）**：`sh -c 'exit 0'`（无后代）→ `close` 先赢、不付 drain 窗口、不产生信号、进程已消失；
+`MI-6` 原用例（300ms 结算 + 尾行 flush）不变。
+
+### 逐条门禁（每完成一条即全跑，均为真实数字）
+
+| 完成项 | vitest | `tsc --noEmit` | `tsc -p tsconfig.tests.json` | build.mjs | build-client.mjs | verify_plugin.py |
+|---|---|---|---|---|---|---|
+| RR-IM-1 | 876 passed / 1 skipped（877） | 0 | 0 | OK | OK | 11/11 |
+| RR-IM-2 | 879 / 1（880） | 0 | 0 | OK | OK | 11/11 |
+| RR-IM-3 | 881 / 1（882） | 0 | 0 | OK | OK | 11/11 |
+| RR-IM-4 | 883 / 1（884）* | 0 | 0 | OK | OK | 11/11 |
+| 终态（本记录） | **883 passed / 1 skipped（884）** | **0** | **0** | `lib/index.js` **370.2kb** | `lib/client.js` **74.7kb** | **11/11 PASS** |
+
+\* RR-IM-4 首跑被新装的第二类型门禁抓到 `tests/kernel/spawn.test.ts(244,27): error TS2345`
+（`processGone(descendantPid)` 的 `number | undefined`），修断言后转 883；这正是 IM-14 那道门禁存在的意义。
+
+**文件与行区间**：`src/kernel/session.ts:30-44,69-92,141-167,218-231,253-261` ·
+`src/kernel/manager.ts:148-162,190-200,272-390,466-490,499-514,613-631,847-892` ·
+`src/kernel/spawn.ts:43-48,296-326,453-471` · `src/kernel/store.ts:43-66,137-149` ·
+`src/kernel/types.ts:64-73,378-403` · `tests/kernel/session.test.ts:132-199` ·
+`tests/kernel/manager-lifecycle.test.ts:144-198,212-239,291-352` ·
+`tests/kernel/manager-recover.test.ts:62-297` · `tests/kernel/manager-resume.test.ts:194-274,276-330` ·
+`tests/kernel/spawn.test.ts:177-274`。
+
+### 如实记账（本批留下的接缝）
+
+1. **表面层还没消费新字段**（属后续批次，本批的 HARD RULE 明确禁止改 `src/host/**`、`src/tools/**`）：
+   `agents_output` / `host/api.ts` 仍按 `index = sinceIndex + offset` 标注事件索引。当调用方落后于保留窗口时，
+   kernel 现在会返回**从 `firstIndex` 开始**的事件，而表面层仍按调用方给的 `sinceIndex` 起算 → 那一段的 `index`
+   会偏小。事件本身不漏（`nextIndex` 绝对且 `dropped` 已暴露），但表面层应当用 `read.firstIndex` 作为起点并把
+   `read.dropped` 渲染成提示。**这是批次 B/C 或表面批的待办，此处如实登记，不冒充已修。**
+2. `dropped` 目前只在 kernel 读接口暴露，**没有任何面向模型的文案**说「transcript 被截断」；
+   旧文案随 marker 一起删除。表面层补提示前，模型看到的是一段没有告警的短 transcript（数据上诚实、呈现上仍是缺口）。
+3. RR-IM-2 牺牲了「同进程 HMR 重载后回收上一实例残留子进程」的旧行为（同进程 pid 视为存活 → 不回收）。
+   这是「宁可漏杀不可错杀」的取向，已在 §O-5 的「附加字段、无需裁决」前提下选定。

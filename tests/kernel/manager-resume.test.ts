@@ -25,7 +25,15 @@ import { createBackend } from '../../src/drivers/index.ts'
 import { installDriverRuntime } from '../../src/integrate.ts'
 import { createLogger } from '../../src/kernel/logger.ts'
 import { createAgentManager } from '../../src/kernel/manager.ts'
-import type { AgentDescriptor, AgentManager, ManagerOptions } from '../../src/kernel/types.ts'
+import { createSessionStore, type StoredSession } from '../../src/kernel/store.ts'
+import type {
+  AgentBackend,
+  AgentDescriptor,
+  AgentManager,
+  AgentResult,
+  AgentSessionHandle,
+  ManagerOptions,
+} from '../../src/kernel/types.ts'
 import { ManagerPool, NODE, sleep, waitTerminal } from '../helpers/manager-harness.ts'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -180,5 +188,147 @@ describe('the resume pointer survives a restart', () => {
     expect(recovered).toBeDefined()
     expect(recovered?.terminal).toBe(true)
     expect(recovered?.status).not.toBe('running')
+  })
+})
+
+/**
+ * A handle that publishes `live-A` mid-run and then reports the engine REFUSED
+ * that resume.
+ *
+ * This is the claude driver's shape exactly: it pins `parser.state.sessionId`
+ * while running, and on a rejected resume it calls
+ * `DriverSession.settleBackendSessionId('')` — which clears the handle's own
+ * getter — and reports a terminal result that omits `backendSessionId`.
+ *
+ * With `clear: false` the same driver instead cannot tell whether the
+ * conversation is resumable (a cancel/timeout), so it leaves the getter
+ * answering: the manager must then KEEP the pin (IM-5's cancelled fallback).
+ */
+function resumeRefusingBackend(options: { clear: boolean }): AgentBackend {
+  let sessionId = ''
+  return {
+    family: 'claude',
+    async run(opts) {
+      sessionId = `refused_${opts.agent}`
+      const startedAt = Date.now()
+      let observed: string | undefined = FAKE_BACKEND_SESSION
+      let resolveDone: (result: AgentResult) => void = () => {}
+      const done = new Promise<AgentResult>((resolve) => {
+        resolveDone = resolve
+      })
+      const handle: AgentSessionHandle = {
+        sessionId,
+        agentId: opts.agent,
+        startedAt,
+        get messages() {
+          return []
+        },
+        get backendSessionId() {
+          return observed
+        },
+        done,
+        async cancel() {},
+        snapshot: () => ({
+          sessionId,
+          agentId: opts.agent,
+          status: 'running',
+          startedAt,
+          messageCount: 0,
+          terminal: false,
+        }),
+      }
+      // Long enough for the manager to observe and persist the pointer.
+      setTimeout(() => {
+        if (options.clear) observed = undefined
+        resolveDone({
+          sessionId,
+          agentId: opts.agent,
+          status: 'failed',
+          exitCode: 1,
+          text: '',
+          error: options.clear
+            ? 'the engine rejected the resume: session not found'
+            : 'cancelled before the run could settle',
+          durationMs: 1,
+        })
+      }, 250)
+      return handle
+    },
+  }
+}
+
+function refusingManager(storeDir: string, options: { clear: boolean }): AgentManager {
+  return pool.add(
+    createAgentManager({
+      logger: createLogger('resume-refused-test'),
+      storeDir,
+      defaultCwd: tmpdir(),
+      createBackend: () => resumeRefusingBackend(options),
+      scan: false,
+    }),
+  )
+}
+
+function storedRow(storeDir: string, sessionId: string): StoredSession | undefined {
+  return createSessionStore({ dir: storeDir }).reload().find((row) => row.sessionId === sessionId)
+}
+
+describe('RR-IM-3: a REFUSED resume must not leave a dead pointer', () => {
+  it('clears the pointer the driver cleared instead of re-installing the pin', async () => {
+    const storeDir = mkdtempSync(path.join(tmpdir(), 'bridge-resume-refused-'))
+    const manager = refusingManager(storeDir, { clear: true })
+    const started = await manager.run({
+      agent: 'claude',
+      prompt: 'continue this',
+      resumeSessionId: FAKE_BACKEND_SESSION,
+      timeoutMs: 0,
+    })
+
+    // IM-5 still holds: the observed id IS persisted while the run is live, so a
+    // crash here could not lose a resumable conversation.
+    await sleep(150)
+    expect(storedRow(storeDir, started.sessionId)?.status).toBe('running')
+    expect(storedRow(storeDir, started.sessionId)?.backendSessionId).toBe(FAKE_BACKEND_SESSION)
+
+    const finished = await waitTerminal(manager, started.sessionId)
+    expect(finished.status).toBe('failed')
+    // The driver reported no id, and it CLEARED the one it had observed: the
+    // terminal row must not resurrect it (the manager used to fall back to the
+    // pin, which made `agents_send` retry the refused resume forever).
+    expect(finished.result?.backendSessionId).toBeUndefined()
+    expect(storedRow(storeDir, started.sessionId)?.backendSessionId).toBeUndefined()
+
+    // And a restart — the path the finding names — must not republish it either.
+    await manager.dispose()
+    const restarted = pool.add(
+      createAgentManager({
+        logger: createLogger('resume-refused-test'),
+        storeDir,
+        defaultCwd: tmpdir(),
+        createBackend: () => resumeRefusingBackend({ clear: true }),
+        scan: false,
+      }),
+    )
+    const recovered = restarted.status(started.sessionId)
+    expect(recovered?.result?.backendSessionId).toBeUndefined()
+    await expect(restarted.send(started.sessionId, 'continue')).rejects.toThrow(/cannot resume/)
+  })
+
+  it('negative control: a driver that did NOT clear keeps the pinned pointer', async () => {
+    // Same shape, but the terminal result omits the id while the handle still
+    // answers — a cancel/timeout, where the conversation may be perfectly
+    // resumable. The fallback to the mid-run pin is the IM-5 behaviour and must
+    // survive: the guard keys on the CLEAR, not merely on a missing field.
+    const storeDir = mkdtempSync(path.join(tmpdir(), 'bridge-resume-kept-'))
+    const manager = refusingManager(storeDir, { clear: false })
+    const started = await manager.run({
+      agent: 'claude',
+      prompt: 'continue this',
+      resumeSessionId: FAKE_BACKEND_SESSION,
+      timeoutMs: 0,
+    })
+    await waitTerminal(manager, started.sessionId)
+
+    expect(storedRow(storeDir, started.sessionId)?.backendSessionId).toBe(FAKE_BACKEND_SESSION)
   })
 })

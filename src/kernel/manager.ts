@@ -145,6 +145,20 @@ interface LiveSession {
    */
   readonly forced: Promise<void>
   readonly resolveForced: () => void
+  /**
+   * The driver reported that the conversation id it had observed is NOT
+   * resumable (RR-IM-3).
+   *
+   * Set when the driver's terminal result arrives without an id WHILE its own
+   * handle getter has stopped answering, although the manager had pinned a value
+   * mid-run — the shape `DriverSession.settleBackendSessionId('')` produces for
+   * a refused resume. The pin must then be discarded, not re-installed: a dead
+   * pointer makes every later `agents_send` retry a resume the engine already
+   * refused, forever. A driver that leaves its getter answering (claude's
+   * cancel/timeout path) never sets this, so IM-5's fallback to the pin stands
+   * for a run that was killed before it could learn whether it was resumable.
+   */
+  driverClearedPointer: boolean
   handle: AgentSessionHandle | undefined
   poll: NodeJS.Timeout | undefined
   /** Process-group leader pid, persisted so a restart can reap the tree (IM-4). */
@@ -173,6 +187,15 @@ function settleWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
   })
 }
 
+/**
+ * Clamp a caller-supplied cursor into `[0, max]`.
+ *
+ * `max` is always an ABSOLUTE index (the end of the retained window), never an
+ * array length — the transcript ring drops old events, so array positions and
+ * absolute positions differ once anything has been discarded (RR-IM-1). A
+ * cursor past the end is pinned to the end rather than dropped, so a caught-up
+ * reader still advances as soon as new events arrive.
+ */
 function clampIndex(value: number, max: number): number {
   if (!Number.isFinite(value) || value <= 0) return 0
   return Math.min(Math.floor(value), max)
@@ -249,11 +272,16 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
   /**
    * Kill the process tree a dead host left behind, guarding against PID REUSE.
    *
-   * The stored `running` row names a pid that belonged to OUR child when it was
-   * written. After a restart that pid may have been recycled by an unrelated
-   * process, so the pid is only a usable identity together with the moment its
-   * process started: signal the group only when the live process really is the
+   * Only ever called once the OWNER is verifiably gone (RR-IM-2): the stored
+   * `running` row names a pid that belonged to OUR child when it was written,
+   * but after a restart that pid may have been recycled by an unrelated process.
+   * The pid is therefore only a usable identity together with the moment its
+   * process started — signal the group only when the live process really is the
    * one this session spawned. A reused pid is logged and left strictly alone.
+   *
+   * The child guard is NOT the ownership check: a second host sharing
+   * `DSH_HOME` sees a perfectly matching child pid for a session that is still
+   * live. That is what `ownerIsGone` adds before this is reached.
    */
   function reapOrphan(record: StoredSession): void {
     const pid = record.pid
@@ -286,21 +314,91 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
     })
   }
 
-  for (const record of store.reload()) {
-    if (record.status === 'running') {
-      // The process that owned this run is gone, so claiming `running` would be
-      // a lie; record the truth and stop advertising it as live.
-      const stale: StoredSession = {
-        ...record,
-        status: 'failed',
-        endedAt: record.endedAt ?? Date.now(),
-      }
-      rememberRestored(stale)
-      store.upsert(stale)
-      reapOrphan(record)
-    } else {
-      rememberRestored(record)
+  /**
+   * Does a persisted `running` row still belong to a live host? (RR-IM-2)
+   *
+   * Every persisted `running` row used to be treated as "a dead host's orphan",
+   * with only a pid-reuse start-time delta standing between it and a SIGKILL of
+   * its whole process group. A second host — or a second plugin instance — over
+   * the same `DSH_HOME` therefore killed the first host's live agent trees and
+   * rewrote their rows to `failed`.
+   *
+   * Returns `false` only when the owner is VERIFIABLY gone: either its pid no
+   * longer answers, or the pid answers as a different process (start time
+   * disagrees, i.e. it was recycled). Rows with no owner evidence at all are
+   * unknown, and unknown is never treated as dead.
+   */
+  function ownerIsGone(record: StoredSession): boolean {
+    const ownerPid = record.ownerPid
+    if (ownerPid === undefined) {
+      logger.warn('recovered running row carries no owner evidence; leaving it alone', {
+        sessionId: record.sessionId,
+        pid: record.pid,
+      })
+      return false
     }
+    if (!reaper.isAlive(ownerPid)) return true
+    const ownerStartedAt = record.ownerStartedAt
+    if (ownerStartedAt === undefined) {
+      // The owner answers but the row never recorded when it started, so a
+      // recycled pid cannot be ruled out. Ambiguous evidence: do not signal.
+      logger.warn('recovered owner is alive but has no recorded start time; not signalling', {
+        sessionId: record.sessionId,
+        ownerPid,
+      })
+      return false
+    }
+    const liveStart = reaper.startTimeMs(ownerPid)
+    if (liveStart === undefined) return false
+    if (Math.abs(liveStart - ownerStartedAt) <= ORPHAN_CLOCK_SLACK_MS) return false
+    logger.warn('recovered owner pid was reused by another process', {
+      sessionId: record.sessionId,
+      ownerPid,
+      ownerStartedAt,
+      pidStartedAt: liveStart,
+    })
+    return true
+  }
+
+  /**
+   * The owner evidence THIS host writes onto every `running` row it persists:
+   * its own pid plus the moment that process started. Captured once, so every
+   * row of one host life carries the same token and a later host can tell
+   * "another live host owns this" from "the owner is gone".
+   */
+  const ownerPid = process.pid
+  const ownerStartedAt = reaper.startTimeMs(ownerPid)
+
+  for (const record of store.reload()) {
+    if (record.status !== 'running') {
+      rememberRestored(record)
+      continue
+    }
+    if (!ownerIsGone(record)) {
+      // Another live host (or an unprovable owner) owns this row. Leave the row
+      // AND its process tree strictly alone: `status()` still reports it as not
+      // live HERE, which is all this host can honestly claim.
+      rememberRestored(record)
+      continue
+    }
+    // The owner is gone, so claiming `running` would be a lie; record the truth
+    // and stop advertising it as live. The stale row deliberately drops the pid
+    // and the owner token: a `failed` row must never invite a later restart to
+    // signal a pid the OS may since have recycled.
+    const stale: StoredSession = {
+      sessionId: record.sessionId,
+      agentId: record.agentId,
+      status: 'failed',
+      startedAt: record.startedAt,
+      endedAt: record.endedAt ?? Date.now(),
+      ...(record.backendSessionId !== undefined ? { backendSessionId: record.backendSessionId } : {}),
+      ...(record.cwd !== undefined ? { cwd: record.cwd } : {}),
+      ...(record.model !== undefined ? { model: record.model } : {}),
+      ...(record.resumedFrom !== undefined ? { resumedFrom: record.resumedFrom } : {}),
+    }
+    rememberRestored(stale)
+    store.upsert(stale)
+    reapOrphan(record)
   }
 
   /* -------------------------------------------------------------- helpers */
@@ -375,8 +473,15 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
     // perfectly resumable, and dropping it is the IM-5 loss. While running,
     // prefer what the driver has already observed, then the id a resumed run was
     // started with.
+    //
+    // RR-IM-3: the fallback only applies when the driver did NOT clear the
+    // pointer. A driver that observed an id and then rejected the resume clears
+    // its own getter (see `driverClearedPointer`); re-installing the pin there is
+    // exactly the "dead pointer" IM-5 promised not to persist.
     const backendSessionId = terminal
-      ? (snapshot.result?.backendSessionId ?? rec.session.pinnedBackendSessionId)
+      ? rec.driverClearedPointer
+        ? undefined
+        : (snapshot.result?.backendSessionId ?? rec.session.pinnedBackendSessionId)
       : (rec.handle?.backendSessionId ??
         rec.session.pinnedBackendSessionId ??
         snapshot.result?.backendSessionId ??
@@ -394,8 +499,16 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
       ...(rec.options.model !== undefined ? { model: rec.options.model } : {}),
       ...(rec.resumedFrom !== undefined ? { resumedFrom: rec.resumedFrom } : {}),
       // Only a RUNNING row carries a pid: a terminal row must never invite the
-      // post-restart reaper to signal a pid the OS may since have recycled.
-      ...(rec.pid !== undefined && !terminal ? { pid: rec.pid } : {}),
+      // post-restart reaper to signal a pid the OS may since have recycled. The
+      // owner evidence travels with it — without it a later host cannot tell
+      // this host's live run from a dead host's orphan (RR-IM-2).
+      ...(rec.pid !== undefined && !terminal
+        ? {
+            pid: rec.pid,
+            ownerPid,
+            ...(ownerStartedAt !== undefined ? { ownerStartedAt } : {}),
+          }
+        : {}),
     }
   }
 
@@ -500,6 +613,19 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
       ])
       if (outcome !== undefined) {
         syncFromHandle(rec)
+        // RR-IM-3: a driver that observed a conversation id and then learned it
+        // is NOT resumable clears its own handle getter
+        // (`DriverSession.settleBackendSessionId('')`) and reports a terminal
+        // result without the field. A getter that has gone from answering to
+        // silent while a pin exists is that CLEAR — distinguishable from
+        // "never seen", where there is no pin to contradict. Record it before
+        // `settleFromDriver`, because the terminal store write that follows must
+        // not fall back to the pin.
+        const observed = rec.handle?.backendSessionId
+        rec.driverClearedPointer =
+          observed === undefined &&
+          outcome.backendSessionId === undefined &&
+          rec.session.pinnedBackendSessionId !== undefined
         settleFromDriver(rec, outcome)
       }
     } catch (err) {
@@ -667,6 +793,7 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
       handle: undefined,
       poll: undefined,
       pid: undefined,
+      driverClearedPointer: false,
       ...(resumedFrom !== undefined ? { resumedFrom } : {}),
     }
 
@@ -721,16 +848,33 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
       const rec = live.get(sessionId) ?? finished.get(sessionId)
       if (rec) {
         syncFromHandle(rec)
+        // The window the session retains, and its ABSOLUTE base. Every index on
+        // the way out is absolute: a caller's cursor survives the ring trimming,
+        // so a lagging read reports the events it lost instead of silently
+        // skipping and a caught-up read never wedges (RR-IM-1).
         const messages: readonly AgentMessage[] = rec.session.messages
-        const start = clampIndex(outputOptions?.sinceIndex ?? 0, messages.length)
+        const firstIndex = rec.session.firstIndex
+        const end = firstIndex + messages.length
+        const requested = outputOptions?.sinceIndex ?? 0
+        const cursor = clampIndex(requested, end)
+        // Below the retained window the events are gone for good; start at the
+        // oldest one that still exists and say how many were missed.
+        const startIndex = Math.max(cursor, firstIndex)
+        const start = startIndex - firstIndex
         const limit = outputOptions?.limit
-        const end =
-          limit !== undefined && limit > 0 ? Math.min(messages.length, start + limit) : messages.length
+        const stop =
+          limit !== undefined && limit > 0
+            ? Math.min(messages.length, start + limit)
+            : messages.length
         return {
           sessionId,
           status: rec.session.snapshot().status,
-          messages: messages.slice(start, end),
-          nextIndex: end,
+          messages: messages.slice(start, stop),
+          firstIndex,
+          // ABSOLUTE, monotonic, and never an array position: it is the index of
+          // the first event the caller has not seen.
+          nextIndex: firstIndex + stop,
+          dropped: Math.max(0, startIndex - cursor),
         }
       }
       const stored = restored.get(sessionId)
@@ -741,7 +885,9 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
         sessionId,
         status: restoredSnapshot(stored).status,
         messages: [],
+        firstIndex: 0,
         nextIndex: 0,
+        dropped: 0,
       }
     },
 
