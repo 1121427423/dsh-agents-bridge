@@ -470,3 +470,35 @@ TS2322、TS2349）是**脱离工程 tsconfig 独立编译的假象**，不计入
 - §E 的 B5 中 **MI-10 · MI-11 · MI-12 · MI-13 · MI-14 · MI-15**（client + docs 指标表）属 B5b，本批未动。
 - §A 与 §E 中这六行的状态列仍是 `verified` / `pending` —— 按"本文件由监理维护、只追加不删"的约定，
   本批**没有**改它们；请监理复核后按 §L 翻状态。
+
+## M. 收尾：权威终态（2026-09-18，监理）
+
+**本节取代 §A / §E 里所有滞后的状态列。** 凡本节标 `fixed` 者，监理都在**最终树上独立复跑过全门禁**，
+并至少用**自己写的 oracle 或负控**复核过一次 —— 不是转述执行方的自述。
+
+| 批次 | 提交 | 范围 | 监理的独立验证 |
+|---|---|---|---|
+| B1 | `c554a6f` | IM-2 · IM-3 | 785/1 · 自验负控（把新字段翻回 `false` → 真红）· watchdog oracle 前后对比 |
+| B2 | `c56ca53` | IM-4 · IM-5 · IM-6 · IM-7 · MI-2 · MI-3 · MI-6 · MI-7 · MI-8 | 808/1 · 零负控残留 · 零 stash · **IM-6 oracle：`A,C` → `A,B,C`** |
+| B3 | `c3a4a6e` | IM-8 · IM-9 · MI-4 · MI-5 · MI-18 | 830/1 · **IM-9 oracle（修正参数后）VERBATIM ok** |
+| B3b | `3f149c0` | IM-15 · MI-16 · MI-17 · MI-19 · MI-20 · MI-21 · IM-14 | 857/1 · **新装的 `tsc -p tsconfig.tests.json` 0 错** · **MI-16/MI-17 oracle 由 `true` 翻 `false`** |
+| B4 | `7c3ea81` | IM-1 · IM-10 · IM-11 · IM-12 · IM-13 · MI-9 | 同轮门禁 · 读码确认信任契约（**候选而非引擎** + 操作员 opt-in + provenance 只作自洽检查） |
+| B5a | `b1edc88` | IM-16 · IM-17 · IM-18 · IM-19 · MI-1 · MI-22 | 869/1 · tsc(src+tests) 0 · 双构建 · verify 11/11 · **Origin oracle 六行全 `ok`** |
+
+**终态门禁（最终树，监理亲跑）**：`vitest` **869 passed / 1 skipped（870）** · `tsc --noEmit` **0** ·
+`tsc --noEmit -p tsconfig.tests.json` **0** · 双构建 OK（`lib/index.js` 367.6kb / `lib/client.js` 73.8kb）·
+`verify_plugin.py` **11/11 PASS**。
+
+**唯一未修（6 条）**：**MI-10 · MI-11 · MI-12 · MI-13 · MI-14 · MI-15** —— client 组，全部是复核后的
+**降级项**（真实但被高估），无 IM 级遗漏。每条的位置、判定理由、修复方向与测试配方都在 **§G-2** 的
+对应行（FIX/TEST）里，可直接派一批收掉，无需重读本文件以外的东西。
+
+**记账缺口（如实记）**：B3b 未按其 brief 追加 `## K` 记录、也未翻 §A 状态；本节即权威补齐。
+B5a 按约定只追加 §L、未改旧行（它明确注明"请监理复核后按 §L 翻状态"）。**因此看 §A/§E 的状态列会读到
+过时信息，一律以本节为准。**
+
+**自纠记录（本轮共 5 次，值得单独留档）**：监理 3 次 —— ① IM-6 复现脚本漏建目录 → 磁盘根本没写却输出
+"DEFECT REPRODUCED"；② 同脚本漏 `reload()`（store 构造时不读盘）→ 错误中间态；③ MI-16 对照测错层
+（`--mcp-config` 由 runner 追加，不在 args builder 里）；④ IM-9 oracle 参数过期（修复新增
+`preserveBlankLines`，旧脚本没传）。执行方 2 次（B3 的 MI-18 对照、B5a 报告内自述）。
+**共同教训：修复若改的是接缝而非症状，旧 oracle 会失效 —— 此时先怀疑判据，而不是宣判修复失败。**
