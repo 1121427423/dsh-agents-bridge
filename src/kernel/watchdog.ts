@@ -72,13 +72,35 @@ export const systemClock: Clock = {
 export const MAX_TIMER_DELAY_MS = 2_147_483_647
 
 /**
+ * Normalize one run window (`timeoutMs` / `idleTimeoutMs`) to a value a timer
+ * can hold (RR-MI-9).
+ *
+ * `0` is the ONLY non-positive value with a meaning — "no deadline" — so every
+ * other non-positive value and every non-finite one collapses onto it instead
+ * of travelling on as a negative number. That matters because
+ * `setTimeout(fn, -1)` fires IMMEDIATELY, and so does `setTimeout(fn, 0.5)`:
+ * a fraction below one millisecond used to be floored to `0` AFTER the
+ * "is it positive?" test, arming a 0 ms timer that ended the run as a timeout
+ * three milliseconds in. Fractions above 1 ms are floored, and anything above
+ * the runtime ceiling is lowered to it.
+ *
+ * Exported so the tool face and the kernel share ONE rule, the way they already
+ * share {@link MAX_TIMER_DELAY_MS}.
+ */
+export function normalizeRunWindowMs(ms: number): number {
+  if (!Number.isFinite(ms) || ms <= 0) return 0
+  return Math.min(Math.floor(ms), MAX_TIMER_DELAY_MS)
+}
+
+/**
  * Normalize a user-supplied window: non-finite/non-positive disables the timer,
  * and anything above the runtime ceiling is LOWERED to it (never passed
  * through, which the runtime would collapse to 1 ms).
  */
 function positive(value: number | undefined): number | undefined {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined
-  return Math.min(Math.floor(value), MAX_TIMER_DELAY_MS)
+  if (typeof value !== 'number') return undefined
+  const normalized = normalizeRunWindowMs(value)
+  return normalized > 0 ? normalized : undefined
 }
 
 export function createWatchdog(options: WatchdogOptions): Watchdog {

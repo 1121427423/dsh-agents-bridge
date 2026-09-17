@@ -39,7 +39,7 @@ import { createRegistry, type AgentRegistry, type ResolvedIdentity } from './reg
 import { createAgentSession, type AgentSession, type SessionCompletion } from './session.ts'
 import { createProcessReaper, type ProcessReaper } from './spawn.ts'
 import { createSessionStore, type StoredSession } from './store.ts'
-import { createWatchdog, type Watchdog } from './watchdog.ts'
+import { createWatchdog, normalizeRunWindowMs, type Watchdog } from './watchdog.ts'
 import type { ScanOptions } from '../tracks/desktop/scan.ts'
 
 /**
@@ -735,6 +735,17 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
       ...runOptions,
       cwd,
       ...(model !== undefined ? { model } : {}),
+      // RR-MI-9: a run window is normalized WHERE IT ENTERS THE KERNEL, not
+      // only when it is armed. `0` is the one non-positive value with a meaning
+      // ("no deadline"); a negative or sub-millisecond value must land on it
+      // here, so no consumer downstream of this line — the watchdog, a driver,
+      // a resumed run — can see a number that `setTimeout` would fire at once.
+      ...(runOptions.timeoutMs === undefined
+        ? {}
+        : { timeoutMs: normalizeRunWindowMs(runOptions.timeoutMs) }),
+      ...(runOptions.idleTimeoutMs === undefined
+        ? {}
+        : { idleTimeoutMs: normalizeRunWindowMs(runOptions.idleTimeoutMs) }),
     }
 
     const sessionId = `sess_${randomUUID()}`

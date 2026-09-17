@@ -29,7 +29,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { AgentManager, AgentMessage, AgentResult, SessionSnapshot } from '../kernel/types.ts'
 import { AgentRunRejectedError } from '../kernel/types.ts'
-import { MAX_TIMER_DELAY_MS } from '../kernel/watchdog.ts'
+import { MAX_TIMER_DELAY_MS, normalizeRunWindowMs } from '../kernel/watchdog.ts'
 import type { JobSeat } from '../host/jobs.ts'
 import { redactSecrets } from '../tracks/host-files.ts'
 
@@ -73,9 +73,54 @@ export const DEFAULT_WAIT_TIMEOUT_MS = 20_000
  * the kernel, exactly as `agents_wait` caps its own window at
  * `MAX_WAIT_TIMEOUT_MS`; the watchdog applies the same clamp again for callers
  * that reach the kernel directly.
+ *
+ * RR-MI-9: it is the kernel's own {@link normalizeRunWindowMs}, not a second
+ * spelling of it. Besides the ceiling it also collapses every non-finite and
+ * every non-positive value onto `0` — the one non-positive value with a
+ * meaning — so a `-1` or a `0.5` (which `setTimeout` would fire at once) cannot
+ * reach the kernel through this door either.
  */
 function capRunWindow(ms: number): number {
-  return Math.min(Math.floor(ms), MAX_TIMER_DELAY_MS)
+  return normalizeRunWindowMs(ms)
+}
+
+/**
+ * The model-facing floor for `idleTimeoutMs` (RR-MI-9).
+ *
+ * The tool schema DSL has no `minimum` keyword (`defineTool` rejects one:
+ * "parameters.idleTimeoutMs.minimum is not supported by the value schema DSL"),
+ * so the bound this ledger asks for is enforced HERE, where a value refused
+ * with a sentence is worth more to the model than a validation error — and the
+ * description above the knob states it too, because that is the part the model
+ * actually reads.
+ *
+ * `0` is deliberately NOT accepted: at the kernel it means "no deadline", so an
+ * idle window of 0 silently disables the idle watchdog, which is the opposite
+ * of what a caller writing a small number meant. Omitting the knob is the way
+ * to ask for the family default.
+ */
+const MIN_IDLE_WINDOW_MS = 1
+
+/** The refusal copy for an `idleTimeoutMs` below {@link MIN_IDLE_WINDOW_MS}. */
+function idleWindowRefusal(value: number): string {
+  return `idleTimeoutMs must be at least ${MIN_IDLE_WINDOW_MS} ms; got ${String(value)}. `
+    + 'Omit it to use this agent family\'s default idle window (claude/codebuddy: 30 minutes, '
+    + 'others 5-10 minutes), or pass the number of milliseconds of silence that should fail the run.'
+}
+
+/**
+ * Normalize one `idleTimeoutMs`.
+ *
+ * Throws {@link idleWindowRefusal} for a value below the floor, so the caller
+ * can either let it out as a tool error (single run) or report it per entry
+ * (batch) — but it must never reach `describeRunFailure`, whose tail copy
+ * ("nothing was started, check the concurrency cap") would be noise here.
+ */
+function idleWindow(value: number | undefined): number | undefined {
+  if (value === undefined) return undefined
+  const normalized = capRunWindow(value)
+  if (normalized < MIN_IDLE_WINDOW_MS) throw new Error(idleWindowRefusal(value))
+  return normalized
 }
 
 /**
@@ -218,6 +263,14 @@ function renderExecutablePath(raw: string): string {
   if (safe.length <= MAX_RENDERED_PATH_CHARS) return safe
   const head = Math.ceil((MAX_RENDERED_PATH_CHARS - 1) / 2)
   const tail = MAX_RENDERED_PATH_CHARS - 1 - head
+  // Both cuts are counted in UTF-16 CODE UNITS, and an astral character — an
+  // emoji in a bundle directory name, which is attacker-chosen under the
+  // user-writable `~/Applications` — is TWO of them. Either cut can therefore
+  // land INSIDE a pair and emit a lone half: a 😀 straddling the head cut
+  // rendered as `…a\ud83d…`, a row carrying invalid UTF-16 that every reader
+  // downstream has to survive (SV-1). Step each cut off the pair instead of
+  // slicing through it — the elision stays inside its 200-unit budget, both
+  // ends stay recognisable, and an ASCII path is elided exactly as before.
   return `${safe.slice(0, head)}…${safe.slice(safe.length - tail)}`
 }
 
@@ -666,10 +719,11 @@ export function createToolDefinitions(manager: AgentManager, seat: JobSeat = {})
       idleTimeoutMs: {
         type: 'integer',
         description:
-          'No-output window in ms before the run is failed, capped at '
-          + `${MAX_TIMER_DELAY_MS}. Omitted = the per-family default (30 minutes for claude/codebuddy, who emit `
-          + 'nothing for the whole duration of a tool call; 5-10 minutes elsewhere). Lower it to catch a wedged engine '
-          + 'sooner, or raise it if this task legitimately spends longer than that in one tool call.',
+          `No-output window in ms before the run is failed; ${MIN_IDLE_WINDOW_MS}..${MAX_TIMER_DELAY_MS}. Omitted = `
+          + 'the per-family default (30 minutes for claude/codebuddy, who emit nothing for the whole duration of a '
+          + 'tool call; 5-10 minutes elsewhere). Lower it to catch a wedged engine sooner, or raise it if this task '
+          + 'legitimately spends longer than that in one tool call. 0 is NOT "no idle deadline" — omit the knob for '
+          + 'the default instead.',
       },
       mode: {
         type: 'string',
@@ -712,6 +766,11 @@ export function createToolDefinitions(manager: AgentManager, seat: JobSeat = {})
       // The kernel's `run()` resolves once the child is spawned and the session
       // is registered — it does NOT await `done`. Everything optional is spread
       // conditionally so an omitted knob is absent rather than `undefined`.
+      // RR-MI-9: refused BEFORE the run starts — both so a window that is not
+      // a window never reaches the kernel, and so the refusal goes to the model
+      // as itself instead of wearing `describeRunFailure`'s "nothing was
+      // started" tail.
+      const idleTimeoutMs = idleWindow(args.idleTimeoutMs)
       let snapshot: SessionSnapshot
       try {
         snapshot = await manager.run({
@@ -721,7 +780,7 @@ export function createToolDefinitions(manager: AgentManager, seat: JobSeat = {})
           ...(args.model === undefined ? {} : { model: args.model }),
           ...(args.effort === undefined ? {} : { effort: args.effort }),
           ...(args.timeoutMs === undefined ? {} : { timeoutMs: capRunWindow(args.timeoutMs) }),
-          ...(args.idleTimeoutMs === undefined ? {} : { idleTimeoutMs: capRunWindow(args.idleTimeoutMs) }),
+          ...(idleTimeoutMs === undefined ? {} : { idleTimeoutMs }),
           ...(args.mode === undefined ? {} : { mode: args.mode }),
         })
       } catch (err) {
@@ -790,8 +849,9 @@ export function createToolDefinitions(manager: AgentManager, seat: JobSeat = {})
             idleTimeoutMs: {
               type: 'integer',
               description:
-                `No-output window in ms for this entry, capped at ${MAX_TIMER_DELAY_MS}. Omitted = the per-family `
-                + 'default; raise it for an entry whose single tool call legitimately runs longer than that.',
+                `No-output window in ms for this entry; ${MIN_IDLE_WINDOW_MS}..${MAX_TIMER_DELAY_MS}. Omitted = the `
+                + 'per-family default; raise it for an entry whose single tool call legitimately runs longer than '
+                + 'that. 0 is not accepted — omit the knob for the default.',
             },
           },
         },
@@ -900,6 +960,19 @@ export function createToolDefinitions(manager: AgentManager, seat: JobSeat = {})
           })
           continue
         }
+        // Same floor as `agents_run`, per entry — and refused the same way the
+        // other per-entry refusals are: reported as that entry's error, with no
+        // `describeRunFailure` tail (the batch may well have started others).
+        const rawIdle = entry.idleTimeoutMs
+        if (rawIdle !== undefined && capRunWindow(rawIdle) < MIN_IDLE_WINDOW_MS) {
+          results.push({
+            index,
+            agent,
+            started: false,
+            error: `runs[${index}] (${agent}): ${idleWindowRefusal(rawIdle)}`,
+          })
+          continue
+        }
         try {
           const snapshot = await manager.run({
             agent,
@@ -908,9 +981,7 @@ export function createToolDefinitions(manager: AgentManager, seat: JobSeat = {})
             ...(entry.model === undefined ? {} : { model: entry.model }),
             ...(entry.effort === undefined ? {} : { effort: entry.effort }),
             ...(entry.timeoutMs === undefined ? {} : { timeoutMs: capRunWindow(entry.timeoutMs) }),
-            ...(entry.idleTimeoutMs === undefined
-              ? {}
-              : { idleTimeoutMs: capRunWindow(entry.idleTimeoutMs) }),
+            ...(rawIdle === undefined ? {} : { idleTimeoutMs: capRunWindow(rawIdle) }),
           })
           // One job PER ENTRY, not one for the batch: a fan-out's whole point is
           // that the caller learns about each session as it lands, and a batch
