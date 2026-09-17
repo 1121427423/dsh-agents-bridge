@@ -297,3 +297,23 @@ text: OK1
   **注意：我没有重启桌面端**（它就是当前会话的宿主）——只重启了 43121 上那个独立 web 测试宿主。
 
 
+
+## 记录 8 — ZCode 桌面端账号无模型授权：`Select a model before continuing`（**账号/授权故障，只记录、不绕过**）
+
+- **现象（真机，2026-09-17，ZCode 0.16.5）**：按官方形态拉起包内 CLI（见
+  `docs/findings-zcode-headless.md` §1 的启动配方），会话可创建、`--output-format stream-json`
+  可出事件，但每个 turn 立即失败：
+  `{"type":"turn.failed","payload":{"error":{"code":"CONFIGURATION_ERROR","message":"Select a model before continuing"},"turnPhase":"model_creation"}}`
+- **根因链（全部已证）**：① headless 的模型来自 provider-config 存储里的 `config.defaultModelSelection`，
+  本机 `~/.zcode/v2/provider_config.json` 里**没有这个键**；② 能填这个键的候选全部不可用：
+  四个 coding plan 在 `coding-plan-cache.json`（今天 15:12 刷新）里均为
+  `coding_plan_not_entitled`，用户自配 `builtin:bigmodel` provider 的 `apiKey` 是**空串**；
+  ③ 桌面端历史任务里最后完成的一条是 **8 月 28 日**，之后两条 `task_status:"error"`（`tasks-index.sqlite`）。
+- **为什么这不是桥的缺陷**：同一条启动路径在 provider-config 修复前后表现一致（env 覆盖生效后
+  报错从「找不到 provider 配置」变成「没有默认模型」，前进了一层）。协议、argv、会话面全部可达。
+- **需要操作员做的事（二选一，然后可选一步）**：
+  1. 恢复 ZCode 侧授权：续订 BigModel/Z.ai 的 coding plan，**或**在桌面端给某个 provider 填入 API key；
+  2. 在桌面应用一次真实任务（或在 TUI `/model` 选定），让 `defaultModelSelection` 落盘；
+  3. （无需再做别的）桥侧 zcode 驱动的端到端验收即可从「被阻塞」转为「可执行」。
+- **禁止的绕法（已拒绝执行）**：手改 `~/.zcode/**`（vendor 状态目录）、伪造 plan entitlement、
+  或把 `[inferred]` 的解析映射当 `[proven]` 写进驱动。
