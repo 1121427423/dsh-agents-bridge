@@ -104,7 +104,12 @@ function session(sessionId: string, status: ClientRunStatus, startedAt = 0): Cli
 function fakeApi(script: {
   readonly sessions?: () => readonly ClientSession[]
   readonly failStatus?: boolean
-  readonly failOutput?: boolean
+  /**
+   * Fail `output` — for every session, or only for the ones the predicate
+   * names (RR-MI-10 needs one session whose read fails while another's does
+   * not).
+   */
+  readonly failOutput?: boolean | ((sessionId: string) => boolean)
   readonly output?: (sessionId: string, sinceIndex: number) => { readonly nextIndex: number; readonly messages: readonly { index: number; type: string; text?: string; at: number }[]; readonly terminal?: boolean }
 } = {}) {
   const calls = { status: 0, output: 0, cancel: 0, probe: 0, rescan: 0 }
@@ -121,7 +126,9 @@ function fakeApi(script: {
     },
     async output(sessionId, sinceIndex) {
       calls.output += 1
-      if (script.failOutput === true) throw new ApiError('network', 'network', 0, 'offline')
+      const fails =
+        typeof script.failOutput === 'function' ? script.failOutput(sessionId) : script.failOutput === true
+      if (fails) throw new ApiError('network', 'network', 0, 'offline')
       const next = script.output?.(sessionId, sinceIndex) ?? { nextIndex: sinceIndex, messages: [] }
       return { sessionId, status: 'running' as const, terminal: false, ...next }
     },
@@ -472,6 +479,121 @@ describe('supervisor store — transcript', () => {
     expect(snapshot.error).toBeDefined()
     // The list is still there: the human can go back.
     expect(snapshot.sessions).toHaveLength(1)
+    store.stop()
+  })
+})
+
+/**
+ * RR-MI-10 — the sticky "this transcript is finished" flag has to be cleared at
+ * BOTH points where a different transcript becomes the open one.
+ *
+ * `transcriptTerminal` is what stops the 1.2 s transcript poll (MI-10), and it
+ * is only ever set from the output read — so once a finished session has set
+ * it, every later transcript inherits "already finished" until something clears
+ * it. The panel then shows a LIVE session's transcript frozen at its first
+ * read: the rows stop arriving and the human sees a run that has stopped
+ * talking, which is exactly the wrong status to display.
+ *
+ * The two points that clear it are `openSession` (a different session becomes
+ * the open one) and `closeSession` (nothing is open any more).
+ */
+describe('supervisor store — the terminal flag is reset where it is re-used (RR-MI-10)', () => {
+  it('keeps polling a RUNNING session opened after a finished one, even when its first read fails (openSession)', async () => {
+    const clock = fakeClock()
+    // Every read ATTEMPT, including the ones that fail (a failed read never
+    // reaches the `output` script below).
+    const attempts: string[] = []
+    let bReadFails = true
+    const { api } = fakeApi({
+      sessions: () => [session('a', 'failed'), session('b', 'running')],
+      failOutput: sessionId => {
+        attempts.push(sessionId)
+        return sessionId === 'b' && bReadFails
+      },
+      output: (sessionId, sinceIndex) => {
+        if (sessionId === 'a') return { nextIndex: 0, messages: [], terminal: true }
+        return {
+          nextIndex: sinceIndex + 1,
+          messages: [{ index: sinceIndex, type: 'text', text: `line ${sinceIndex}`, at: 0 }],
+        }
+      },
+    })
+    const store = makeStore(api, clock)
+    store.start()
+    await settle()
+
+    // 'a' is finished: the flag is now set and its poll must stop (MI-10).
+    await store.openSession('a')
+    expect(clock.pendingCount()).toBe(0)
+
+    // 'b' is still running, so its poll must be armed even though the read
+    // failed — otherwise the panel shows a live run frozen at nothing, for as
+    // long as the human leaves it open.
+    await store.openSession('b')
+    expect(clock.pendingCount()).toBe(1)
+
+    // The host recovers and the next tick fills the transcript in: the panel
+    // was never wrong about 'b' having finished, it just had nothing to show
+    // until now.
+    bReadFails = false
+    await clock.flush()
+    await settle()
+    // 'b' was read AGAIN (the retry is what the armed poll buys), and this
+    // time it produced lines.
+    expect(attempts.filter(id => id === 'b').length).toBeGreaterThan(1)
+    expect(store.getSnapshot().transcript.map(message => message.index)).toEqual([0])
+
+    // …and it keeps going: the poll was re-armed, not fired once and dropped.
+    await clock.flush()
+    await settle()
+    expect(store.getSnapshot().transcript.map(message => message.index)).toEqual([0, 1])
+    store.stop()
+  })
+
+  it('still polls the session opened after a finished one was CLOSED (closeSession)', async () => {
+    const clock = fakeClock()
+    const attempts: string[] = []
+    // Same construction as above, through the close path: 'b' is opened after
+    // 'a' (finished) was closed, and its first read fails so that only a RESET
+    // — not the read — can clear the flag.
+    //
+    // Honest scope: this path goes red only when BOTH reset points are removed.
+    // `closeSession`'s own reset is not observable on its own, because
+    // `openSession` clears the flag too before anything reads it; it is
+    // defence in depth, and this test is the pin over the pair.
+    let bReadFails = true
+    const { api } = fakeApi({
+      sessions: () => [session('a', 'failed'), session('b', 'running')],
+      failOutput: sessionId => {
+        attempts.push(sessionId)
+        return sessionId === 'b' && bReadFails
+      },
+      output: (sessionId, sinceIndex) => {
+        if (sessionId === 'a') return { nextIndex: 0, messages: [], terminal: true }
+        return {
+          nextIndex: sinceIndex + 1,
+          messages: [{ index: sinceIndex, type: 'text', text: `line ${sinceIndex}`, at: 0 }],
+        }
+      },
+    })
+    const store = makeStore(api, clock)
+    store.start()
+    await settle()
+
+    await store.openSession('a')
+    expect(clock.pendingCount()).toBe(0)
+    store.closeSession()
+    // (the list poller re-arms here — `closeSession` resumes it — so the
+    // pending count is not the signal; the transcript poll below is.)
+
+    await store.openSession('b')
+    expect(clock.pendingCount()).toBe(1)
+
+    bReadFails = false
+    await clock.flush()
+    await settle()
+    expect(attempts.filter(id => id === 'b').length).toBeGreaterThan(1)
+    expect(store.getSnapshot().transcript.map(message => message.index)).toEqual([0])
     store.stop()
   })
 })

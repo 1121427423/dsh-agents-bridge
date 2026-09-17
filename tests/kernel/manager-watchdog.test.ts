@@ -248,3 +248,88 @@ describe('manager watchdog: timers are released at the terminal state', () => {
     expect(after?.endedAt).toBe(terminal.endedAt)
   })
 })
+
+/**
+ * RR-MI-9 — the kernel normalizes a run window where it ENTERS the kernel.
+ *
+ * `setTimeout(fn, 0.5)` and `setTimeout(fn, -1)` both fire IMMEDIATELY, so a
+ * window that is not normalized first turns the caller's "no deadline" (or a
+ * rounding artefact) into an instant `timeout`. `0` is the only legal
+ * non-positive value and means "no deadline"; every other non-positive and
+ * every non-finite value has to land on it instead of travelling on.
+ *
+ * The first two tests run on the REAL clock on purpose: the hazard is a timer
+ * that fires on the next macrotask, and a fake clock the test never advances
+ * would hide it.
+ */
+describe('manager watchdog: a run window is normalized at the kernel entry (RR-MI-9)', () => {
+  it('does not turn a sub-millisecond timeoutMs into an IMMEDIATE timeout', async () => {
+    const manager = pool.create(SLOW_CLI, {}, {}, 100)
+
+    const started = await manager.run({
+      agent: 'claude',
+      prompt: 'alive',
+      timeoutMs: 0.5,
+      idleTimeoutMs: 0,
+    })
+    await sleep(200)
+
+    expect(manager.status(started.sessionId)?.terminal).toBe(false)
+    expect(manager.status(started.sessionId)?.status).toBe('running')
+  })
+
+  it('does not turn a sub-millisecond idleTimeoutMs into an IMMEDIATE timeout', async () => {
+    const manager = pool.create(SLOW_CLI, {}, {}, 100)
+
+    const started = await manager.run({
+      agent: 'claude',
+      prompt: 'alive',
+      timeoutMs: 0,
+      idleTimeoutMs: 0.5,
+    })
+    await sleep(200)
+
+    expect(manager.status(started.sessionId)?.terminal).toBe(false)
+    expect(manager.status(started.sessionId)?.status).toBe('running')
+  })
+
+  it('negative control — a negative window keeps meaning "no deadline", it arms nothing', async () => {
+    const clock = new FakeClock()
+    const manager = pool.create(SLOW_CLI, { clock }, {}, 100)
+
+    const started = await manager.run({
+      agent: 'claude',
+      prompt: 'alive',
+      timeoutMs: -5_000,
+      idleTimeoutMs: -5_000,
+    })
+    await sleep(150)
+
+    clock.advance(10_000_000)
+    await sleep(60)
+    expect(manager.status(started.sessionId)?.status).toBe('running')
+  })
+
+  it('negative control — a legal fractional window is floored, not discarded', async () => {
+    const clock = new FakeClock()
+    const manager = pool.create(SLOW_CLI, { clock }, {}, 100)
+
+    const started = await manager.run({
+      agent: 'claude',
+      prompt: 'silent',
+      // 1500.7 -> 1500: the window still expires, one millisecond early rather
+      // than not at all.
+      timeoutMs: 1500.7,
+      idleTimeoutMs: 0,
+    })
+    await sleep(150)
+
+    clock.advance(1_499)
+    await sleep(60)
+    expect(manager.status(started.sessionId)?.status).toBe('running')
+
+    clock.advance(1)
+    const finished = await waitTerminal(manager, started.sessionId)
+    expect(finished.status).toBe('timeout')
+  })
+})
