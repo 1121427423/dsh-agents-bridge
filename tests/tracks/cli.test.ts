@@ -425,6 +425,106 @@ describe('the hermes identity on the CLI track', () => {
   })
 })
 
+describe('the qoderclicn identity on the CLI track', () => {
+  it('rides the acp family with its own protocol token and env namespace', () => {
+    const descriptor = builtinDescriptor('qoderclicn')
+    expect(descriptor.track).toBe('cli')
+    expect(descriptor.family).toBe('acp')
+    expect(descriptor.command.executable).toBe('qoderclicn')
+    // `--acp` and ONLY `--acp`. The sibling desktop row pins `--yolo` too; here
+    // that would bake a permission bypass into an identity for no functional
+    // gain, because the driver's in-band `session/request_permission` handling
+    // is sufficient (measured — see tests/drivers/qoderclicn-acp.test.ts).
+    expect(descriptor.command.protocolArgs).toEqual(['--acp'])
+    expect(descriptor.envPrefix).toBe('QODERCLICN')
+    // Distinct namespace from every other identity, so pinning QODERCLICN_PATH
+    // moves nothing else (and vice versa) — including its desktop sibling.
+    const others = BUILTIN_DESCRIPTORS.filter((entry) => entry.id !== 'qoderclicn')
+    expect(others.map((entry) => entry.envPrefix)).not.toContain('QODERCLICN')
+  })
+
+  it('needs no descriptor searchPath: nvm\'s bin dir is on the track path', () => {
+    // The npm global bin is ~/.nvm/versions/node/<v>/bin/qoderclicn, and that
+    // glob is the FIRST entry of the shared search path — so a GUI host with a
+    // truncated PATH resolves it without a second copy of the same fact.
+    expect(CLI_SEARCH_PATH).toContain('~/.nvm/versions/node/*/bin')
+    expect(builtinDescriptor('qoderclicn').command.searchPath).toBeUndefined()
+  })
+
+  it('resolves the bare name and repairs the node shim', () => {
+    // The real install is a `#!/usr/bin/env node` bundle (33 MB) reached through
+    // an nvm symlink, so the CLI track's shebang repair DOES apply here — the
+    // opposite of `hermes`, whose `/bin/sh` shim must be left alone.
+    //
+    // The repair is conditional on `node` being ABSENT from the child PATH
+    // (src/tracks/cli/index.ts:169), so PATH is emptied here. A test that left a
+    // `node` on PATH would pass without ever reaching the branch — which is the
+    // same class of blind spot that let the `exit 143` defect through.
+    const bin = path.join(tmpRoot, 'qoderclicn-bin')
+    fs.mkdirSync(bin, { recursive: true })
+    const shim = writeFile('qoderclicn-bin/qoderclicn', '#!/usr/bin/env node\n')
+    const node = writeFile('qoderclicn-bin/node', '#!/bin/sh\n')
+
+    const resolved = createRegistry({
+      env: { PATH: '' },
+      trackPolicyOptions: { searchPath: [bin], resolveNode: () => node },
+    }).resolve('qoderclicn')
+
+    expect(resolved.reason).toBeUndefined()
+    expect(resolved.executablePath).toBe(shim)
+    expect(resolved.command.interpreter).toBe(node)
+    expect(resolved.command.protocolArgs).toEqual(['--acp'])
+    expect(resolved.descriptor.family).toBe('acp')
+  })
+
+  it('leaves a non-node shim alone: the repair must not fire for every script', () => {
+    // Negative control for the test above. Same emptiness of PATH, but the file
+    // is a POSIX shim — an unconditional repair would prepend a node here and
+    // silently change how the binary is executed.
+    const bin = path.join(tmpRoot, 'qoderclicn-sh-bin')
+    fs.mkdirSync(bin, { recursive: true })
+    writeFile('qoderclicn-sh-bin/qoderclicn', '#!/bin/sh\nexec "$@"\n')
+    const node = writeFile('qoderclicn-sh-bin/node', '#!/bin/sh\n')
+
+    const resolved = createRegistry({
+      env: { PATH: '' },
+      trackPolicyOptions: { searchPath: [bin], resolveNode: () => node },
+    }).resolve('qoderclicn')
+
+    expect(resolved.reason).toBeUndefined()
+    expect(resolved.command.interpreter).toBeUndefined()
+  })
+
+  it('declares capabilities measured from its own capture, not copied', () => {
+    // Same values as the desktop `qoder-cn` row, and that is a MEASURED
+    // coincidence, not a copy: the two binaries were probed separately. Full row
+    // asserted so this layer reddens if someone harmonises it with either
+    // neighbour — `codebuddy-code-acp` (mcpConfig true) or `hermes` (effort
+    // false). The measurements live in tests/drivers/qoderclicn-acp.test.ts and
+    // tests/fixtures/qoderclicn-acp-handshake.ndjson.
+    expect(builtinDescriptor('qoderclicn').capabilities).toEqual({
+      resume: true,
+      model: false,
+      effort: true,
+      mcpConfig: false,
+      clientTools: false,
+    })
+  })
+
+  it('keeps the two Qoder identities distinct: different binary, namespace, argv', () => {
+    // The trap this guards: collapsing them into one row with a flag, on the
+    // theory that "it is the same product". It is not the same BINARY — the
+    // desktop one is the app's private bundle (1.1.53), this one the npm CLI
+    // (1.1.56) — and their argv legitimately differs.
+    const cli = builtinDescriptor('qoderclicn')
+    const desktop = builtinDescriptor('qoder-cn')
+    expect(cli.command.executable).not.toBe(desktop.command.executable)
+    expect(cli.envPrefix).not.toBe(desktop.envPrefix)
+    expect(cli.track).not.toBe(desktop.track)
+    expect(cli.command.protocolArgs).not.toEqual(desktop.command.protocolArgs)
+  })
+})
+
 function builtinDescriptor(id: string) {
   const found = BUILTIN_DESCRIPTORS.find((descriptor) => descriptor.id === id)
   if (found === undefined) throw new Error(`no built-in descriptor for ${id}`)

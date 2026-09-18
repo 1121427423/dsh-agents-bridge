@@ -73,6 +73,7 @@ export function makeManager(
     'autoclaw',
     'zcode',
     'qoder-cn',
+    'qoderclicn',
   ].map((id) => [id, override]))
   return createAgentManager({
     logger: createLogger('manager-test'),

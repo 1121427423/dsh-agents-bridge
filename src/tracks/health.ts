@@ -369,6 +369,18 @@ const CREDENTIAL_PLANS: Readonly<Record<AgentId, CredentialPlan>> = {
     detail:
       'the desktop login is not delegated to a bare launch: the app keeps its own encrypted store and mints a per-job token for its own workers. A launched Qoder CN reads ~/.qoder-cn/.auth itself, which is an opaque non-JSON blob this bridge has no reader for — hence unknown, not missing. Populate it out of band with `qoderclicn login`',
   },
+  qoderclicn: {
+    // The SAME store as `qoder-cn` (`~/.qoder-cn/.auth/`) and the same reason
+    // for `unsourced` — but a DIFFERENT producer, and that is the whole
+    // difference between the two identities. This CLI writes that store itself
+    // when the operator runs `qoderclicn login`, so a launch of THIS identity is
+    // credentialed once that has happened; the desktop engine never writes it and
+    // depends on the operator having done so. The blob is still opaque to the
+    // bridge, so `unknown` stays honest for both.
+    kind: 'unsourced',
+    detail:
+      'this CLI maintains ~/.qoder-cn/.auth itself, so a launch is credentialed as soon as the operator has run `qoderclicn login` once — unlike the desktop engine, which never writes that store. The file is an opaque non-JSON blob this bridge has no reader for, hence unknown rather than missing',
+  },
   generic: {
     kind: 'unsourced',
     detail:

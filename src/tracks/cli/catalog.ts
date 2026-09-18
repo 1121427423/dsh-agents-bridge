@@ -44,6 +44,13 @@
  *    NOT the codebuddy ones: `session/new` advertises a 252-entry model list
  *    but ignores a model passed in params, and answers no `configOptions`, so
  *    `model`/`effort` are declared false (see the entry below).
+ *  - `qoderclicn` → ~/.nvm/…/bin/qoderclicn (npm global `@qodercn-ai/qoderclicn`
+ *    1.1.56) → `bundle/qoderclicn.js`, a 33 MB `#!/usr/bin/env node` bundle. The
+ *    SAME product as the desktop identity `qoder-cn` and the same ACP wire, but a
+ *    DIFFERENT binary (the desktop one is the app's private 33 MB
+ *    `qoder-worker-runtime.obf.mjs`, 1.1.53), a different version, and a
+ *    different credential story — so it is a second identity, not a flag (D41).
+ *    Its capability row is pinned to `qoderclicn-acp-handshake.ndjson`.
  *
  * @module dsh-agents-bridge/tracks/cli/catalog
  */
@@ -183,5 +190,68 @@ export const CLI_TRACK_DESCRIPTORS: readonly AgentDescriptor[] = [
     capabilities: { resume: true, model: false, effort: false, clientTools: false },
     notes:
       'ACP face of the Hermes Agent CLI (hermes-agent 0.21.3, probed 2026-09-17): `hermes acp` speaks headerless NDJSON JSON-RPC on stdio, stdout clean (adapter INFO logs go to stderr). `initialize` answers protocolVersion 1 + agentInfo + agentCapabilities + authMethods (openrouter, hermes-setup); `session/new` answers sessionId + models (252 availableModels, currentModelId) + modes, and NO configOptions. Two MEASURED negatives keep the capabilities honest: a model passed in session/new params is accepted but ignored (currentModelId never moved), and there is no effort dial — so `model` and `effort` are false rather than copied from `codebuddy-code-acp`. ACCEPTANCE 2026-09-17 (`node --experimental-strip-types scripts/acceptance.ts hermes "Reply with exactly: OK"`): probe available=true version=0.21.3, and the run reached a clean PARSED TERMINAL in 18.7s (no hang) with backendSessionId eeac6539-f93a-4a48-8222-7acd1258e467 — but it is NOT a working turn: status=completed while the only text is the engine\'s own provider failure, "OpenRouter didn\'t answer after 3 attempts … HTTP 404: This model is unavailable for free. The paid version is available now - use this slug instead: minimax/minimax-m3", delivered as an ordinary assistant chunk under a normal end-of-turn. The configured free model slug is refused upstream, and because the ACP layer carries no failure signal the bridge reports `completed`. Do not read that as a working turn — see docs/handoff-blockers.md record 9 and docs/plan.md D39. Known UNPROBED risk: plain `hermes --help` can print lazy-venv-repair banners to stdout on some hosts; the `acp` path was clean here, so the ACP line reader (tryParseJson-per-line) has not been exercised against a real banner. `hermes -z/--oneshot` (final text only) exists as a text fallback and is deliberately NOT the integration — no events.',
+  },
+  {
+    // THE SAME PRODUCT AS `qoder-cn`, DELIBERATELY A SECOND IDENTITY.
+    //
+    // Not a locale flag and not a protocol alias: this is the CLI the user
+    // installed themselves (npm global `@qodercn-ai/qoderclicn` 1.1.56) rather
+    // than the engine an application owns (the desktop row's private 33 MB
+    // `qoder-worker-runtime.obf.mjs`, 1.1.53). Same ACP wire, same capability
+    // row — and that last part is the point of writing it down rather than
+    // copying: both were measured, and they agreed.
+    //
+    // `protocolArgs` carries ONLY the protocol token, matching `hermes` and
+    // `codebuddy-code-acp`, NOT the desktop sibling's `['--yolo','--acp']`.
+    // That difference is a decision, not an oversight. `--yolo` is load-bearing
+    // (it really does select the session mode: `currentModeId` reads `yolo`
+    // with it and `default` without), so pinning it would bake a PERMISSION
+    // BYPASS into identity data. Measured instead: with `--acp` alone, in mode
+    // `default`, a file-creating task emitted exactly one
+    // `session/request_permission` offering
+    // `[allow_always, allow_once, reject_once]`, the driver's own
+    // `selectPermissionOption` picked `allow_once`, the turn reached
+    // `stopReason: "end_turn"`, and the file was written. So the in-band
+    // handshake is sufficient, and `ACP_BLOCKED_ARGS` already states the
+    // principle this follows: the permission mode is the RUN's choice, not
+    // something the bridge forces. A caller who wants the bypass can still pass
+    // `--permission-mode bypass_permissions` through `extraArgs` — it is
+    // deliberately not blocked.
+    id: 'qoderclicn',
+    track: 'cli',
+    family: 'acp',
+    displayName: 'Qoder CLI CN (qoderclicn) over ACP',
+    command: { executable: 'qoderclicn', protocolArgs: ['--acp'] },
+    envPrefix: 'QODERCLICN',
+    // PINNED TO `tests/fixtures/qoderclicn-acp-handshake.ndjson`, a real
+    // capture of this binary on this host (2026-09-19), parsed back by
+    // tests/drivers/qoderclicn-acp.test.ts with the driver's OWN extractors.
+    // No `searchPath` is declared: the install resolves through
+    // `CLI_SEARCH_PATH`'s first entry (`~/.nvm/versions/node/*/bin`), the same
+    // reasoning as `hermes`.
+    //
+    //  - `resume: true` — `initialize` advertises `loadSession: true` plus
+    //    `sessionCapabilities.resume` (and, unlike the desktop engine, also
+    //    `close` / `delete` / `fork` / `list`). Not exercised by a live
+    //    `session/resume` here either, so the basis is the advertisement.
+    //  - `effort: true` — the session advertises `reasoning_effort` with four
+    //    levels and the driver's `extractEffortOption` reads it. NOT yet
+    //    exercised through `manager.run` on this identity the way the desktop
+    //    row was; the read is proven from the capture, the SET is proven at the
+    //    protocol level (§10.4b of the findings).
+    //  - `model: false` — a BRIDGE-side gap, not an engine-side denial. The
+    //    engine has a working, VALIDATED model dial
+    //    (`session/set_config_option {configId:"model"}`, which rejects an
+    //    unknown id with -32602 and is confirmed by `config_option_update`),
+    //    but the driver only ever sends a model through `session/new` params,
+    //    which this engine ignores in silence. Same reasoning as the desktop
+    //    row; see that entry for the full measurement.
+    //  - `mcpConfig` / `clientTools` false — `mcpCapabilities {http,sse}` is
+    //    advertised, but `mcpServers` was only ever sent as `[]` and no `fs/*`
+    //    or `terminal/*` callback appears in the capture. Advertising is not
+    //    obeying, so neither is claimed.
+    capabilities: { resume: true, model: false, effort: true, mcpConfig: false, clientTools: false },
+    notes:
+      'The standalone CLI, not the app\'s engine: `qoderclicn --acp` (the flag is HIDDEN — absent from the 107-line `--help` — but parsed, and `acp` is one of the runtime\'s own session modes alongside `tui`/`headless`/`sdk`). Same ACP wire and the same capability row as the desktop identity `qoder-cn`, but a DIFFERENT binary and version (1.1.56 vs the app\'s 1.1.53) and a DIFFERENT credential story: this CLI maintains ~/.qoder-cn/.auth itself, so a launch is credentialed as soon as the operator has run `qoderclicn login` ONCE — there is no auth wall, unlike the desktop engine, which never inherits the app login. Its TEARDOWN is the same shape as the desktop engine\'s, which is worth stating because a bare probe suggested otherwise: in the full stack the bridge waits out the grace window and signals it, and the engine\'s shutdown handler exits 143 — the acceptance run reports `status=completed exit=143`, so the D40 §8.2 fix (blame the engine only for an exit IT chose) is load-bearing for BOTH Qoder identities. `initialize` answers agentInfo `{name:"qoder-cli-cn", version:"1.1.56"}` + one authMethod (`qoderclicn-login`, a LOCAL login reuse rather than a device flow) + agentCapabilities incl. `loadSession` and `sessionCapabilities.resume/close/delete/fork/list`; `session/new` answers sessionId + 5 modes (default/acceptEdits/auto/dontAsk/yolo) + 14 models (`currentModelId` = `qfmodel` = Qwen3.8-Flash) + configOptions (`mode`, `model`, `reasoning_effort`). The `model` config option is advertised and the engine really honours it — but the bridge cannot reach it: the driver only ever sends a model through `session/new` params, and this engine IGNORES that parameter in silence (a bogus id is accepted without complaint, while a bogus configId is rejected with -32602). So `model: false` records a BRIDGE gap, never an engine limitation. Effort levels are xhigh/low/medium/none — there is no `high` — and the level SET is a function of the selected model, so a future model dial must be set before the effort options are read. stdout is clean; the only stderr is one skill-config warning. See docs/findings-qoder-cn-desktop.md §10 and docs/plan.md D41.',
   },
 ]

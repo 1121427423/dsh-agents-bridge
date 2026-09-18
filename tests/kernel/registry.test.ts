@@ -47,7 +47,7 @@ function createHermeticRegistry(options: Parameters<typeof createRegistry>[0] = 
 describe('built-in descriptor table', () => {
   it('ships the v1 identities with their launch facts', () => {
     const ids = BUILTIN_DESCRIPTORS.map((d) => d.id)
-    for (const required of ['claude', 'workbuddy', 'autoclaw', 'openclaw', 'generic', 'hermes']) {
+    for (const required of ['claude', 'workbuddy', 'autoclaw', 'openclaw', 'generic', 'hermes', 'qoderclicn']) {
       expect(ids).toContain(required)
     }
 

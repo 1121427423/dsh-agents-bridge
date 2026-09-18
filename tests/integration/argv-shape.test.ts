@@ -231,7 +231,7 @@ describe('the version probe and the run path build the same argv', () => {
   function shimBin(): string {
     const binDir = path.join(tmpRoot, 'probe-argv-bin')
     fs.mkdirSync(binDir, { recursive: true })
-    for (const name of ['claude', 'codex', 'openclaw', 'openclaw.mjs', 'codebuddy-code', 'agent-cli', 'codebuddy', 'zcode.cjs', 'node']) {
+    for (const name of ['claude', 'codex', 'openclaw', 'openclaw.mjs', 'codebuddy-code', 'agent-cli', 'codebuddy', 'zcode.cjs', 'node', 'qoderclicn']) {
       const file = path.join(binDir, name)
       fs.writeFileSync(file, '#!/usr/bin/env node\n', { mode: 0o755 })
       fs.chmodSync(file, 0o755)

@@ -733,4 +733,275 @@ driver 只看 **code**，所以**唯一能走进那条分支的形状，恰好�
 bundle。届时照 CLI catalog 的 `codebuddy-code-acp` 先例加一行即可 —— **本次只做用户要的桌面版**，
 不擅自扩大范围。
 
+**这条后续的侦察已经做完了，结果在 §10**（不是设想，是实测）：CLI 说 ACP、能跑完整回合，
+能力行与桌面版逐字段相同（包括 `model: false` 是**桥侧**缺口这件事），**退出形状也相同**
+（`exit=143`，见 §10.4 的更正）。操作员随后拍板要它，于是**身份已注册**，见 §10.7。
 
+---
+
+## 10. 附：独立 CLI（`qoderclicn`）—— 侦察 + 身份注册 [proven]
+
+§9（二）那条后续。侦察于 2026-09-19 完成，**身份随后由操作员拍板注册**（§10.7）。
+侦察本身无副作用（不写仓库、不碰应用状态）；注册只是加一条描述符 + 测试 + fixture。
+
+### 10.1 它在哪：npm 全局包，不在 PATH 上，也不在 `~/.qoder-cn/bin`
+
+`which qoderclicn / qodercn / qoder` 在非登录 shell 里**全部 not found**，npm 全局列表里也没有
+`qoder` 字样 —— 因为它装在 **nvm 的全局前缀**下：
+
+```
+~/.nvm/versions/node/v22.22.3/lib/node_modules/@qodercn-ai/qoderclicn/package.json
+  name @qodercn-ai/qoderclicn   version 1.1.56   bin { qoderclicn, qodercn }
+~/.nvm/versions/node/v22.22.3/bin/qoderclicn -> ../lib/node_modules/@qodercn-ai/qoderclicn/bundle/qoderclicn.js
+~/.nvm/versions/node/v22.22.3/bin/qodercn    -> ../lib/node_modules/@qodercn-ai/qoderclicn/bundle/qodercn-npm-dispatcher.cjs
+```
+
+bundle 目录 67 MB：`qoderclicn.js` 33.6 MB、`qoder-worker-runtime.mjs` 35.0 MB、`builtin/`、
+`proto/`、`vendor/` —— 与 app 里那个 `qoder-worker-runtime.obf.mjs` **同族但不是同一个文件**。
+
+**版本差是要记一笔的：CLI 1.1.56，app bundle 里那个是 1.1.53。**
+
+另有一层 **PATH 分发器**，容易误认成引擎本体：`~/.qoder-cn/entry/{qodercn,qoder-cn}`，两个文件
+4222 B、**内容逐字节相同**（`diff` 无输出），是 `#!/usr/bin/env bash` 脚本，由安装器写进
+`~/.zshrc` / `~/.zprofile` / `~/.zshenv`（`# QODERCN_DISPATCHER_PATH v1` 标记）。它按第一个参数路由：
+
+| 首参 | 去向 |
+|---|---|
+| 无 | CLI |
+| `ide` | IDE（去掉 `ide` 再转发） |
+| `chat` / `serve-web` / `tunnel` | IDE |
+| 以 `-` 开头 | CLI |
+| 其它 | 该路径**存在**则 IDE，否则 CLI |
+
+CLI 的解析顺序是 `type -P qoderclicn` → `~/.local/bin/qoderclicn` → `~/.qoder-cn/bin/qoderclicn/qoderclicn`，
+三条在本机都**不存在**（`~/.local/bin` 里没有、`~/.qoder-cn/bin/` 下只有 `qoder-cn-computer-use/`）——
+分发器只靠 PATH 里那条 nvm 软链命中，所以**它只在登录 shell 里能用**，这正好落在 CLI 轨道的
+`CLI_SEARCH_PATH`（`~/.nvm/versions/node/*/bin` 是第一条）覆盖范围内。
+
+### 10.2 它说 ACP，`--acp` 同样是隐藏选项
+
+`qoderclicn --help` 共 107 行，**没有** `--acp`、也没有 `--yolo`；但 bundle 里 `--acp` 出现 2 次，
+且 `acp` 与 `tui` / `headless` / `sdk` 并列出现在一张**运行模式表**里
+（`["tui","headless","acp"]`、`getAcpMode()`、`acpMode=!1` 字段）。实测 `--yolo --acp` 两个都收
+（§10.4 用例 F），与桌面版同一套 argv 形状。
+
+### 10.3 握手实录（原始帧，`/tmp/qoderclicn-acp-probe.ndjson`）
+
+```
+initialize  -> protocolVersion 1
+               agentInfo { name "qoder-cli-cn", title "Qoder CLI CN", version "1.1.56" }
+               authMethods [ { id "qoderclicn-login",
+                               description "Use your existing qoderclicn login for this agent. …" } ]
+               agentCapabilities { loadSession: true,
+                                   sessionCapabilities { additionalDirectories, close, delete, fork, list, resume },
+                                   promptCapabilities { image, embeddedContext },
+                                   mcpCapabilities { http, sse } }
+session/new -> sessionId + modes + models + configOptions     ← 没有认证墙
+```
+
+`session/new` 的三个字段块，逐字：
+
+| 块 | 内容 |
+|---|---|
+| `modes` | 5 个：`default` / `acceptEdits` / `auto` / `dontAsk` / `yolo`，`currentModeId: "default"` |
+| `models` | **14 个** `availableModels`，`currentModelId: "qfmodel"` |
+| `configOptions` | `mode`（5 值）、**`model`（14 值）**、`reasoning_effort`（`xhigh/low/medium/none`，current `xhigh`） |
+
+14 个模型与桌面版**完全一致**，`qfmodel` 就是 `Qwen3.8-Flash`（§5.6 的更正在这里得到第二次独立确认）。
+
+完整回合：`session/prompt` → 12 帧 `agent_thought_chunk` + 1 帧 `agent_message_chunk`（文本 `OK`）
+→ `{ stopReason: "end_turn", userMessageId, usage, _meta.quota.model_usage[0].model: "qfmodel" }`。
+**stdout 干净**，唯一的 stderr 是 `1 warning loading skill configs. Use /skills to see details.`。
+
+### 10.4 模型：`session/new` 的参数不通，但 `set_config_option` 的旋钮**通**
+
+`session/new` 的 `model` 参数是桥唯一能 SET 模型的杠杆（`src/drivers/acp.ts:2091`），
+所以问题只有一个：**它动不动 `currentModelId`？** 六组对照：
+
+| 用例 | argv | `session/new` params | `currentModelId` |
+|---|---|---|---|
+| A | `--acp` | — | `qfmodel` |
+| B | `--acp` | `model: "qmodel"` | `qfmodel` ← **没动** |
+| C | `--acp` | `model: "bogus-model-xyz"` | `qfmodel` ← 假 id 也被**静默接受** |
+| D | `--acp` | `modelId: "qmodel"` | `qfmodel` ← 另一种拼法同样没动 |
+| E | `--acp --model qmodel` | — | **`qmodel`** ← CLI 自己的旗标**有效** |
+| F | `--yolo --acp` | — | `qfmodel`（`--yolo` 被接受，无报错） |
+
+B/C/D 合起来就是「参数被**忽略**」而不是「参数被拒绝」：真 id 与假 id 给出**完全相同**的结果，
+而假 `configId` 在桌面版那边会回 `-32602 "Unknown config option"`（§5.5）—— 同一个引擎族对
+「不认识的东西」是会说真话的，这里不说，说明它压根没看这个字段。
+
+**E 是 argv 侧唯一能改模型的入口**，走的是 CLI 自己的旗标，不是 ACP 线。桥的 `--model` 不在
+`ACP_BLOCKED_ARGS` 里，所以调用方**能**通过 `extraArgs` 传 —— 那是调用方的事，不是描述符能力。
+**ACP 线上还有一根旋钮，见 §10.4b。**
+
+### 10.4b CLI 的 `model` 旋钮也是通的，而且和桌面版一样被校验 [proven]
+
+`session/new` 的 `configOptions` 里那条 `model`（14 值）不是装饰。四组实测
+（`/tmp/qoderclicn-configoption-probe.mjs` + `/tmp/qoderclicn-modelvalue-probe.mjs`）：
+
+| 请求 | 结果 |
+|---|---|
+| `{configId:"model", value:"qmodel"}` | **ACCEPTED**，`config_option_update` 确认 `model.currentValue = "qmodel"` |
+| `{configId:"model", value:"auto"}` | **ACCEPTED** |
+| `{configId:"model", value:"bogus-model-xyz"}` | **REJECTED** `-32602 Invalid params: Invalid value for config option model: bogus-model-xyz` |
+| `{configId:"model", value:"Qwen3.8-Flash"}`（显示名） | **REJECTED** 同上 |
+| `{configId:"nope-xyz", value:"qmodel"}`（负控） | **REJECTED** `-32602 Unknown config option: nope-xyz` |
+
+> **一处装置教训**：第一版探针里 `bogus-model-xyz` 那一格报的是
+> `-32602 … sessionId: expected string, received undefined` —— 它根本没带上 session id，
+> 于是引擎拒的是**形状**，这一格**什么也没证明**。**失败原因不对的负控不是负控**，
+> 所以重写了探针（发之前先断言 session id 是真字符串），才有上表。记在这里是因为
+> 「负控红了」很容易被当成结论收下，而它红的原因可能完全无关。
+
+真回合验证（`/tmp/qoder-model-turn-proof.mjs`，与桌面版同一脚本）：
+`requested=qmodel → set=ACCEPTED → currentModelId: qfmodel -> "qmodel" → billed="qmodel"
+→ stopReason="end_turn" → text="OK"`。**计费模型跟着变**。
+
+同样地，`reasoning_effort` 的档位表随模型变：`qfmodel` 4 档，切成 `qmodel` 后只剩 `none`。
+
+**结论：CLI 身份的能力行与桌面版逐字段相同** —— 包括 `model: false` 是**桥侧缺口**这件事。
+
+```ts
+capabilities: { resume: true, model: false, effort: true, mcpConfig: false, clientTools: false }
+```
+
+- `resume: true` — `initialize` 明说 `loadSession` + `sessionCapabilities.resume`。
+- `effort: true` — `configOptions` 里 `reasoning_effort` 命中 `EFFORT_OPTION_IDS`，档位
+  `xhigh/low/medium/none`（**没有 `high`**，与桌面版同）。
+- `model: false` — 与桌面版同因同果：**桥侧缺口，不是引擎否定**。`session/new` 的 `model`
+  参数被静默忽略（§10.4 的 B/C/D），而引擎自己那条 `set_config_option {configId:"model"}`
+  旋钮**是通的**（§10.4b 实测：假值报 `-32602`、真值改计费模型）。driver 没有这根杠杆，所以 `false`。
+- `mcpConfig: false` — 引擎**广播** `mcpCapabilities { http, sse }`，但从没拿真 server 验过，
+  广播 ≠ 被遵守（§6 的口径）。
+
+**更正：我一开始以为「退出路径不同」，那是错的 —— 探针骗了我。**
+
+裸探针里 CLI 看着是「stdin EOF 上自己以码 0 退出」（`exit=0 signal=null`，六组用例一致），
+于是我先写下「它根本走不到 §8.2 那条 `exit 143` 分支」。**全栈验收推翻了它**：
+
+```
+$ node --experimental-strip-types scripts/acceptance.ts qoderclicn "Reply with exactly: OK"
+result status=completed exit=143 durationMs=38532
+```
+
+`exit=143` —— 与桌面版**同一个形状**：桥等满宽限期后自己 SIGTERM，引擎的 shutdown handler
+`process.exit(143)`。所以这个 CLI 也**不**在 EOF 上可靠退出，`exit 143` 那条分支对**两个**
+Qoder 身份都是载荷。
+
+**为什么裸探针会得出相反的结论（这条比结论本身重要）**：我的探针在 `stdin.end()` 之后挂了
+一个 3 秒的兜底 `SIGKILL`，而它**同时**在等 `exit` 事件。EOF 之后引擎有时很快就退、有时不退，
+谁先到取决于时序 —— 第一次探针里 `exit` 先到（报 `code=0`），捕获脚本那几次 `SIGKILL` 先到
+（报 `signal=SIGKILL`）。**同一个进程、同一段代码，三次观测出三种退出形状**，而我拿其中一次的
+结果当成了性质。教训与 §5.6 同源：**一次观测不是性质**，而「跑过一遍」尤其不是 —— 验收脚本
+跑的是**真桥的完整生命周期**（含宽限期与信号），裸探针跑的是我手写的近似，两者不一致时，
+该信的是前者。
+
+（附带的好消息：§8.2 那个修复因此**同时**覆盖了两个 Qoder 身份 —— 没有它，这个身份的首跑
+也会被报成 `failed` 并把已经拿到的 `[text] OK` 清空。）
+
+### 10.5 凭证：CLI 自己维护 `~/.qoder-cn/.auth/`，且**没有认证墙**
+
+`authMethods` 只有一条 `qoderclicn-login`，措辞是「**复用你已有的 qoderclicn 登录**」——
+是**本地登录复用**，不是设备流。这与桌面版的处境是两回事：桌面版那个 worker 拿不到应用的
+登录（应用按 job 现签 token 经 `QODER_SDK_AUTH_PAYLOAD_FILE` 推给它，不落盘，§4/§5.2），
+而 CLI 的 `.auth/user`（1280 B，本次 05:16 更新）是它**自己写的**。
+
+`.qoder-cn/` 下的旁证：`logs/runs/` **532 个 run**、`logs/sessions/` 里有以
+`-Users-king-BigModel-LLM-tools-dsh-plugins-dsh-agents-bridge` 命名的会话目录、
+`settings.json` 的 `model.name = "qfmodel"` 与 `security.auth.selectedType = "qoder-browser"`、
+`state.json` 的 `lastLoginMethod = "browser"`。**同一台机器、同一个 home**，IDE 与 CLI 共用
+`~/.qoder-cn/`，但**凭证的产生方式不同** —— 这正是它们该是**两个身份**的理由。
+
+### 10.6 复现命令
+
+```bash
+export PATH="$HOME/.nvm/versions/node/v22.22.3/bin:$PATH"
+qoderclicn --version                                   # 1.1.56
+node /tmp/qoderclicn-acp-probe.mjs /tmp/out.ndjson      # 握手 + 完整回合
+node /tmp/qoderclicn-lever-probe.mjs                    # §10.4 六组对照
+node /tmp/qoderclicn-configoption-probe.mjs             # §10.4b 旋钮四组
+node /tmp/qoderclicn-mode-probe.mjs                     # §10.7 模式三组
+node /tmp/qoderclicn-permission-probe.mjs               # §10.7 带内权限
+```
+
+这些脚本都在 `/tmp`，**没有进仓库**：它们只承担验证职责，而**结论**已经落进 fixture
+（`qoderclicn-acp-handshake.ndjson` + `ACP-PROVENANCE.md` 一行）与描述符注释里。
+把探针本身也签进去会让仓库背上一堆一次性脚本。
+
+### 10.7 身份注册（D41）：一处刻意的差异，和它凭什么
+
+**`protocolArgs` 只带 `--acp`，不带桌面版的 `--yolo`。** 这是本轮唯一一处两个 Qoder 身份
+不一致的地方，所以它必须是**测出来的**，不是抄的。
+
+`--yolo` 不是装饰：三组实测（`/tmp/qoderclicn-mode-probe.mjs`）——
+
+| argv | `modes.currentModeId` |
+|---|---|
+| `--acp` | `default` |
+| `--yolo --acp` | `yolo` |
+| `--permission-mode accept_edits --acp` | `acceptEdits` |
+
+所以把它钉进 `protocolArgs` 等于**把权限绕过写进身份数据** —— 一个比「让这一回合跑完」
+大得多的授权，而且它会被每一个用这个身份的人继承，包括不想要它的人。
+
+那**不钉它会不会卡住**？这是唯一要紧的问题，于是拿一个必须动文件的任务实测
+（`/tmp/qoderclicn-permission-probe.mjs`，模式 `default`，按 driver 自己的
+`selectPermissionOption` 规则应答）：
+
+```
+mode = "default"
+[permission] offered ["allow_always","allow_once","reject_once"] -> answering allow_once
+permission requests: 1  [["proceed_always:allow_always","proceed_once:allow_once","cancel:reject_once"]]
+stopReason = "end_turn"
+probe.txt exists = true     content = "hi"
+final text = "Created `probe.txt` in the working directory containing `hi`."
+```
+
+**带内握手是够的**：整轮只发 1 次权限请求，driver 的规则选中了 `allow_once`，回合正常收尾、
+文件真的写出。于是 `--yolo` 是**策略选择**而不是**协议数据**，不该进描述符 ——
+这正是 `src/drivers/acp.ts:154-157` 早就写下的原则（「模式是 run 的选择，不是桥必须强制的」），
+也是 `codebuddy-code-acp` / `hermes` 两行的做法。想要绕过的调用方仍可经 `extraArgs` 传
+`--permission-mode bypass_permissions`，它**刻意没有被 block**。
+
+**顺带钉死的两件事**：
+
+1. **能力行与桌面版逐字段相同，但这是巧合而不是复制**：两套捕获各自解析、同一批 driver
+   提取器、同一批负控。测试文件里专门断言了两者在**版本**（1.1.56 vs 1.1.53）、**模式**
+   （`default` vs `yolo`）、**二进制**、**env 命名空间**、**argv** 上不同 —— 如果有人把它们
+   合成一行加个开关，这几条会同时红。
+2. **fixture 用的是描述符的精确 argv**：第一次捕获时我用了 `--yolo --acp`，于是
+   `currentModeId` 是 `yolo`，与描述符对不上。**一份 argv 与描述符不一致的捕获不是这个身份的
+   证据**，所以重新捕获了一次（`--acp`，`currentModeId=default`，5 帧 / 5584 B）。
+   `ACP-PROVENANCE.md` 里写明了这一点。
+
+### 10.8 全栈验收（真机，2026-09-19）
+
+```
+$ node --experimental-strip-types scripts/acceptance.ts qoderclicn "Reply with exactly: OK"
+probe  qoderclicn: track=cli available=true
+       executable=/Users/king/.nvm/versions/node/v22.22.3/bin/qoderclicn version=1.1.56 reason=-
+run    session=sess_343bc536-f449-427a-9303-a0fe78ad4d08 status=running
+       acp engine advertises auth methods {"authMethods":["qoderclicn-login"]}
+
+events (5):
+  [status] engine requires authentication; it accepts: qoderclicn-login. …
+  [status] session c6e3936d-1095-4b1f-afaa-ce04297c2413 ready
+  [status] running
+  [status] available commands update: 269 commands
+  [text] OK
+
+result status=completed exit=143 durationMs=38532
+text: OK
+backendSessionId: c6e3936d-1095-4b1f-afaa-ce04297c2413
+```
+
+三点要读对：
+
+1. **`status=completed` 且 `text: OK`** —— 这是**真实模型输出**，不是 §D39 那种「干净落地但零模型输出」。
+2. **`exit=143`** —— 与桌面版同形（见 §10.4 的更正）。这条对桥是个**正面**结果：说明 §8.2 那个修复
+   不是为 Qoder 桌面版打的补丁，而是覆盖了两个身份的真实分支。
+3. **`[status] engine requires authentication …` 是噪声，不是故障。** driver 只要看到 `initialize`
+   广告了 `authMethods` 就会推这条提示（`src/drivers/acp.ts:2050-2060`），它**不阻塞**：
+   这一轮照样跑通。原因见 §10.5 —— 这条 `authMethods` 是「复用你已有的本地登录」，
+   而不是「你必须先去登录」。**别把这条状态当失败**（桌面版那边它确实对应认证墙，这里不是）。
