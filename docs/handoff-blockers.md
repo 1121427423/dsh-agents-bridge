@@ -400,3 +400,153 @@ copilot.tencent.com**，两次产出回合后断线。按规程记录、不无�
   遂按用户给定的链改派 `hy4-preview` 重跑同一批。**这条与记录 6 一样只记录，不写进桥的代码。**
 - **对交付的影响（如实）**：「会话终态主动通知」那一块因此**由监理自建**（`b3c732c`），
   没有第二方独立复核 —— 已在 `docs/review-fixes.md` §U-0 / §U-5 与 `docs/handoff-2026-09-18.md` §5 显式标注为**待复核**。
+
+---
+
+## 记录 11 — Qoder CN 桌面端「应用已登录、引擎却无凭证」：引擎自己的登录存储是**空的**（**账号/凭据故障，只记录、不绕过**）—— **已解决，见 11.1**
+
+- **时间**：2026-09-19 02:00–04:45（本机 CST），`wb/qoder-cn-desktop` 分支的真机验收。
+- **执行的命令**：
+  ```bash
+  export PATH=/opt/homebrew/bin:$PATH
+  cd /Users/king/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge
+  node --experimental-strip-types scripts/acceptance.ts qoder-cn "Reply with exactly: OK"
+  ```
+- **原始输出（逐字，2026-09-19 04:47 复跑）**：
+  ```
+  probe  qoder-cn: track=desktop available=true
+         executable=/Applications/Qoder CN.app/Contents/Resources/app.asar.unpacked/node_modules/@qoder-ai/qoder-cn-agent-sdk/dist/_worker/qoder-worker-runtime.obf.mjs version=1.1.53 reason=-
+  run    session=sess_5bc87524-b2c4-48bf-9ca8-530e97fea441 status=running
+  [dsh-agents-bridge:acceptance:run:qoder-cn] acp engine advertises auth methods {"authMethods":["qoderclicn-login"]}
+
+  events (1):
+    [status] engine requires authentication; it accepts: qoderclicn-login. Set DSH_AGENTS_BRIDGE_ACP_AUTH_METHOD to one of these to have the bridge authenticate.
+
+  result status=failed exit=null durationMs=1379
+  text:
+  error: acp session/new failed: session/new: Authentication required: Authentication is required. (code=-32000)
+  ```
+  （与首跑 `durationMs=1337` 同形，仅耗时抖动。完整实测见 `docs/findings-qoder-cn-desktop.md` §3–§5。）
+
+- **根因链（全部已证，不是推测）**：
+  1. **应用侧确实是登录着的**：`~/.qoder-cn/.qoder-app-status.json` 由应用主进程写出，逐字
+     `{"logged_in":true,"name":"不会呼吸的哈士奇","product":"qodercn","writer":"main"}`。
+  2. **引擎自己读的那个存储是空的**：`~/.qoder-cn/.auth/` 里只有 `machine_id`(36B) +
+     `dynamic-error-codes.json` + `dynamic-texts.json` + **空的** `.credential-transaction`，
+     **没有任何凭证文件**（mtime 全在 8 月，而应用 9 月一直在跑）。
+     `node <runtime> status -o json` → `{"logged_in":false,"version":"1.1.53","allow_byok":0}`。
+  3. **「它自己会去读」读的就是这个目录**（决定性实验）：`HOME=/tmp/qhome node <runtime> status`
+     → 它在 `/tmp/qhome/.qoder-cn/.auth/` 建出同样的结构。凭证根是 `$HOME/.qoder-cn/`。
+     （`~/.qoder/.auth/` 那份 2026-04-14 的 800B 加密 blob 属于**另一套旧 CLI**，运行时**不读它**；
+     `QODER_CONFIG_DIR` / `QODER_SDK_AUTH_CONFIG_DIR` 都不改配置根 —— 两个负结果。）
+  4. **应用从不写这个目录**：它把登录留在自己的加密存储 `…/com.qodercn.app.stable/auth.v1.dat`
+     （safeStorage 密文），改为给**每个 job 现签一个 jobToken**、经 `QODER_SDK_AUTH_PAYLOAD_FILE`
+     **推**给 worker（`$TMPDIR/qoder-sdk-auth-<6位>/payload.json`，目录留下、文件被 worker 读完自己
+     unlink）。是「推」，不是「拉」，所以裸启动拿不到。
+  5. **注入这条路已实测否定**：以 ACP 的真实消费者 `session/new` 为判据，**九条通道全是 no-op**
+     —— 2 个路径变量（`QODER_SDK_AUTH_PAYLOAD_FILE` 存在文件 / 不存在路径、
+     `QODER_AUTH_DATA_PATH`）+ 7 个 token 变量（`QODER_SDK_ACCESS_TOKEN`、`QODER_ENV_JOB_TOKEN`、
+     `QODER_AUTH_MANAGED_TOKEN`、`QODER_DEVICE_TOKEN`、`QODER_PAT`、`QODER_ENV_PAT`）
+     喂进去后 `session/new` **逐字相同**（既不通过，也不报「token 无效」这类可区分的错）。
+     硬结论：**认证状态只能来自 `~/.qoder-cn/.auth/`，而只有 `login` 会写它。**
+  6. **登录入口只有一个，且它可被发现**：CLI 子命令 `login` 把设备流 URL 打到 **stdout**
+     （`https://qoder.cn/device/selectAccounts?challenge=…&nonce=…&machine_id=…&client_id=…`，
+     `challenge`/`nonce` 每次现生成）；而 **ACP 的 `authenticate {methodId:"qoderclicn-login"}` 不吐
+     任何东西** —— 实测 40s 内 stdout/stderr 零输出、`id:2` 帧从未回答
+     （`device-flow URL surfaced over ACP stdio: NONE`）。**这就是桥的 `authenticate` 通道在此无效的
+     原因：不是桥没接线，是这一帧根本不带 URL。**
+
+- **为什么这不是桥的缺陷**：
+  - `probe` 正确解析桌面轨道（绝对路径 + 钉死的 interpreter + 真版本 `1.1.53`）；
+  - `agents_run` 立即返回 `sessionId`（未阻塞）；
+  - ACP 握手**真的发生了**：`initialize` 正常回答（`qoder-cli-cn` / `Qoder CLI CN` / 1.1.53，
+    `authMethods=["qoderclicn-login"]`）；
+  - 失败以**引擎自己的话**落地为 `failed`，**不是**「`completed` 但没内容」——
+    与 `workbuddy-ai` 的 401 同一处理口径（对照本文件记录 1.1 与记录 9 的形态差异）。
+  - 与记录 8（ZCode 账号无模型授权）、记录 9（hermes 模型档位不可用）**同族**：身份可达、
+    协议正确、缺的是**账号侧的一步人工动作**。
+
+- **需要操作员做的事（唯一动作，在引擎自己的存储里，不在本仓库）**：
+  在终端跑一次（URL 会打印出来，浏览器里点完即可；**必须由本人完成**，`challenge` 是一次性的）：
+  ```bash
+  R="/Applications/Qoder CN.app/Contents/Resources/app.asar.unpacked/node_modules/@qoder-ai/qoder-cn-agent-sdk/dist/_worker/qoder-worker-runtime.obf.mjs"
+  node "$R" login
+  node "$R" status -o json     # 期望变为 logged_in:true
+  ```
+  完成后复跑同一条 `scripts/acceptance.ts qoder-cn "Reply with exactly: OK"`，
+  期望 `status=completed` + `text: OK`，而不是 `-32000`。届时可再补两件事（**都不需要改桥的代码**）：
+  重捕一次**有凭证**的 `session/new` 入库为 fixture；确认该帧是否接受/回显 `model`，
+  是则把描述符的 `model` 从 `false`（含义严格是 **unproven**）翻成 `true`。
+
+- **禁止的绕法（已拒绝执行）**：
+  1. **不去抓应用现签的 jobToken 再注入** —— 第 5 条已实测证明注入无效；且那是另一个应用
+     按 job 现签、用完即删的私有凭证，不是公开接口，拿它当依赖是错的架构。
+  2. **不去解 `auth.v1.dat`** —— 它的密钥在钥匙串 `svce="Qoder CN App Safe Storage"`，
+     读它需要 GUI 授权（实测 `security find-generic-password … -w` 阻塞后被超时杀掉）。
+     跨进程提取另一个应用的会话令牌属于绕过，不在本仓库的授权范围内。
+  3. **不手改 `~/.qoder-cn/**`**（vendor 状态目录）、不伪造 payload、不伪造 device flow 结果。
+  4. **不把 `[inferred]` 当 `[proven]` 写进描述符** —— 所以 `model`/`effort`/`mcpConfig`/`clientTools`
+     四项仍是 `false`（含义是 **unproven**，不是「不支持」），`tests/drivers/qoder-cn-acp.test.ts`
+     会挡住「照抄别的 ACP 身份那一行」的改法。
+
+- **未做（有意为之）**：没有改 `~/.qoder-cn/**`、没有碰钥匙串、没有读取任何一份凭证、
+  没有为了绕过而重试刷量、没有在驱动里加「看到 -32000 就自动登录」之类的启发式。
+  **另记一条有依据但本次未做的后续**：既然 `login` 的 URL 走 stdout，桥**有能力**把带外登录做成
+  功能（spawn `login` → 解析 stdout 的 URL → 作为 `status` 事件抛给上层 → 等退出 → 再握手）。
+  这是一个**新能力**，会引入一条新的进程生命周期，需另行决策；本次只交付「身份声明 + 证据分级 +
+  诚实的失败」，不擅自扩大范围。
+
+- **人工待办**：**只有一个** —— 跑一次 `node <runtime> login` 并在浏览器里点完。
+  **不要把 `-32000 Authentication required` 当代码缺陷去查**；也**不要**去查 key / baseURL /
+  网络（本机 `127.0.0.1:62481` 与引擎的 `initialize` 都正常）。
+
+### 11.1 已解决：操作员完成带外登录，验收跑通（2026-09-19 05:00）
+
+**操作员做的动作**：在本机装了**独立** `qodercn` CLI，并用**同一账号**在浏览器里完成设备流。
+没有碰应用、没有碰钥匙串、没有抓过任何 token。
+
+**证据一：引擎自己的存储变了样**（同一台机器、同一条命令，登录前后两个答案）：
+
+```
+$ ls -la ~/.qoder-cn/.auth/
+-rw-------  1 king staff  1280 2026-09-19 04:49 user        ← 登录前不存在
+$ node <runtime> status -o json
+登录前: {"logged_in":false,"version":"1.1.53","allow_byok":0}
+登录后: {"logged_in":true,"auth_source":"local","login_method":"browser",
+         "username":"不会呼吸的哈士奇","user_type":"personal_standard"}
+```
+
+**证据二：同一条验收命令，从 `-32000` 变成完整回合**：
+
+```
+$ node --experimental-strip-types scripts/acceptance.ts qoder-cn "Reply with exactly: OK"
+probe  qoder-cn: track=desktop available=true
+       executable=…/qoder-worker-runtime.obf.mjs version=1.1.53 reason=-
+run    session=sess_bf11c06e-3c6e-4a25-9cba-30f68c47fc6b status=running
+  [status] session 133cf9da-964d-4af3-b455-bba117121d45 ready
+  [status] available commands update: 268 commands
+  [thinking] …
+  [text] OK
+result status=completed exit=143 durationMs=46412
+text: OK
+```
+
+**本记录的正向结论**：**桥没有为此改一行代码**。它只是 spawn 引擎，引擎自己去读
+`$HOME/.qoder-cn/.auth/` —— 这印证了 §0「只记录、不绕过」是对的：诊断指向的是**账号侧的
+一步人工动作**，不是一个需要绕过的技术障碍。同族先例（记录 8 ZCode 授权、记录 9 hermes 档位）
+里被拒绝的那些绕法，在这里也没有被用上，而问题照样解决了。
+
+**但必须同时记下另一半（否则这条记录会误导人）**：认证墙解除**不等于**验收变绿 —— 登录后
+第一跑拿到的仍然是 `status=failed`。那**不是**上游、不是凭据、不是引擎，而是**桥自己的缺陷**：
+引擎不理会 stdin EOF，桥等满 2 s 宽限期后自己发 SIGTERM，引擎 shutdown handler `exit(143)`，
+而 settle 逻辑用 `(exit.code ?? 0) !== 0` 把**桥自己那一刀**算在引擎头上，把一个已经交付了
+`[text] OK` 的回合判成失败并清空 `text`。
+
+按本文件 §0 的口径，**这一条不属于本文件的收录范围**（本文件只记「模型 / 凭据 / 上游网络」类
+故障，且只记不修）。它是桥自己的逻辑缺陷，所以**修在代码里**，完整根因、修法与「为什么整套测试
+都没测出来」记在 `docs/findings-qoder-cn-desktop.md` **§8.2**，决策记录见 `docs/plan.md` D40 的
+2026-09-19 更新。这里只留一句给下一个人：**「凭据修好了但验收还是红的」时，先怀疑桥，
+别先怀疑上游。**
+
+**人工待办**：无。本条关闭。
+
