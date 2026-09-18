@@ -352,7 +352,14 @@ DSH_AGENTS_BRIDGE_ACP_AUTH_METHOD=qoderclicn-login node … scripts/acceptance.t
 而 ACP 的这一帧既没有带出登录 URL（§5.1b 实测确认），也没有在 stdout/stderr 上打印任何提示，
 桥无法把它呈现给人。所以这条路**不能用**，出路是 §5 的第 1 条。
 
-### 5.5 选模型：`session/new` 的 `model` 参数被**静默忽略** [proven 的负结果]
+### 5.5 选模型：`session/new` 的 `model` 参数被静默忽略 —— 但引擎**有**一个能用的模型旋钮
+
+> **更正（2026-09-19 05:55）**：本节原来下的结论是「模型可以**读**，但不能**选**」。
+> **那句话说错了，而且错得不小。** 错的根源是**只测了 driver 已有的那一根杠杆**，
+> 就把「这根杠杆不通」写成了「引擎不能选模型」。同一轮里我已经在测
+> `set_config_option` 的**负控**（假 configId / 假 effort 值），却没有去试
+> `configId:"model"` —— 而那正是 ACP 标准的模型旋钮，也是 driver 为 **effort**
+> 已经在用的同一根。补测之后结论反过来：**引擎能选，桥不能。** 详见 §5.5b。
 
 `--help` 里有两项，但**都需要登录**（登录前实测）：
 
@@ -380,12 +387,52 @@ session/set_config_option {configId:"reasoning_effort", value:"NOT_A_REAL_LEVEL"
 
 所以沉默是**这个参数专属**的，不是普遍宽松。
 
-**结论**：`model: false` 的含义从 **unproven 升级为 disproven** —— 不是「还没测」，
-而是「测过了，这条路不通」。模型可以**读**（`models.currentModelId` = `qfmodel`，
-driver 的 `extractCurrentModelId` 能拿到它），但不能**选**。
+**这一段仍然成立**：`session/new` 的 `model` 参数确实被忽略，而它**是 driver 唯一的模型杠杆**。
+所以 `model: false` 对**当前代码**是对的。但它证明的只是「桥这条路不通」，
+**不是**「引擎没有模型选择」—— 后者在 §5.5b 被实测否掉。
 
-引擎 CLI 自己的 `-m/--model` 是另一条路 —— 应用给 worker 传的就是 `--model qfmodel`，
-走的是 SDK 的 stream-json 通道（§1），不是 ACP；而 ACP 这条路径上没有第二个杠杆。
+引擎 CLI 自己的 `-m/--model` 是第三条路 —— 应用给 worker 传的就是 `--model qfmodel`，
+走的是 SDK 的 stream-json 通道（§1），不是 ACP。
+
+### 5.5b 引擎**有**一个被校验、且真的生效的模型旋钮：`set_config_option {configId:"model"}` [proven]
+
+`session/new` 的 `configOptions` 里除了 `mode` 和 `reasoning_effort`，**还有一条 `model`**
+（`category: "model"`，`currentValue: "qfmodel"`，14 个值）。它是标准 ACP 旋钮，driver 为
+effort 用的就是同一个调用。四组实测（桌面引擎 1.1.53，`/tmp/qoder-cn-desktop-model-probe.mjs`）：
+
+| 请求 | 结果 |
+|---|---|
+| `{configId:"model", value:"qmodel"}` | **ACCEPTED**，`config_option_update` 确认 `model.currentValue = "qmodel"` |
+| `{configId:"model", value:"auto"}` | **ACCEPTED** |
+| `{configId:"model", value:"bogus-model-xyz"}` | **REJECTED** `-32602 Invalid params: Invalid value for config option model: bogus-model-xyz` |
+| `{configId:"model", value:"Qwen3.8-Flash"}`（显示名而非 id） | **REJECTED** 同上 |
+
+第三、四行是**负控**，也是这一节比 §5.5 有力的地方：引擎**校验**这个值，只收真实 `modelId`，
+而 §5.5 里同一个参数喂假 id 是**静默通过**的 —— 两根杠杆的区别由此一目了然。
+
+**「旋钮动了」还不够，得证明它真的换模型**，否则可能只是个标签。独立证人就在
+`session/prompt` 的结果里：`_meta.quota.model_usage[0].model` 是引擎自己的计费口径。
+走一个真回合（`/tmp/qoder-model-turn-proof.mjs`）：
+
+```
+requested=qmodel   set=ACCEPTED   currentModelId: qfmodel -> "qmodel"
+                  billed="qmodel"   stopReason="end_turn"   text="OK"
+```
+
+**计费模型跟着变了**，所以这根旋钮是真的。同一脚本对独立 CLI（1.1.56）跑出**完全相同**的结果。
+
+**一个必须记下来的耦合**：`reasoning_effort` 的可选值**随所选模型变化**。
+默认 `qfmodel`（Qwen3.8-Flash）给 4 档 `xhigh/low/medium/none`；把模型切成 `qmodel`
+（Qwen3.7-Plus）之后，`config_option_update` 里 `reasoning_effort` 只剩 `[{"value":"none"}]`。
+所以将来真接上模型旋钮，**顺序必须是先设模型、再读 effort 档位** —— 反过来会拿着上一个模型的
+档位表去校验。
+
+**边界**：这一条**没有**改变 `capabilities.model`，它仍是 `false`。理由是 `capabilities` 描述
+**桥能不能**，不是**引擎能不能**（§6 开头那段口径）。driver 里没有任何一行会给
+`set_config_option` 发 `configId:"model"`，所以今天**没有调用方**能在这条身份上选模型。
+要把 `false` 翻成 `true`，得改 driver（加一个与 `extractEffortOption` 对称的 model 版），
+那是**另一件工作**，会同时影响 `qoder-cn`、`qoderclicn` 和 `codebuddy-code-acp` 三个身份 ——
+本轮的交付范围不含它，记录在此备查。
 
 ### 5.6 模型清单：**更正** —— 此前转录的是另一套旧 CLI 的过期缓存 [proven（真实帧）]
 
@@ -423,11 +470,14 @@ driver 的 `extractCurrentModelId` 能拿到它），但不能**选**。
 三点结论：
 
 1. **`Qwen3.8-flash` 确实存在**，标识符是 **`qfmodel`**（显示名 `Qwen3.8-Flash`，0.00x Credit）。
-   用户最初问的「能否用 Qwen3.8-flash」——**模型存在**；只是受 §5.5 限制，**ACP 路径选不了它**
-   （而引擎当前的默认模型恰好就是它）。
+   用户最初问的「能否用 Qwen3.8-flash」——**模型存在，而且是引擎当前的默认模型**。
+   选它这条路在**引擎侧是通的**（§5.5b 实测计费模型跟着变），不通的是**桥侧**：
+   driver 只会把模型塞进 `session/new` 的 `model` 参数，而那个参数被忽略。
 2. **`--list-models` / `-m` 与 ACP 是两条不同的路**：前者在 CLI 通道，后者才是桥走的路。
-3. **桥侧管道已就位但无效**：driver 确实会在 `session/new` 里带上 `model`，引擎忽略它 ——
-   不是桥没接线，是这条线在引擎侧不通。
+3. **桥侧管道接错了线**：driver 确实会在 `session/new` 里带上 `model`，引擎忽略它 ——
+   但引擎在 `configOptions` 里**另外**广告了一条 `model` 旋钮，走 `set_config_option`，
+   被校验、且真的生效（§5.5b）。driver 对 effort 用的是同一个调用，对 model **一行都没写**。
+   所以正确的说法不是「这条线在引擎侧不通」，而是**桥把线接到了引擎不读的那个端子上**。
 
 ## 6. capabilities 的证据分级（三项 false，一项由 unproven 翻成 true）
 
@@ -446,12 +496,19 @@ driver 的 `extractCurrentModelId` 能拿到它），但不能**选**。
 > **`effort` 从 `false` 翻成 `true`（proven，端到端）**；
 > **`model` 仍是 `false`，但含义从 unproven 升级为 disproven**（测过了，参数被忽略，§5.5）；
 > `mcpConfig` / `clientTools` 仍 `false`（两份捕获里都没有对应流量）。
+>
+> **二次更正（2026-09-19 05:55）**：`model` 这一格的值**没变，但理由换了，而且原来的理由是错的**。
+> 原文写「**disproven** —— 测过了，这条路不通」「模型可以读但不能选」。补测 §5.5b 之后：
+> **引擎能选模型**（`set_config_option {configId:"model"}` 被校验、被 `config_option_update` 确认、
+> 且**计费模型真的跟着变**），**是 driver 没有那根杠杆**。所以这一格的含义从「引擎不行」
+> 改成「**桥不行**」—— 对 `capabilities` 的语义（它描述桥，不描述引擎，见本节开头）来说，
+> `false` 仍然正确，但**不能再说 disproven**：那不是引擎的否定结论，是桥的实现缺口。
 
 | capability | 值 | 依据 |
 |---|---|---|
 | `resume` | **true** | `initialize` 帧声明 `loadSession: true` + `sessionCapabilities.resume` [proven]；**仍未实际调用**（两次捕获都没走 `session/resume`） |
-| `model` | false（**disproven**） | 引擎**能读**：`models.currentModelId` = `qfmodel`，14 个模型可选。**不能设**：`session/new` 的 `model` 参数被静默忽略（§5.5 三组对照 + 两条校验负控）。driver 唯一的模型杠杆正是这个参数，所以 `false` |
-| `effort` | **true**（**proven，端到端**） | 会话广播 `reasoning_effort`（`xhigh`/`low`/`medium`/`none`）；driver 自己的 `extractEffortOption` 能读出它；`session/set_config_option {configId:"reasoning_effort", value:"low"}` 被接受并由 `config_option_update` 通知确认。**全栈真机复核**（`manager.run` + `effort`）：`effort=low` → `completed` 且**零条** effort 警告；负控 `effort=high`（本引擎不提供的档位）→ 恰好 1 条警告，逐字报出 `advertised: "xhigh,low,medium,none"` |
+| `model` | false（**bridge-side 缺口，不是 engine-side 否定**） | 引擎**能读**（`models.currentModelId` = `qfmodel`，14 个模型）也**能选**（§5.5b：`set_config_option {configId:"model"}` 被接受、被 `config_option_update` 确认、假值报 `-32602 Invalid value`、**计费模型跟着变**）。但 **driver 没有这根杠杆**：它只把模型塞进 `session/new` 的 `model` 参数，而那个参数被静默忽略（§5.5）。`capabilities` 描述桥能不能，所以 `false` |
+| `effort` | **true**（**proven，端到端**） | 会话广播 `reasoning_effort`（`xhigh`/`low`/`medium`/`none`）；driver 自己的 `extractEffortOption` 能读出它；`session/set_config_option {configId:"reasoning_effort", value:"low"}` 被接受并由 `config_option_update` 通知确认。**全栈真机复核**（`manager.run` + `effort`）：`effort=low` → `completed` 且**零条** effort 警告；负控 `effort=high`（本引擎不提供的档位）→ 恰好 1 条警告，逐字报出 `advertised: "xhigh,low,medium,none"`。**档位表随所选模型变化**（§5.5b 末段），所以将来接上模型旋钮后顺序不能反 |
 | `mcpConfig` | false | `mcpCapabilities` 是声明了（http/sse），但 `mcpServers` 两份捕获里都只发过 `[]`，从未配过真 server |
 | `clientTools` | false | 没有观测到 `fs/*` / `terminal/*` 回调，driver 默认也不声明 |
 
@@ -675,3 +732,5 @@ driver 只看 **code**，所以**唯一能走进那条分支的形状，恰好�
 维护，桌面版那套 app 私有加密存储不参与），而且可执行文件不是 app bundle 里那个 33 MB 的 obf
 bundle。届时照 CLI catalog 的 `codebuddy-code-acp` 先例加一行即可 —— **本次只做用户要的桌面版**，
 不擅自扩大范围。
+
+
