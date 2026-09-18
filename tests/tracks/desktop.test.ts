@@ -12,6 +12,7 @@
  * paths — a locale flag or an env var would be the wrong model.
  */
 
+import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 
 import { describe, expect, it } from 'vitest'
@@ -72,6 +73,20 @@ describe('desktop track catalog', () => {
     expect(createDesktopPolicy().searchPath).toEqual([])
     expect(policyFor('desktop').searchPath).toEqual([])
     expect(policyFor('desktop').track).toBe('desktop')
+  })
+
+  it('carries Qoder CN as a first-class desktop identity, not a scan candidate', () => {
+    // The engine lives in the app's PRIVATE node_modules, a path no scanner
+    // knows and that is renamed between releases — so it is declared here, not
+    // discovered. Declaring it is also the only way it can be driven at all:
+    // there is no `qoderclicn` on PATH on this host.
+    const qoder = descriptor('qoder-cn')
+    expect(qoder.unsupported).toBeUndefined()
+    expect(qoder.family).toBe('acp')
+    expect(qoder.command.executable).toContain('/Applications/Qoder CN.app/')
+    expect(qoder.command.executable).toContain('@qoder-ai/qoder-cn-agent-sdk')
+    // …and it is reachable from the built-in table the registry actually uses.
+    expect(BUILTIN_DESCRIPTORS.find((entry) => entry.id === 'qoder-cn')).toEqual(qoder)
   })
 
   it('ships each bundled engine WITH an interpreter (node does not come from PATH)', () => {
@@ -175,4 +190,52 @@ describe.skipIf(!haveDomestic || !haveInternational)('installed bundles (host-de
     // in the catalog claiming byte-identity would be stale, and this test says so.
     expect(read(WORKBUDDY_BUNDLE).equals(read(WORKBUDDY_AI_BUNDLE))).toBe(true)
   })
+})
+
+/**
+ * Qoder CN, probed for real where the app is installed. This is the half that
+ * makes `tests/drivers/qoder-cn-acp.test.ts` more than a fixture-reading
+ * exercise: it proves the absolute path in the descriptor is a binary that
+ * actually runs on this host, and it pins the version the capture was taken
+ * against.
+ */
+const qoderCn = descriptor('qoder-cn')
+const qoderInterpreter = qoderCn.command.interpreter
+if (qoderInterpreter === undefined) throw new Error('qoder-cn ships without an interpreter')
+const haveQoder = fs.existsSync(qoderCn.command.executable)
+
+describe.skipIf(!haveQoder)('Qoder CN bundle (host-dependent)', () => {
+  it(
+    'answers --version out of the bundle the descriptor names',
+    () => {
+      // A real spawn of the descriptor's OWN interpreter + executable — nothing
+      // resolved from PATH. This is the oracle for `agentInfo.version` in the
+      // ACP fixture and for docs/findings-qoder-cn-desktop.md §1. If Qoder
+      // renames its worker runtime between releases, this goes red first and
+      // tells you the descriptor needs a new path.
+      const out = execFileSync(qoderInterpreter, [qoderCn.command.executable, '--version'], {
+        encoding: 'utf8',
+        timeout: 30_000,
+      })
+      expect(out.trim()).toBe('1.1.53')
+    },
+    40_000,
+  )
+
+  it(
+    'costs real time to probe — a 33 MB ESM bundle, not a shim',
+    () => {
+      // Deliberately not a perf gate: a floor, not a ceiling. Version-probing
+      // this identity spawns the whole bundle (~1.2 s cold on this host), which
+      // is why one identity can move a full agents_probe by half a second. A
+      // value near zero would mean the descriptor points at a stub.
+      const started = Date.now()
+      execFileSync(qoderInterpreter, [qoderCn.command.executable, '--version'], {
+        encoding: 'utf8',
+        timeout: 30_000,
+      })
+      expect(Date.now() - started).toBeGreaterThan(50)
+    },
+    40_000,
+  )
 })

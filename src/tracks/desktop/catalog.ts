@@ -7,9 +7,13 @@
  *
  *  - the executable is an absolute path INSIDE the bundle; it is never
  *    searched for on PATH, and a missing bundle is a hard "unsupported",
- *  - auth is the app's own login (WorkBuddy reuses `copilot.tencent.com`; the
- *    user never pastes a key), so credential status is `not-applicable` here
- *    and the bridge must not look for a token file,
+ *  - auth is normally the app's own login (WorkBuddy reuses
+ *    `copilot.tencent.com`; the user never pastes a key), so credential status
+ *    is `not-applicable` for those and the bridge must not look for a token
+ *    file — but "the app is signed in" is NOT the same as "a launch we spawn is
+ *    signed in": Qoder CN mints a per-job token for its own workers and never
+ *    hands it out, so a bare launch of the very same binary is uncredentialed
+ *    and that identity is `unknown`, not `not-applicable`,
  *  - engines are frequently `#!/usr/bin/env node` scripts shipped WITHOUT node,
  *    so an explicit interpreter is mandatory (verified failure:
  *    `env: node: No such file or directory`),
@@ -62,6 +66,23 @@ const BUNDLED_NODE = '/opt/homebrew/bin/node'
 const ZCODE_CLI = '/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs'
 const ZCODE_BUILTIN_PROVIDER_CONFIG =
   '/Applications/ZCode.app/Contents/Resources/config/provider/zcode-builtin.json'
+/**
+ * Qoder CN's agent is not a CLI on PATH and not a launcher in `bin/` — it is
+ * the Agent SDK's worker runtime, hidden in the app's PRIVATE node_modules.
+ *
+ * `runtime-info.json` beside it reads `{"name":"qoder-worker-runtime",
+ * "version":"1.1.53","productName":"qoderclicn","site":"cn"}`, i.e. this bundle
+ * IS the domestic `qoderclicn` binary. The app launches this exact path itself
+ * (proven: its own `qodercli/qoder-agent-sdk.log` records the WorkerTransport
+ * argv) — but over the SDK's stream-json channel, NOT over ACP.
+ *
+ * `--acp` and `--yolo` are HIDDEN options (neither appears in `--help`, yet
+ * both parse — `--config-dir` on `status` really does fail as unknown, so this
+ * is not silent tolerance). They match the reference implementation's argv
+ * (`qoderclicn --yolo --acp`). See docs/findings-qoder-cn-desktop.md §1–2.
+ */
+const QODER_CN_CLI =
+  '/Applications/Qoder CN.app/Contents/Resources/app.asar.unpacked/node_modules/@qoder-ai/qoder-cn-agent-sdk/dist/_worker/qoder-worker-runtime.obf.mjs'
 
 /** The desktop-track identities, in probe order. */
 export const DESKTOP_TRACK_DESCRIPTORS: readonly AgentDescriptor[] = [
@@ -123,6 +144,41 @@ export const DESKTOP_TRACK_DESCRIPTORS: readonly AgentDescriptor[] = [
     capabilities: { resume: true, model: false, effort: false, mcpConfig: false },
     notes:
       'Headless contract (proven 0.16.5 up to the entitlement wall, docs/handoff-blockers.md record 8): `node zcode.cjs --prompt <text> --output-format stream-json` with ZCODE_BUILTIN_PROVIDER_CONFIG_FILE set; sessions continue via `--resume sess_…`; auth is the app login (Z.AI OAuth, encrypted credential store). A host whose plans are not entitled fails EVERY turn with turn.failed CONFIGURATION_ERROR "Select a model before continuing" — that is the account, not the bridge.',
+  },
+  {
+    id: 'qoder-cn',
+    track: 'desktop',
+    family: 'acp',
+    displayName: 'Qoder CN (bundled Qoder CLI CN, over ACP)',
+    // The wire selector is identity data, so it lives here and not in the
+    // driver: `--acp` is hidden (absent from --help) and `--yolo` is the
+    // headless permission switch the reference implementation uses.
+    command: { executable: QODER_CN_CLI, interpreter: BUNDLED_NODE, protocolArgs: ['--yolo', '--acp'] },
+    envPrefix: 'QODER_CN',
+    // Evidence-graded against TWO captures (both committed, both real bytes):
+    // the PRE-LOGIN handshake (qoder-cn-acp-handshake.ndjson), where
+    // `session/new` is a JSON-RPC ERROR (-32000 "Authentication required"), and
+    // the AUTHENTICATED session (qoder-cn-acp-authed-session.ndjson), where it
+    // answers a real session carrying `models` and `configOptions`.
+    //
+    //  - `resume: true` — `initialize` (which answered in BOTH states)
+    //    advertises `loadSession` + `sessionCapabilities.resume`.
+    //  - `effort: true` — PROVEN end to end, not inferred. The authenticated
+    //    `session/new` advertises `reasoning_effort` with 4 levels; the driver's
+    //    own `extractEffortOption` reads it; and
+    //    `session/set_config_option {configId:"reasoning_effort", value:"low"}`
+    //    is ACCEPTED and confirmed by a `config_option_update` notification.
+    //  - `model: false` — DISPROVEN, not merely unproven. The engine advertises
+    //    14 models and reports `currentModelId`, so a model can be READ; but
+    //    `session/new` params.model — the driver's ONLY lever for SETTING one —
+    //    is IGNORED. Measured with controls: the same `currentModelId` with and
+    //    without the parameter, and a bogus id accepted in silence, while a
+    //    bogus configId answers -32602 "Unknown config option".
+    //  - `mcpConfig` / `clientTools` false — never demonstrated: no `fs/*`,
+    //    `terminal/*` or `mcpServers` traffic appears in either capture.
+    capabilities: { resume: true, model: false, effort: true, mcpConfig: false, clientTools: false },
+    notes:
+      'Speaks ACP (`--yolo --acp`, both hidden options) and reads its OWN credential store (~/.qoder-cn/.auth) on launch. A bare launch does NOT inherit the running desktop login: the app keeps its own encrypted store and mints a PER-JOB token it pushes via QODER_SDK_AUTH_PAYLOAD_FILE instead of writing that store. So while that store is empty every run fails as `failed` at session/new with -32000 "Authentication required" — never as an empty success. The fix is out-of-band and needs no bridge change: run `qoderclicn login` once. Both directions are verified on this host — empty store → -32000; after login → a full turn with status=completed and the answer text intact. The bridge\'s own `authenticate` channel does NOT work here: the engine never answers that frame, so no login URL ever reaches the model. Once credentialed the session advertises `reasoning_effort`, so the bridge can set the effort dial; it also advertises 14 models and reports a `currentModelId`, but model SELECTION is not available — `session/new` params.model is ignored, so a model can be read but not chosen (docs/findings-qoder-cn-desktop.md §3–6, §8.2; docs/handoff-blockers.md record 11).',
   },
   {
     id: 'mimo',

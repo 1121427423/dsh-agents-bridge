@@ -350,6 +350,25 @@ const CREDENTIAL_PLANS: Readonly<Record<AgentId, CredentialPlan>> = {
     kind: 'delegated',
     detail: 'MiMo keeps its login inside the app bundle; there is no credential file for the bridge to read',
   },
+  'qoder-cn': {
+    // `unsourced` — and it STAYS `unsourced` now that a credential actually
+    // exists. The engine reads its own store (~/.qoder-cn/.auth/user, an opaque
+    // non-JSON blob this bridge has no contract for), so `unknown` is the
+    // honest status: "the bridge has no reader", which is NOT the same as "the
+    // credential is absent". Reading it is not the bridge's job and it is not
+    // needed — the engine does that itself on launch.
+    //
+    // What must NOT be claimed: that a bare launch inherits the DESKTOP login.
+    // It does not. The app keeps its own encrypted store
+    // (…/com.qodercn.app.stable/auth.v1.dat) and mints a PER-JOB token for its
+    // own workers, so nothing it does populates the CLI store. A working bare
+    // launch depends on that store being filled out of band — proven both ways:
+    // while it was empty every run died at `session/new` with -32000, and after
+    // `qoderclicn login` wrote it, the same descriptor completed a full turn.
+    kind: 'unsourced',
+    detail:
+      'the desktop login is not delegated to a bare launch: the app keeps its own encrypted store and mints a per-job token for its own workers. A launched Qoder CN reads ~/.qoder-cn/.auth itself, which is an opaque non-JSON blob this bridge has no reader for — hence unknown, not missing. Populate it out of band with `qoderclicn login`',
+  },
   generic: {
     kind: 'unsourced',
     detail:

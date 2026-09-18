@@ -1179,6 +1179,15 @@ describe('scanned bundles are candidates, never auto-launchable (IM-1)', () => {
     expect(descriptor.command.executable).toContain('HouseAgent.app')
   })
 
+  // 30 s, and the number is measured, not guessed. This test probes a REAL
+  // registry twice with the REAL spawner (that is the point of IM-1), so it pays
+  // the cold-start cost of every declared desktop engine — and since `qoder-cn`
+  // joined the catalog that includes one 33 MB ESM bundle at ~1.2 s a spawn
+  // (docs/findings-qoder-cn-desktop.md §7). Measured here: 8.09 s before that
+  // identity existed, 8.48 s after, so the budget was already past the 5 s
+  // default and the new identity is what pushed it over under parallel load.
+  // This is a cost the catalog chose, not a bug in the gate — but a red suite
+  // is a red suite, so the test says its own price out loud.
   it('never executes a scanned bundle during a probe (marker oracle)', async () => {
     const root = freshRoot()
     const marker = path.join(root, 'EXECUTED-BY-PROBE')
@@ -1219,7 +1228,7 @@ describe('scanned bundles are candidates, never auto-launchable (IM-1)', () => {
       ],
     }).probe()
     expect(fs.existsSync(marker)).toBe(true)
-  })
+  }, 30_000)
 
   it('gates the version probe with the same allow-list as a run', async () => {
     const root = freshRoot()

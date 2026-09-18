@@ -72,6 +72,7 @@ export function makeManager(
     'workbuddy-ai',
     'autoclaw',
     'zcode',
+    'qoder-cn',
   ].map((id) => [id, override]))
   return createAgentManager({
     logger: createLogger('manager-test'),
