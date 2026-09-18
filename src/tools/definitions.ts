@@ -1860,9 +1860,18 @@ export function createToolDefinitions(manager: AgentManager, seat: JobSeat = {})
       ),
     },
     execute: async (args) => {
+      // Same boundary contract as `agents_run` and each `agents_run_many` entry:
+      // a whitespace-only prompt is refused here instead of reaching the
+      // dialect's resume path, where it can land in an option or stdin slot.
+      const prompt = args.prompt.trim()
+      if (prompt === '') {
+        throw new Error(
+          'prompt is required and must be non-empty; the delegated agent cannot see this conversation, so the follow-up has to contain the whole task (paths, constraints, acceptance criteria).',
+        )
+      }
       let snapshot: SessionSnapshot
       try {
-        snapshot = await manager.send(args.sessionId, args.prompt)
+        snapshot = await manager.send(args.sessionId, prompt)
       } catch (err) {
         throw await describeRunFailure(manager, err, 'send')
       }

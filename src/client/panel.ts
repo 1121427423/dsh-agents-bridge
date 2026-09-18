@@ -241,6 +241,18 @@ function TranscriptView({
       createElement('span', { className: `${ROOT_CLASS}__spacer` }),
       createElement('span', { className: `${ROOT_CLASS}__mono` }, `${visible.length}`),
     ),
+    // A trimmed transcript is not an empty one: the events existed, the retained
+    // window just no longer starts at #0. Without this the panel opens at
+    // `#200, #201, …` and the missing head reads as a bug in the agent. It gets
+    // its own strip rather than `__state`: `__state` is the CENTRED empty-state
+    // placeholder (`margin: auto`), which would push the rows out of place.
+    snapshot.transcriptDropped > 0
+      ? createElement(
+          'div',
+          { className: `${ROOT_CLASS}__notice` },
+          translator.t('transcriptDropped', { n: snapshot.transcriptDropped }),
+        )
+      : null,
     visible.length === 0
       ? createElement(
           'div',

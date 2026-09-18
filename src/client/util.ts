@@ -81,6 +81,11 @@ export interface ClientOutputPayload {
   readonly sessionId: string
   readonly status: ClientRunStatus
   readonly nextIndex: number
+  // The host also sends `firstIndex` / `dropped` (ABI v8). Neither is carried
+  // here on purpose: every message already carries its own ABSOLUTE `index`
+  // (the merge key), so `messages[0].index` is the whole story about a trimmed
+  // head, and `dropped` is PER READ rather than cumulative — see
+  // `SupervisorSnapshot.transcriptDropped`.
   readonly terminal: boolean
   readonly messages: readonly ClientMessage[]
   readonly result?: {

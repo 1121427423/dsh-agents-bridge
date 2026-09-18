@@ -12,6 +12,7 @@
  * It skips elsewhere, and nothing above depends on it.
  */
 
+import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -606,6 +607,124 @@ describe('scan hardening', () => {
       '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict>\n<key>CFBundleIdentifier</key>\n<string>com.small.app</string>\n</dict></plist>\n',
     )
     expect(readBundleIdentifier(smallContents, defaultReadDirForTest)).toBe('com.small.app')
+  })
+
+  it('never reads a file through a final-component symlink (IM-13)', () => {
+    // `inferFamily` is the one exported reader that takes a path directly, so it
+    // is where `readBounded`'s OWN refusal is observable: a symlink planted
+    // where an engine is expected must not have its target's bytes inspected.
+    // The walk's entry-level `lstat` filter cannot cover this on its own, since
+    // the entry can be swapped to a symlink after the directory was listed.
+    const root = freshRoot()
+    const outside = path.join(tmpRoot, `outside-engine-${bundleCounter}.mjs`)
+    fs.writeFileSync(outside, '#!/usr/bin/env node\n// openclaw gateway\n')
+    const link = path.join(root, 'engine.mjs')
+    fs.symlinkSync(outside, link)
+
+    expect(inferFamily(link, ['openclaw', 'generic'], 'plain')).toBe('generic')
+    // Positive control: the very same bytes DO match when reached by a real
+    // path, so the fallback above is a refusal and not a broken fixture.
+    expect(inferFamily(outside, ['openclaw', 'generic'], 'plain')).toBe('openclaw')
+  })
+
+  it('still reads the head of an engine file larger than its window (IM-13)', () => {
+    // `inferFamily` searches a PREFIX, so a file past the window must still be
+    // inspected: refusing it on size alone would demote a real engine to
+    // `generic`. The hint sits in the first line, well inside the window, and
+    // the bulk follows it — and the bundle slug is `plain`, so the match can
+    // only have come from the file.
+    const root = freshRoot()
+    const enginePath = path.join(root, 'big.mjs')
+    fs.writeFileSync(enginePath, `#!/usr/bin/env node\n// an openclaw gateway\n${'// padding\n'.repeat(20_000)}`)
+    expect(fs.statSync(enginePath).size).toBeGreaterThan(64_000)
+    expect(inferFamily(enginePath, ['openclaw', 'generic'], 'plain')).toBe('openclaw')
+  })
+
+  it('refuses a symlink even when the listing claims it is a regular file (IM-13)', () => {
+    // The walk's `readDir` derives `isFile` from an `lstat`, but that answer is
+    // taken BEFORE the read. A reader that reports a regular file while the path
+    // on disk is a symlink is exactly that TOCTOU window, and the read has to
+    // close it on its own rather than trust the listing.
+    const root = freshRoot()
+    const contents = path.join(root, 'Swap.app', 'Contents')
+    fs.mkdirSync(contents, { recursive: true })
+    const plist = (id: string): string =>
+      `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict>\n<key>CFBundleIdentifier</key>\n<string>${id}</string>\n</dict></plist>\n`
+    const outside = path.join(tmpRoot, `outside-plist-${bundleCounter}.xml`)
+    fs.writeFileSync(outside, plist('com.example.outside'))
+    fs.symlinkSync(outside, path.join(contents, 'Info.plist'))
+
+    const listingSaysRegularFile: DirReader = () => [
+      { name: 'Info.plist', isDirectory: false, isFile: true, size: 256 },
+    ]
+    expect(readBundleIdentifier(contents, listingSaysRegularFile)).toBeUndefined()
+
+    // Positive control: the same listing over a REAL file still yields the id,
+    // so the refusal is about the symlink and not about the injected reader.
+    const real = path.join(root, 'Real.app', 'Contents')
+    fs.mkdirSync(real, { recursive: true })
+    fs.writeFileSync(path.join(real, 'Info.plist'), plist('com.example.real'))
+    expect(readBundleIdentifier(real, listingSaysRegularFile)).toBe('com.example.real')
+  })
+
+  it('never follows a symlinked product.json out of the bundle (IM-13)', () => {
+    // End-to-end shape of the same attack, and the half the walk CANNOT catch by
+    // itself: a bundle whose `product.json` is a symlink to a file the bundle
+    // does not own. `readDir` derives `isFile` from an `lstat`, so on its own it
+    // filters the entry out and `readBounded` is never reached at all — the
+    // injected reader below therefore reports that one entry as a regular file,
+    // which is exactly what a listing taken a moment earlier would have said.
+    // The READ then has to be the thing that refuses.
+    const root = freshRoot()
+    const bundle = writeBundle(root, { name: 'Tunnel2.app', product: productJson({ applicationName: 'tunnel2' }) })
+    const product = path.join(bundle, 'Contents', 'Resources', 'app.asar.unpacked', 'cli', 'product.json')
+    const outside = path.join(tmpRoot, `outside-product-${bundleCounter}.json`)
+    fs.writeFileSync(outside, productJson({ applicationName: 'tunnel2' }))
+    fs.rmSync(product)
+    fs.symlinkSync(outside, product)
+
+    // Every directory is listed for real; only that one entry is misreported.
+    const lyingAboutProduct: DirReader = (absolutePath) => {
+      const entries = defaultReadDirForTest(absolutePath)
+      if (absolutePath !== path.dirname(product)) return entries
+      return entries.map((entry) =>
+        entry.name === 'product.json' ? { ...entry, isDirectory: false, isFile: true, size: 512 } : entry,
+      )
+    }
+
+    const scan = scanDesktopBundles({ roots: [root], readDir: lyingAboutProduct })
+    expect(scan.identities).toEqual([])
+
+    // Positive control: swap the symlink for a real file and the SAME reader
+    // discovers the identity, so the empty result above is the refusal and not a
+    // fixture that never had a candidate to begin with.
+    fs.rmSync(product)
+    fs.writeFileSync(product, productJson({ applicationName: 'tunnel2' }))
+    const control = scanDesktopBundles({ roots: [root], readDir: lyingAboutProduct })
+    expect(control.identities.map((entry) => entry.descriptor.id)).toEqual(['tunnel2'])
+  })
+
+  it('does not hang on a FIFO planted where a readable file is expected (IM-13)', (context) => {
+    // Opening a FIFO for a read waits for a writer an attacker never supplies.
+    // `readBounded` OPENS before it stats — the flags plus the `fstat` are what
+    // make a single lookup safe — so `O_NONBLOCK` is load-bearing: without it
+    // this call blocks forever instead of returning a fallback, and the test
+    // times out rather than failing an assertion.
+    const root = freshRoot()
+    const fifo = path.join(root, 'engine.mjs')
+    try {
+      execFileSync('mkfifo', [fifo])
+    } catch {
+      // `mkfifo` is POSIX-only, and a host without it cannot express this
+      // property at all. SKIP — never return: a test that bails out silently
+      // reports green while asserting nothing, which is the exact failure this
+      // suite exists to catch. Deliberately probed HERE rather than at module
+      // load, so a sandbox that blocks process spawning cannot take the whole
+      // file down during collection.
+      context.skip()
+      return
+    }
+    expect(inferFamily(fifo, ['openclaw', 'generic'], 'plain')).toBe('generic')
   })
 })
 

@@ -58,6 +58,12 @@ export interface Dict {
   readonly sessionOutputTitle: string
   readonly noEventsYet: string
   readonly waitingForAgent: string
+  /**
+   * Notice above the transcript when it does not start at event #0 — the
+   * retained window begins later. Source-neutral on purpose: the trim can come
+   * from the host's ring or from this panel's own merge cap.
+   */
+  readonly transcriptDropped: string
   /** Row suffix carrying a finished run's exit status (`exit 0`). */
   readonly exitCode: string
   /** Row body for a FINISHED run that kept no output (restored, or spilled). */
@@ -163,6 +169,7 @@ const zh: Dict = {
   sessionOutputTitle: '输出',
   noEventsYet: '还没有事件。这个 agent 仍在工作，输出会陆续到达。',
   waitingForAgent: '等待第一个事件…',
+  transcriptDropped: '最早的 {n} 个事件已不在保留窗口内；下面的编号是绝对序号。',
   exitCode: '退出码 {code}',
   noOutputKept: '这次调用没有保留输出（会话已结束）。',
   enginesTitle: '引擎可用性',
@@ -257,6 +264,7 @@ const en: Dict = {
   sessionOutputTitle: 'Output',
   noEventsYet: 'No events yet. The agent is still working; output will arrive as it goes.',
   waitingForAgent: 'Waiting for the first event…',
+  transcriptDropped: 'The first {n} event(s) are outside the retained window; the numbers below are absolute.',
   exitCode: 'exit {code}',
   noOutputKept: 'No output retained for this run — it has already finished.',
   enginesTitle: 'Engine availability',

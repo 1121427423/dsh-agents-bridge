@@ -1,0 +1,8 @@
+# pnpm 12 refuses to run dependency install scripts unless they are explicitly
+# allowed. `esbuild` is a direct, version-pinned devDependency whose install
+# script only verifies the platform binary it already ships as an optional
+# dependency; without this entry `pnpm install` resolves every package and then
+# exits non-zero on ERR_PNPM_IGNORED_BUILDS, which makes the install that
+# `packageManager: pnpm@12.4.2` declares non-reproducible.
+allowBuilds:
+  esbuild: true

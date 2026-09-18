@@ -341,6 +341,42 @@ describe('SupervisorPanel — every state is readable', () => {
     store.stop()
   })
 
+  it('says so when the transcript does not start at #0', async () => {
+    // The panel used to open straight at `#200, #201, …` with no explanation,
+    // which reads as an agent that skipped its own first events.
+    const store = makeStore({
+      sessions: () => [session('a', 'running')],
+      output: () => ({
+        nextIndex: 202,
+        messages: [
+          { index: 200, type: 'text', text: 'mid-run', at: 0 },
+          { index: 201, type: 'text', text: 'later', at: 1 },
+        ],
+      }),
+    })
+    store.start()
+    await store.refresh()
+    await store.openSession('a')
+    const text = textOf(SupervisorPanel({ store, translator: createTranslator('en') }))
+    expect(text).toContain(createTranslator('en').t('transcriptDropped', { n: 200 }))
+    // The rows are still rendered — the notice explains them, it does not hide them.
+    expect(text).toContain('mid-run')
+    store.stop()
+  })
+
+  it('does not claim events are missing when the transcript starts at #0', async () => {
+    const store = makeStore({
+      sessions: () => [session('a', 'running')],
+      output: () => ({ nextIndex: 1, messages: [{ index: 0, type: 'text', text: 'first', at: 0 }] }),
+    })
+    store.start()
+    await store.refresh()
+    await store.openSession('a')
+    const text = textOf(SupervisorPanel({ store, translator: createTranslator('en') }))
+    expect(text).not.toContain(createTranslator('en').t('transcriptDropped', { n: 0 }))
+    store.stop()
+  })
+
   it('labels the poll state so "it stopped updating" is never a mystery', async () => {
     const idle = makeStore({ sessions: () => [session('a', 'completed')] })
     expect((await renderPanel(idle)).text).toContain(DICTS.en.pollIdle)

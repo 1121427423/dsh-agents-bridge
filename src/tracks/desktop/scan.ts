@@ -483,26 +483,98 @@ function findFile(
 }
 
 /**
- * Read a small file, refusing anything above the size cap. Never throws.
- *
- * The read is LAZY for a reason. The stat is what enforces the size cap, and a
- * `readFileSync` of a file that is a FIFO, a device node or a file on a stalled
- * network mount blocks the whole scan with no way to interrupt it — a `.app` is
- * untrusted input and must not be able to hang a probe. A `.mjs` engine is a
- * regular file in practice, and stat'ing it costs a syscall, so the stat is paid
- * up front for everything and the open is paid only on use.
+ * The two refusal flags `readBounded` opens with, each defaulted to `0` where a
+ * platform does not define it. The default is load-bearing: the flags are OR-ed
+ * into the open mode, so an `undefined` would make the mode `NaN` and EVERY
+ * open would fail — silently disabling the whole scan rather than weakening one
+ * guard. `0` means "this flag is absent", which is the degradation to want.
  */
-function readBounded(absolutePath: string, maxBytes = MAX_FILE_BYTES): string | undefined {
+const O_NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0
+const O_NONBLOCK = fs.constants.O_NONBLOCK ?? 0
+
+/**
+ * What to do about a file larger than the cap.
+ *
+ * `refuse` is the default because half a document is not a smaller document: a
+ * truncated `product.json` or `Info.plist` is a parse error, and "this bundle is
+ * unrecognised" is the honest answer. `truncate` is for a caller that only ever
+ * looks at a PREFIX — {@link inferFamily} searches the head for a family hint,
+ * where a long engine file should still be inspected rather than skipped.
+ */
+type BoundedOverflow = 'refuse' | 'truncate'
+
+/**
+ * Read a small file under a hard cap. Never throws.
+ *
+ * The cap is what stops a 2 GB `product.json`, and a `readFileSync` of a file
+ * that is a FIFO, a device node or a file on a stalled network mount blocks the
+ * whole scan with no way to interrupt it — a `.app` is untrusted input and must
+ * not be able to hang a probe.
+ *
+ * What this does NOT do is stat the path and then read the path. That is two
+ * lookups of the same name, and between them the name can be swapped: the walk
+ * already filters symlinked ENTRIES via `lstat`, but the bundle is
+ * user-writable, so the listing's answer is stale by the time the read happens.
+ * So the file is opened ONCE, with the refusal built into the open:
+ *
+ * - `O_NOFOLLOW` — the final component may not be a symlink, so a bundle cannot
+ *   tunnel a "product.json" to a file outside the scan roots and have its bytes
+ *   published as an identity. (Intermediate directories are still followed, so
+ *   the `/var` → `/private/var` shape of a real macOS tmp path is unaffected.)
+ * - `O_NONBLOCK` — opening a FIFO for a read waits for a writer an attacker
+ *   never supplies. Non-blocking lets the open return, and the `fstat` then
+ *   refuses the non-regular file.
+ * - `fstat` on the OPEN descriptor, not `stat` on the path — the cap and the
+ *   bytes actually read then describe the SAME inode, so the cap cannot be
+ *   evaded by growing the file between the check and the read.
+ *
+ * All of it is inert on a regular file, which is what every legitimate
+ * `product.json` / `Info.plist` / engine entry point is.
+ */
+function readBounded(
+  absolutePath: string,
+  maxBytes = MAX_FILE_BYTES,
+  overflow: BoundedOverflow = 'refuse',
+): string | undefined {
+  let fd: number
   try {
-    const stat = fs.statSync(absolutePath)
-    if (!stat.isFile() || stat.size > maxBytes) return undefined
+    fd = fs.openSync(absolutePath, fs.constants.O_RDONLY | O_NONBLOCK | O_NOFOLLOW)
   } catch {
+    // Missing, unreadable, or a final-component symlink (`ELOOP`): not a
+    // candidate, and never a throw.
     return undefined
   }
   try {
-    return fs.readFileSync(absolutePath, 'utf8')
+    const stat = fs.fstatSync(fd)
+    if (!stat.isFile()) return undefined
+    // A size the file DECLARES is settled here, without reading a byte of it.
+    if (overflow === 'refuse' && stat.size > maxBytes) return undefined
+    // `refuse` reads one byte PAST the cap: actually getting it is the proof the
+    // file is over, which catches one that grew after the `fstat` above.
+    const cap = overflow === 'refuse' ? maxBytes + 1 : maxBytes
+    const chunks: Buffer[] = []
+    let total = 0
+    while (total < cap) {
+      const buffer = Buffer.alloc(Math.min(64 * 1024, cap - total))
+      const read = fs.readSync(fd, buffer, 0, buffer.length, null)
+      if (read <= 0) break
+      total += read
+      chunks.push(buffer.subarray(0, read))
+    }
+    if (overflow === 'refuse' && total > maxBytes) return undefined
+    // Concatenate before decoding: a chunk boundary inside a multi-byte character
+    // is then never visible. A `truncate` read can still end mid-character, which
+    // costs one replacement char at the very end of a prefix — harmless to a
+    // substring search, and the only caller that asks for one.
+    return Buffer.concat(chunks, total).toString('utf8')
   } catch {
     return undefined
+  } finally {
+    try {
+      fs.closeSync(fd)
+    } catch {
+      // The descriptor is already gone; nothing to release.
+    }
   }
 }
 
@@ -970,7 +1042,11 @@ export function inferFamily(
   families: readonly ProtocolFamily[],
   bundleSlugName: string,
 ): ProtocolFamily {
-  const head = readBounded(absolutePath, ENGINE_HEAD_BYTES) ?? ''
+  // `truncate`: only the head is searched for a hint, so an engine file longer
+  // than the window must still be inspected. Refusing it would silently demote a
+  // real engine to `generic` — the bundle slug is matched too, but a slug is not
+  // always the family name.
+  const head = readBounded(absolutePath, ENGINE_HEAD_BYTES, 'truncate') ?? ''
   const haystack = `${bundleSlugName}\n${head.slice(0, ENGINE_HEAD_BYTES)}`
   for (const hint of FAMILY_HINTS) {
     if (hint.needle.test(haystack) && families.includes(hint.family)) return hint.family

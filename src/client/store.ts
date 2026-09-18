@@ -46,6 +46,19 @@ export interface SupervisorSnapshot {
   readonly selectedId: string | undefined
   readonly transcript: readonly ClientMessage[]
   readonly transcriptLoading: boolean
+  /**
+   * How many events the panel CANNOT show because `transcript` starts later
+   * than event #0. `0` whenever the first row really is the first event.
+   *
+   * Derived from the transcript itself — `transcript[0].index`, an absolute
+   * position that never re-bases — and NOT from the host's `dropped` field.
+   * `SessionOutput.dropped` is PER READ (`max(0, startIndex - sinceIndex)` in
+   * `kernel/manager.ts`): it says "you fell behind just now" and is back to `0`
+   * on the very next poll, so a notice driven by it blinks out on the second
+   * read while the head is still missing. The absolute index also covers the
+   * second thing that trims a head: this store's own `mergeMessages` cap.
+   */
+  readonly transcriptDropped: number
   /** Epoch ms of the last successful `status` read (for "updated Ns ago"). */
   readonly updatedAt: number
   /** `undefined` when the last read succeeded; otherwise the localized reason. */
@@ -208,6 +221,10 @@ export function createSupervisorStore(
       selectedId,
       transcript,
       transcriptLoading,
+      // Read off the transcript rather than tracked as its own state: the first
+      // RETAINED event's absolute index IS the number of events ahead of it that
+      // this panel never got to show (see `transcriptDropped`).
+      transcriptDropped: transcript.length === 0 ? 0 : (transcript[0]?.index ?? 0),
       updatedAt,
       error,
       pollMode,
@@ -293,6 +310,10 @@ export function createSupervisorStore(
       if (selectedId !== sessionId) return
       transcript = mergeMessages(transcript, read.messages)
       transcriptNextIndex = read.nextIndex
+      // `read.dropped` is deliberately NOT stored: it is per-read, so it would
+      // read 0 on the next poll and take the truncation notice with it. The
+      // snapshot derives the count from the transcript instead — see
+      // `SupervisorSnapshot.transcriptDropped`.
       transcriptTerminal = read.terminal
       transcriptError = undefined
     } catch (caught) {

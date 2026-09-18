@@ -308,6 +308,17 @@ const CSS = `
   align-items: center;
 }
 .${ROOT_CLASS}__stripMsg { flex: 1 1 auto; min-width: 0; }
+/* "The transcript does not start at #0." Muted amber rather than the strip's
+   red: nothing is broken and there is no retry — the events are simply older
+   than the retained window — but the reader must not think the agent skipped. */
+.${ROOT_CLASS}__notice {
+  flex: none;
+  border: 1px solid var(--dsw-alias-state-warn-primary, currentColor);
+  border-radius: var(--abg-radius);
+  color: var(--dsw-alias-state-warn-primary, inherit);
+  padding: 5px 8px;
+  font-size: var(--dsw-font-xxxs-11-font-size, 11px);
+}
 
 /* ---- confirmation sheet ------------------------------------------------ */
 .${ROOT_CLASS}__confirm {

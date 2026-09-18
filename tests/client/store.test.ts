@@ -411,6 +411,58 @@ describe('supervisor store — transcript', () => {
     store.stop()
   })
 
+  it('reports a trimmed head from the transcript, not from the per-read `dropped`', async () => {
+    // RR-IM-1: the host's `SessionOutput.dropped` is PER READ — `max(0,
+    // startIndex - sinceIndex)` — so it is non-zero only on the read that
+    // actually skipped the gap, and 0 on the very next poll. Storing it made the
+    // notice blink out on the second read while the head was still missing. The
+    // count is derived from the transcript's own absolute first index, so a
+    // later "nothing lost" read cannot erase it.
+    const clock = fakeClock()
+    const { api } = fakeApi({
+      sessions: () => [session('a', 'running')],
+      // The ring has already discarded #0..#299: the retained window starts at 300.
+      output: () => ({
+        nextIndex: 302,
+        messages: [
+          { index: 300, type: 'text', text: 'late', at: 0 },
+          { index: 301, type: 'text', text: 'later', at: 1 },
+        ],
+      }),
+    })
+    const store = makeStore(api, clock)
+    store.start()
+    await settle()
+    await store.openSession('a')
+    expect(store.getSnapshot().transcriptDropped).toBe(300)
+
+    // A second poll appends more events; the head is STILL missing, so the count
+    // must hold rather than fall back to 0.
+    await store.refresh()
+    expect(store.getSnapshot().transcriptDropped).toBe(300)
+    store.stop()
+  })
+
+  it('reports nothing missing when the transcript really does start at #0', async () => {
+    const clock = fakeClock()
+    const { api } = fakeApi({
+      sessions: () => [session('a', 'running')],
+      output: () => ({
+        nextIndex: 2,
+        messages: [
+          { index: 0, type: 'text', text: 'first', at: 0 },
+          { index: 1, type: 'text', text: 'second', at: 1 },
+        ],
+      }),
+    })
+    const store = makeStore(api, clock)
+    store.start()
+    await settle()
+    await store.openSession('a')
+    expect(store.getSnapshot().transcriptDropped).toBe(0)
+    store.stop()
+  })
+
   it('clears the transcript when the human goes back to the list', async () => {
     const clock = fakeClock()
     const { api } = fakeApi({

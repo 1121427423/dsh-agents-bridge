@@ -411,7 +411,21 @@ function requireRegularFile(fd: number, operation: string, absolute: string): fs
   return stat
 }
 
-/** Bounded `fs/read_text_file`: regular file only, at most `maxBytes` read. */
+/**
+ * Bounded `fs/read_text_file`: regular file only, at most `maxBytes` read.
+ *
+ * `O_NONBLOCK` because opening a FIFO waits for a writer the engine never
+ * supplies; `requireRegularFile` then refuses it.
+ *
+ * NO `O_NOFOLLOW` here, unlike the write path, and that asymmetry is deliberate:
+ * a read through a symlink INSIDE the run's root is legitimate and common
+ * (`node_modules/.bin/*`, a symlinked config), so refusing it would break real
+ * engines. `confineToRoot` has already resolved the final component, so what is
+ * left is only a race against someone swapping the file for a link — and a racer
+ * inside the run's own directory gains nothing, since the engine runs as the
+ * same user with its own shell. On the WRITE side the direction is the dangerous
+ * one (a link turned into an arbitrary overwrite), which is why it does refuse.
+ */
 function readBoundedUtf8File(absolute: string, maxBytes: number): string {
   const fd = fs.openSync(absolute, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK)
   try {

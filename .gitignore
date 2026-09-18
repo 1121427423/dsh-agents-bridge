@@ -6,3 +6,9 @@ coverage/
 .worktrees/
 .wb-harness/
 .omc/
+# vitest bundles `vitest.config.ts` to a timestamped `.mjs` beside it and does
+# not always clean up — an interrupted or backgrounded run leaves one behind,
+# where `git add -A` would pick it up.
+vitest.config.ts.timestamp-*
+# Local agent working notes (memory files). Not part of the plugin.
+.workbuddy-ai/
