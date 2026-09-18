@@ -535,6 +535,43 @@ describe('Indicator — visible only when there is something to say', () => {
     expect(textOf(Indicator({ store, translator: createTranslator('zh') }))).toContain(DICTS.zh.indicatorRunning.replace('{n}', '1'))
     store.stop()
   })
+
+  it('reveals the panel from every state it draws a chip in', async () => {
+    // The chip's tooltip promises "click to view". The panel is a SEPARATE
+    // surface — a sidebar tab — so no amount of store work can show it: without
+    // this callback the promise is a dead affordance in all three states.
+    for (const [status, sessions] of [
+      ['failed', [session('b', 'failed')]],
+      ['running', [session('a', 'running')]],
+      ['idle', [session('a', 'completed')]],
+    ] as const) {
+      const store = makeStore({ sessions: () => sessions, output: (_id, since) => ({ nextIndex: since, messages: [] }) })
+      store.start()
+      await store.refresh()
+      let reveals = 0
+      const element = Indicator({
+        store,
+        translator: createTranslator('en'),
+        onOpenPanel: () => {
+          reveals += 1
+        },
+      }) as StubElement
+      expect(element.props['data-status']).toBe(status)
+      ;(element.props.onClick as () => void)()
+      expect(reveals).toBe(1)
+      store.stop()
+    }
+  })
+
+  it('still renders and clicks when the host has no panel to reveal', async () => {
+    // No `onOpenPanel` (a host without the right Sidebar): the chip keeps the
+    // refresh it always did, and the absent callback must not throw.
+    const store = makeStore({ sessions: () => [session('a', 'running')] })
+    await store.refresh()
+    const element = Indicator({ store, translator: createTranslator('en') }) as StubElement
+    expect(() => (element.props.onClick as () => void)()).not.toThrow()
+    store.stop()
+  })
 })
 
 /* -------------------------------------------------------------------------- */

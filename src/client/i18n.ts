@@ -5,9 +5,13 @@
  * is driving this DSH install, and the rest of the product is localized, so a
  * hardcoded English panel would be the one window that does not match.
  *
- * The host's `locale` service is OPTIONAL and is reached through `ctx.get`
- * (never `inject` — see design doc D16 and `docs/client-half-slots.md` §3).
- * Both its absence and any difference in its `register` signature fall back to
+ * The host's `locale` service is OPTIONAL and is WAITED FOR with `ctx.inject`
+ * (never a plugin-level `inject` — see design doc D16 and
+ * `docs/client-half-slots.md` §3). Waiting reactively is not a nicety: `slots`
+ * is provided by the shell core, so `apply` runs before the plugin entries that
+ * publish `locale`, and a one-shot `ctx.get` read `undefined` every time — the
+ * registrations below simply never happened, silently. Both the service's
+ * absence and any difference in its `register` signature fall back to
  * `navigator.language`, so the panel is still localized on a host that does not
  * publish the service.
  *

@@ -180,7 +180,7 @@ function hostRequire() {
 /** A slot registry recording exactly what `apply()` registers. */
 interface Registration {
   readonly name: string
-  /** The settings card is KEYED by the settings namespace (`key` is slot-specific). */
+  /** Keyed slots (the panel tab, the settings card) dispatch on `key`. */
   readonly key?: string | undefined
   readonly id?: string | undefined
   readonly order?: number | undefined
@@ -204,7 +204,17 @@ function recordingSlots(available: readonly string[]) {
   return { slots, injected, registered }
 }
 
-/** A minimal Cordis-like context: `get` for services, `effect` for lifetimes. */
+/**
+ * A minimal Cordis-like context: `get` for services, `effect` for lifetimes,
+ * `inject` for the reactive wait cordis gives a callback once its dependencies
+ * are available.
+ *
+ * `inject` is modelled rather than stubbed out because the built bundle depends
+ * on it: the right-sidebar tab TYPE is declared through `ctx.inject`, since the
+ * registry is published by an optional peer that activates later than this
+ * plugin. A fake without it makes `apply` throw into its own catch-all, and
+ * every assertion below then sees zero registrations.
+ */
 function fakeContext(services: Record<string, unknown>) {
   const effects: { name: string; dispose: () => void }[] = []
   const ctx = {
@@ -213,6 +223,13 @@ function fakeContext(services: Record<string, unknown>) {
       const dispose = callback() ?? (() => {})
       effects.push({ name: name ?? 'anonymous', dispose })
       return () => dispose()
+    },
+    inject(deps: readonly string[], callback: (scoped: unknown) => void) {
+      // A dependency that never appears never runs the callback — the optional
+      // half of the contract, and why a host with no right Sidebar still gets
+      // the other two surfaces.
+      if (!deps.every(dep => services[dep] !== undefined)) return
+      callback(ctx)
     },
   }
   return {
@@ -266,6 +283,25 @@ describe('lib/client.js — host module-table contract', () => {
     expect(clientBundleSource()).not.toContain('__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED')
   })
 
+  it('asks the host for react and for NO other module', () => {
+    // `CLIENT_EXTERNALS` keeps `@deepseek-ai/*` out of the bundle, which is
+    // right for the Node half and a HAZARD here: a client bundle that left
+    // `require("@deepseek-ai/dsh-client-ui-slots")` behind would reach the
+    // module system's LAST resolution branch — "anything else → throw (loud,
+    // the runtime mirror of the build-time bundle purity gate)" — at
+    // materialization, taking the whole client half down. Every library this
+    // half is written against is reached as a SERVICE (`ctx.get`) or as a
+    // cordis `inject` in the source, never imported.
+    //
+    // It is also the fact that settles `dsh.client.inject`: that field preloads
+    // other BROWSER MODULES (`if (dependency !== void 0) await arriveGraphRow`)
+    // and this bundle has no module dependency at all, so no entry in it can be
+    // load-bearing. Asserted here so a new externalised import has to be
+    // deliberate rather than silent.
+    const requires = [...clientBundleSource().matchAll(/require\("([^"]+)"\)/g)].map(match => match[1])
+    expect(new Set(requires)).toEqual(new Set(['react']))
+  })
+
   it('derives its slot ids from the package name', () => {
     const { factory } = registeredFactory()
     const module = factory(hostRequire().require)
@@ -305,7 +341,16 @@ describe('lib/client.js — slot registrations carry the package name', () => {
     // The host attributes a slot to the plugin named by `registrant`, and
     // dedupes on `id`; both must be the package name, not a stale literal.
     for (const entry of registered) expect(entry.registrant).toBe(pkg.name)
-    expect(registered[0]?.id).toBe(pkg.name)
+
+    // The PANEL is KEYED by the package name. Checked on the BUILT bundle
+    // because a keyed slot registered without a `key` throws inside the slot
+    // registry core (`keyed slot "…" requires options.key`) and takes the panel
+    // with it — the same silent-missing-UI class as the settings card above,
+    // and what the panel did for its whole life while it carried `id`.
+    expect(registered[0]?.key).toBe(pkg.name)
+    expect(registered[0]?.id).toBeUndefined()
+
+    // The INDICATOR's slot is a LIST slot: it dispatches on `id`, not `key`.
     expect(registered[2]?.id).toBe(`${pkg.name}:indicator`)
   })
 

@@ -8,6 +8,10 @@
  *  - it reads the same store, so it works when `sidebar.right.pane.tab` is
  *    unavailable (that slot is provided by an OPTIONAL peer package —
  *    `@deepseek-ai/dsh-client-ui-sidebar-right`);
+ *  - it NAVIGATES to that panel when one exists (`onOpenPanel`, supplied by
+ *    `index.ts`). A chip whose tooltip promises "click to view" while its
+ *    handler only refreshes the store is a dead affordance: the panel is a
+ *    SEPARATE surface, and nothing the store does can reveal it.
  *  - it renders nothing at all when the plugin has no sessions AND no engine is
  *    drivable, rather than parking a permanent "0 running" chip in the session
  *    header of every conversation, including ones that never delegate.
@@ -27,6 +31,16 @@ export interface IndicatorProps {
   readonly translator: Translator
   /** Reported by the host; unused beyond a tooltip, kept for parity with the panel. */
   readonly sessionId?: string | undefined
+  /**
+   * Reveal the supervisor panel — expand the right Sidebar on this plugin's tab.
+   *
+   * OPTIONAL on purpose. The controller lives behind `ctx.get('sidebarRight')`
+   * (an optional peer) and THROWS when no session docking surface is mounted, so
+   * `index.ts` owns the lookup and the tolerance; here it is just a callback.
+   * Absent, the chip still renders and its click degrades to the refresh it
+   * always did — a host with no right Sidebar loses the navigation, not the chip.
+   */
+  readonly onOpenPanel?: (() => void) | undefined
 }
 
 /**
@@ -37,10 +51,14 @@ export interface IndicatorProps {
  *  2. any running session → green with a slow pulse, so "still working" reads
  *     from across the room without reading the number.
  *  3. nothing at all → the chip is NOT rendered (see the module note).
+ *
+ * Every interactive state also reveals the panel: the chip's whole promise is
+ * "there is something over there", and "over there" is the sidebar tab.
  */
-export function Indicator({ store, translator, sessionId }: IndicatorProps): ReactElement | null {
+export function Indicator({ store, translator, sessionId, onOpenPanel }: IndicatorProps): ReactElement | null {
   const snapshot = useSupervisor(store)
   const { running, unseenFailures } = snapshot.counts
+  const openPanel = (): void => onOpenPanel?.()
 
   if (unseenFailures > 0) {
     return createElement(
@@ -55,11 +73,16 @@ export function Indicator({ store, translator, sessionId }: IndicatorProps): Rea
         // newest-terminal-first, so a failure that was already seen can lead the
         // list — falling back to it would open the wrong transcript and leave
         // `unseenFailures` stuck (MI-11).
-        onClick: () => void store.openSession(
-          snapshot.sessions.find(session => session.status === 'failed' && !snapshot.seen.has(session.sessionId))?.sessionId
-          ?? snapshot.sessions.find(session => session.status === 'failed')?.sessionId
-          ?? '',
-        ),
+        onClick: () => {
+          void store.openSession(
+            snapshot.sessions.find(session => session.status === 'failed' && !snapshot.seen.has(session.sessionId))?.sessionId
+            ?? snapshot.sessions.find(session => session.status === 'failed')?.sessionId
+            ?? '',
+          )
+          // Selecting a session is invisible while the sidebar is collapsed, so
+          // the reveal is what makes the badge's promise true.
+          openPanel()
+        },
       },
       createElement('span', { className: 'abg-indicator__dot' }),
       createElement('span', null, translator.t('indicatorFailed', { n: unseenFailures })),
@@ -74,7 +97,10 @@ export function Indicator({ store, translator, sessionId }: IndicatorProps): Rea
         className: 'abg-indicator',
         'data-status': 'running',
         title: translator.t('indicatorRunningTitle', { n: running }),
-        onClick: () => void store.refresh(),
+        onClick: () => {
+          void store.refresh()
+          openPanel()
+        },
       },
       createElement('span', { className: 'abg-indicator__dot' }),
       createElement('span', null, translator.t('indicatorRunning', { n: running })),
@@ -94,7 +120,10 @@ export function Indicator({ store, translator, sessionId }: IndicatorProps): Rea
         className: 'abg-indicator',
         'data-status': 'idle',
         title: translator.t('indicatorIdleTitle'),
-        onClick: () => void store.refresh(),
+        onClick: () => {
+          void store.refresh()
+          openPanel()
+        },
       },
       createElement('span', { className: 'abg-indicator__dot' }),
       createElement('span', null, translator.t('indicatorIdle')),
