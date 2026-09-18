@@ -467,10 +467,24 @@ async function runOverflowHandshake() {
   return { stopReason: 'end_turn' }
 }
 
+/** The host-side fs cap, as a refusal the engine can actually observe. */
+async function runReadLarge() {
+  let detail = 'no error'
+  try {
+    await request('fs/read_text_file', { path: 'big.txt', sessionId: SESSION_ID })
+    detail = 'the driver READ an over-cap file'
+  } catch (err) {
+    detail = err.message
+  }
+  notify(textChunk(`large read: ${detail}`))
+  return { stopReason: 'end_turn', usage: { inputTokens: 2, outputTokens: 2 } }
+}
+
 const SCENARIOS = {
   success: runSuccess,
   tools: runToolCalls,
   escape: runEscape,
+  'read-large': runReadLarge,
   terminal: runTerminal,
   permission: runPermission,
   'upstream-error': runUpstreamError,

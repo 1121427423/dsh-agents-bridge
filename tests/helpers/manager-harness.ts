@@ -55,11 +55,29 @@ export function makeManager(
   const override: Partial<AgentDescriptor> = {
     command: { executable: NODE, argsPrefix: [script], env: { ...commandEnv } },
   }
+  /**
+   * Point EVERY code-backed built-in at the fixture, not only the ids the first
+   * manager suite needed. An omitted id otherwise asks the host for the real
+   * `claude` / `codex` executable during kernel pre-flight, which makes an
+   * injected-driver test silently depend on the developer machine it runs on.
+   */
+  const fixtureOverrides: Record<string, Partial<AgentDescriptor>> = Object.fromEntries([
+    'claude',
+    'codex',
+    'openclaw',
+    'codebuddy-code',
+    'codebuddy-code-acp',
+    'hermes',
+    'workbuddy',
+    'workbuddy-ai',
+    'autoclaw',
+    'zcode',
+  ].map((id) => [id, override]))
   return createAgentManager({
     logger: createLogger('manager-test'),
     storeDir: mkdtempSync(path.join(tmpdir(), 'bridge-store-')),
     defaultCwd: tmpdir(),
-    overrides: { claude: override, workbuddy: override, openclaw: override, autoclaw: override },
+    overrides: fixtureOverrides,
     createBackend,
     ...overrides,
   })

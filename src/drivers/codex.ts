@@ -223,6 +223,11 @@ export function buildCodexArgs(opts: CodexArgOptions, logger?: BridgeLogger): st
   // No `?? ''` fallback: an empty value is refused above, so the slot can only
   // ever receive an id a resume would actually accept (MI-20).
   if (resumeId !== undefined) args.push(resumeId)
+  // A prompt such as "- trim argv quoting" would otherwise be parsed by clap
+  // as another flag (or rejected before the positional prompt is read). End
+  // option parsing only when this prompt needs it, so every verified normal
+  // invocation stays byte-for-byte unchanged.
+  if (opts.prompt.startsWith('-')) args.push('--')
   args.push(opts.prompt)
   return args
 }

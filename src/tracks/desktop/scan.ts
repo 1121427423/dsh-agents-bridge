@@ -359,7 +359,10 @@ function defaultReadDir(absolutePath: string): readonly DirEntry[] {
   const entries: DirEntry[] = []
   for (const name of names.slice(0, MAX_ENTRIES_PER_DIR)) {
     try {
-      const stat = fs.statSync(path.join(absolutePath, name))
+      // lstat, not stat: a hostile bundle may use a symlink as a tunnel or a
+      // loop, and the walk contract is explicitly "never follow". Symlinked
+      // entries are therefore neither directories nor candidate files.
+      const stat = fs.lstatSync(path.join(absolutePath, name))
       entries.push({ name, isDirectory: stat.isDirectory(), isFile: stat.isFile(), size: stat.size })
     } catch {
       // A dangling symlink or an unreadable entry is simply not a candidate.
@@ -902,7 +905,7 @@ function firstExisting(contentsPath: string, candidates: readonly string[]): str
   for (const candidate of candidates) {
     const absolute = path.join(contentsPath, candidate)
     try {
-      const stat = fs.statSync(absolute)
+      const stat = fs.lstatSync(absolute)
       if (!stat.isFile()) continue
       fs.accessSync(absolute, fs.constants.X_OK)
       return absolute

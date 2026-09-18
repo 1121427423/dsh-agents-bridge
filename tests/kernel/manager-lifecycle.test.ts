@@ -31,7 +31,7 @@ import type {
   AgentResult,
   AgentSessionHandle,
 } from '../../src/kernel/types.ts'
-import { ManagerPool, sleep, waitTerminal } from '../helpers/manager-harness.ts'
+import { ManagerPool, NODE, sleep, waitTerminal } from '../helpers/manager-harness.ts'
 
 const pool = new ManagerPool()
 afterEach(async () => {
@@ -97,6 +97,17 @@ function quickBackend(events: number): { backend: AgentBackend; reads: () => num
     },
   }
   return { backend, reads: () => reads }
+}
+
+/** A backend wedged BEFORE it can produce a handle. */
+function startupWedgedBackend(): AgentBackend {
+  return {
+    family: 'claude',
+    async run() {
+      await new Promise<never>(() => {})
+      throw new Error('unreachable')
+    },
+  }
 }
 
 /** A backend whose `done` NEVER settles, so only the manager can end the run. */
@@ -203,6 +214,10 @@ function managerFor(backend: AgentBackend) {
       logger: createLogger('lifecycle-test'),
       storeDir: mkdtempSync(path.join(tmpdir(), 'bridge-lifecycle-')),
       defaultCwd: tmpdir(),
+      // Pre-flight still resolves the declared executable before it ever asks
+      // the injected backend for a handle; point it at the fixture process so
+      // the assertion stays about the kernel, not about this host's PATH.
+      overrides: { claude: { command: { executable: NODE } } },
       createBackend: () => backend,
       scan: false,
     }),
@@ -262,6 +277,29 @@ describe('IM-7: transcripts are capped and terminal sessions are evicted', () =>
     // Every session is still listed exactly once.
     const listed = manager.list().filter((snapshot) => ids.includes(snapshot.sessionId))
     expect(listed).toHaveLength(ids.length)
+  })
+})
+
+describe('startup hangs are cancellable', () => {
+  it('does not park a session in live while backend.run() itself is wedged', async () => {
+    const manager = managerFor(startupWedgedBackend())
+    const started = await manager.run({ agent: 'claude', prompt: 'start', timeoutMs: 0 })
+    expect(manager.status(started.sessionId)?.status).toBe('running')
+
+    const began = Date.now()
+    expect(await manager.cancel(started.sessionId, 'startup hung')).toBe(true)
+    const elapsed = Date.now() - began
+
+    // Before the start-path race this took the forced-settle path's full
+    // CANCEL_SETTLE_MS and the task STILL stayed parked in `live`. The contract
+    // is that abort releases the task itself.
+    expect(elapsed).toBeLessThan(1_000)
+    const terminal = manager.status(started.sessionId)
+    expect(terminal?.terminal).toBe(true)
+    expect(terminal?.status).toBe('cancelled')
+
+    await sleep(50)
+    expect(manager.list().some((entry) => entry.sessionId === started.sessionId && !entry.terminal)).toBe(false)
   })
 })
 

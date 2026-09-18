@@ -54,7 +54,7 @@ function defaultReadDirForTest(absolutePath: string): readonly DirEntry[] {
   }
   return names.map((name) => {
     try {
-      const stat = fs.statSync(path.join(absolutePath, name))
+      const stat = fs.lstatSync(path.join(absolutePath, name))
       return { name, isDirectory: stat.isDirectory(), isFile: stat.isFile(), size: stat.size }
     } catch {
       return { name, isDirectory: false, isFile: false }
@@ -298,6 +298,32 @@ describe('scanDesktopBundles', () => {
     // Every candidate is accounted for rather than silently vanishing.
     expect(scan.skipped.length).toBeGreaterThan(0)
     expect(scan.budgetExhausted).toBe(false)
+  })
+
+  it('never follows symlinks inside a candidate bundle', () => {
+    const root = freshRoot()
+    writeBundle(root, { name: 'Tunnel.app', product: productJson({ applicationName: 'tunnel-agent' }) })
+
+    // The bundle shape is otherwise perfect; only the launcher is a symlink to
+    // an executable OUTSIDE the scan roots. A stat-based walk would follow it
+    // and then publish an identity built from a path the bundle does not own.
+    const outside = path.join(tmpRoot, `outside-${bundleCounter}.sh`)
+    fs.writeFileSync(outside, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+    const launcher = path.join(
+      root,
+      'Tunnel.app',
+      'Contents',
+      'Resources',
+      'app.asar.unpacked',
+      'cli',
+      'bin',
+      'codebuddy',
+    )
+    fs.rmSync(launcher)
+    fs.symlinkSync(outside, launcher)
+
+    const scan = scanDesktopBundles({ roots: [root] })
+    expect(scan.identities).toEqual([])
   })
 
   it('never throws for a bundle whose Contents is unreadable', () => {

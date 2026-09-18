@@ -63,6 +63,18 @@ afterEach(async () => {
   await pool.disposeAll()
 })
 
+describe('agents_run — same input contract as each fan-out entry', () => {
+  it('refuses a whitespace-only prompt before any session exists', async () => {
+    const manager = pool.create(FAST)
+    const tools = toolsFor(manager)
+
+    await expect(callTool(tools, 'agents_run', { agent: 'claude', prompt: '  \n\t  ' })).rejects.toThrow(
+      /prompt is required and must be non-empty/,
+    )
+    expect(manager.list()).toEqual([])
+  })
+})
+
 describe('agents_run_many — fan-out', () => {
   it('starts every entry in one call and returns while they are still running', async () => {
     const manager = pool.create(FAST, { extraDescriptors: [SLOW_IDENTITY] })

@@ -770,6 +770,15 @@ export function createToolDefinitions(manager: AgentManager, seat: JobSeat = {})
       ),
     },
     execute: async (args, exec) => {
+      // Same contract as each `agents_run_many` entry: a whitespace-only prompt
+      // is refused at this boundary, not handed to every driver to interpret
+      // (several would shift it into an option or stdin slot by accident).
+      const prompt = args.prompt.trim()
+      if (prompt === '') {
+        throw new Error(
+          'prompt is required and must be non-empty; the delegated agent cannot see this conversation, so the prompt has to contain the whole task (paths, constraints, acceptance criteria).',
+        )
+      }
       // The kernel's `run()` resolves once the child is spawned and the session
       // is registered — it does NOT await `done`. Everything optional is spread
       // conditionally so an omitted knob is absent rather than `undefined`.
@@ -782,7 +791,7 @@ export function createToolDefinitions(manager: AgentManager, seat: JobSeat = {})
       try {
         snapshot = await manager.run({
           agent: args.agent,
-          prompt: args.prompt,
+          prompt,
           ...(args.cwd === undefined ? {} : { cwd: args.cwd }),
           ...(args.model === undefined ? {} : { model: args.model }),
           ...(args.effort === undefined ? {} : { effort: args.effort }),
@@ -798,7 +807,7 @@ export function createToolDefinitions(manager: AgentManager, seat: JobSeat = {})
       // agent loop sets it — and it is what makes the notice land in the right
       // session. Without one, no job is created: an unowned job would settle
       // with nobody to tell.
-      const jobId = announceCompletion(snapshot, exec?.agent, args.prompt)
+      const jobId = announceCompletion(snapshot, exec?.agent, prompt)
       return {
         sessionId: snapshot.sessionId,
         agent: snapshot.agentId,
@@ -1197,6 +1206,8 @@ export function createToolDefinitions(manager: AgentManager, seat: JobSeat = {})
                 terminal: { type: 'boolean' },
                 waitedMs: { type: 'integer' },
                 nextIndex: { type: 'integer' },
+                firstIndex: { type: 'integer' },
+                dropped: { type: 'integer' },
                 result: {
                   type: 'object',
                   additionalProperties: false,
@@ -1264,6 +1275,9 @@ export function createToolDefinitions(manager: AgentManager, seat: JobSeat = {})
             if ((result.text ?? '').length > 0) body.push('    final text:', `    ${result.text ?? ''}`)
           } else if (session.terminal !== true) {
             body.push('    still running when this wait ended')
+          }
+          if ((session.dropped ?? 0) > 0) {
+            body.push(`    warning: ${session.dropped ?? 0} earlier event(s) fell out of the host's bounded transcript before this read; indices below are absolute (firstIndex=${session.firstIndex ?? 0}).`)
           }
           const events = session.events ?? []
           if (events.length > 0) {
@@ -1356,8 +1370,10 @@ export function createToolDefinitions(manager: AgentManager, seat: JobSeat = {})
           ...(events === undefined
             ? {}
             : {
+                firstIndex: events.firstIndex ?? args.sinceIndex ?? 0,
+                dropped: events.dropped ?? 0,
                 events: events.messages.map((message, offset) => ({
-                  index: (args.sinceIndex ?? 0) + offset,
+                  index: (events.firstIndex ?? args.sinceIndex ?? 0) + offset,
                   type: message.type,
                   ...(message.content === undefined ? {} : { text: truncate(message.content, 4_000) }),
                   ...(message.tool === undefined ? {} : { tool: message.tool }),
@@ -1416,6 +1432,8 @@ export function createToolDefinitions(manager: AgentManager, seat: JobSeat = {})
           sessionId: { type: 'string' },
           status: { type: 'string', enum: [...RUN_STATUSES] },
           nextIndex: { type: 'integer' },
+          firstIndex: { type: 'integer' },
+          dropped: { type: 'integer' },
           terminal: { type: 'boolean' },
           messages: {
             type: 'array',
@@ -1459,8 +1477,12 @@ export function createToolDefinitions(manager: AgentManager, seat: JobSeat = {})
         // One readable line per event; see `renderEventBlocks` for why
         // consecutive streamed text is joined.
         const blocks = renderEventBlocks(messages)
-        const header = `session ${value.sessionId} status=${value.status} events=${messages.length} nextIndex=${value.nextIndex}`
+        const dropped = value.dropped ?? 0
+        const header = `session ${value.sessionId} status=${value.status} events=${messages.length} firstIndex=${value.firstIndex ?? 0} nextIndex=${value.nextIndex}`
         const body: string[] = [header]
+        if (dropped > 0) {
+          body.push(`warning: ${dropped} earlier event(s) were dropped from this host's bounded transcript before you asked; the first line below is absolute index ${value.firstIndex ?? 0}, not index 0.`)
+        }
         if (blocks.length === 0) {
           body.push(value.terminal === true ? '(no new events)' : '(no new events yet — the agent is still working)')
         } else {
@@ -1507,10 +1529,15 @@ export function createToolDefinitions(manager: AgentManager, seat: JobSeat = {})
         throw new Error(unknownSessionMessage(manager, args.sessionId))
       }
       const sinceIndex = args.sinceIndex ?? 0
+      const firstIndex = read.firstIndex ?? sinceIndex
+      const dropped = read.dropped ?? 0
       // Truncate before rendering: the render layer caps characters, and a
       // model that asked for 10k events would otherwise blow its own context.
+      // The rendered index is ABSOLUTE, just like the kernel's cursor: after
+      // the ring trims, `sinceIndex` can be below `firstIndex`, and prefixing
+      // the retained slice at the stale request would re-number every event.
       const messages = read.messages.slice(0, MAX_RENDERED_MESSAGES).map((message, offset) => ({
-        index: sinceIndex + offset,
+        index: firstIndex + offset,
         type: message.type,
         ...(message.content === undefined ? {} : { text: truncate(message.content, 4_000) }),
         ...(message.tool === undefined ? {} : { tool: message.tool }),
@@ -1527,6 +1554,8 @@ export function createToolDefinitions(manager: AgentManager, seat: JobSeat = {})
         sessionId: read.sessionId,
         status: read.status,
         nextIndex: read.nextIndex,
+        firstIndex,
+        dropped,
         terminal: snapshot?.terminal ?? read.status !== 'running',
         messages,
         ...(result === undefined ? {} : { result: projectResult(result) }),

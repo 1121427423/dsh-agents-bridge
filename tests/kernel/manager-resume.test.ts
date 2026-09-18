@@ -263,6 +263,10 @@ function refusingManager(storeDir: string, options: { clear: boolean }): AgentMa
       logger: createLogger('resume-refused-test'),
       storeDir,
       defaultCwd: tmpdir(),
+      // The backend is purpose-built, but run pre-flight still proves the
+      // descriptor executable is real. Keep that check aimed at the test's
+      // node process rather than the developer's installed claude CLI.
+      overrides: { claude: { command: { executable: NODE } } },
       createBackend: () => resumeRefusingBackend(options),
       scan: false,
     }),

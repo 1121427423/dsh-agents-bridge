@@ -72,6 +72,11 @@
  *          before — the change is that `nextIndex` no longer re-bases when the
  *          ring trims, which is the defect it fixes.
  *
+ *  v8  ADDITIVE ONLY (one optional `AgentManager` method):
+ *        - `AgentManager.concurrency?`: the live count against the POLICY cap.
+ *          Entry surfaces use it when present; an older structural stub may omit
+ *          it and the surface falls back to counting the snapshots it can see.
+ *
  * @module dsh-agents-bridge/kernel/types
  */
 
@@ -493,6 +498,14 @@ export interface AgentManager {
   status(sessionId: string): SessionSnapshot | undefined
   list(): readonly SessionSnapshot[]
   output(sessionId: string, opts?: { readonly sinceIndex?: number; readonly limit?: number }): SessionOutput | undefined
+  /**
+   * Live sessions against the POLICY cap (ABI v8, optional).
+   *
+   * `limit` is the run policy's capacity, not the number of rows a UI happens
+   * to display. Entry surfaces may omit this on older structural stubs; the
+   * compiled manager always answers it.
+   */
+  concurrency?(): { readonly running: number; readonly limit: number }
   cancel(sessionId: string, reason?: string): Promise<boolean>
   /** Resume a finished session's conversation with a new prompt (v1: best-effort). */
   send(sessionId: string, prompt: string): Promise<SessionSnapshot>

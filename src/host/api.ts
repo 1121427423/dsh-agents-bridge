@@ -299,13 +299,11 @@ async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknow
 /* -------------------------------------------------------------------------- */
 
 /**
- * Current concurrency: how many sessions are running against the bound the
- * host allows.
+ * Current concurrency: live sessions against the kernel's run-policy cap.
  *
- * The bridge does not itself cap concurrency (the kernel spawns whatever the
- * model asks for), so `limit` reports the value the client should treat as the
- * design ceiling rather than an enforced quota. It is exported as data instead
- * of hardcoded in the client so the number has one home.
+ * `limit` is the policy's `maxConcurrent` (the manager answers it when present),
+ * never the presentation route's row cap. An older structural `AgentManager`
+ * stub may omit the method; `limit: 0` then means "unknown", not "no capacity".
  */
 export interface ConcurrencySnapshot {
   readonly running: number
@@ -344,6 +342,10 @@ export interface OutputPayload {
   readonly sessionId: string
   readonly status: AgentRunStatus
   readonly nextIndex: number
+  /** Absolute index of `messages[0]` (0 unless the host transcript ring trimmed). */
+  readonly firstIndex: number
+  /** How many earlier events the caller lost by falling behind the bounded ring. */
+  readonly dropped: number
   readonly terminal: boolean
   readonly messages: readonly {
     readonly index: number
@@ -452,12 +454,16 @@ export function createApiHandlers(deps: HostApiDeps): Record<string, (payload: R
   return {
     /** `status` — every session snapshot, running first, plus the concurrency figure. */
     async status(): Promise<StatusPayload> {
-      const sessions = orderSessions(manager.list()).slice(0, MAX_LISTED_SESSIONS)
+      const ordered = orderSessions(manager.list())
+      const policy = manager.concurrency?.()
       return {
-        sessions,
+        sessions: ordered.slice(0, MAX_LISTED_SESSIONS),
         concurrency: {
-          running: sessions.filter(session => session.status === 'running').length,
-          limit: MAX_LISTED_SESSIONS,
+          running: policy?.running ?? ordered.filter(session => session.status === 'running').length,
+          // The POLICY cap. `MAX_LISTED_SESSIONS` is only the number of rows
+          // this presentation route will send; reporting it as the limit made a
+          // four-run deployment look 50 times roomier than it is.
+          limit: policy?.limit ?? 0,
         },
         now: now(),
       }
@@ -475,13 +481,17 @@ export function createApiHandlers(deps: HostApiDeps): Record<string, (payload: R
       }
       const snapshot = manager.status(sessionId)
       const result = snapshot?.result
+      const firstIndex = read.firstIndex ?? sinceIndex
+      const dropped = read.dropped ?? 0
       return {
         sessionId: read.sessionId,
         status: read.status,
         nextIndex: read.nextIndex,
+        firstIndex,
+        dropped,
         terminal: snapshot?.terminal ?? read.status !== 'running',
         messages: read.messages.map((message, offset) => ({
-          index: sinceIndex + offset,
+          index: firstIndex + offset,
           type: message.type,
           ...(message.content === undefined ? {} : { text: message.content }),
           ...(message.tool === undefined ? {} : { tool: message.tool }),

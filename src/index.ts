@@ -23,6 +23,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import type { PromptSection } from '@deepseek-ai/dsh-system-prompt'
 import { createBackend } from './drivers/index.ts'
 import { attachHostApi, type WebRuntimeFace, type WebServerFace } from './host/api.ts'
 import { installDriverRuntime } from './integrate.ts'
@@ -193,11 +194,12 @@ export function apply(ctx: Context, config: Config = {}): void {
     // dsh-background-promotion. A static string is used rather than a provider
     // thunk: probing here would make prompt assembly run subprocesses, and the
     // model is told to call `agents_probe` for the live answer anyway.
-    const sectionDisposer = ctx.systemPrompt.section({
+    const section: PromptSection = {
       name: 'tool:agents-bridge',
       order: 108,
       text: buildPromptSection(configuredIds, config.allowedAgents),
-    })
+    }
+    const sectionDisposer = ctx.systemPrompt.section(section)
 
     // Optional: the smoke command needs a command registry, the tools do not.
     const smokeDisposer = registerSmokeCommand(ctx)

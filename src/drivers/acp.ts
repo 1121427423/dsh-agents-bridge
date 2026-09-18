@@ -77,6 +77,11 @@
  *     `initialize` advertises exactly the groups that are on. Advertising a
  *     capability and then refusing every call is worse than not advertising it:
  *     the engine has already made its plan around the answer.
+ *   - **Capabilities stay bounded and non-delegable.** Text-file reads and
+ *     writes are capped at 1 MiB and regular-file-symlink checked, and terminal
+ *     creation filters credential-shaped environment values plus an optional
+ *     `DSH_AGENTS_BRIDGE_ACP_TERMINAL_COMMANDS` allow-list. An argv-less shell
+ *     line is refused under the allow-list unless the entire line is named.
  *   - **Permissions never auto-grant more than one action.** See
  *     `selectPermissionOption` — `allow_always` is never selected, because ACP
  *     v1 defines it as "remember this choice", which on some runtimes persists
@@ -110,6 +115,7 @@ import type {
   BridgeLogger,
   DriverDeps,
 } from '../kernel/types.ts'
+import { isSensitiveKey, looksLikeSecret } from '../kernel/logger.ts'
 
 import {
   DriverSession,
@@ -180,6 +186,16 @@ export const ACP_DEFAULT_OUTPUT_BYTE_LIMIT = 50_000
 export const ACP_MAX_OUTPUT_BYTE_LIMIT = 1024 * 1024
 
 /**
+ * Hard host cap for one client-served text file, read OR write payload.
+ *
+ * The engine chooses the path and content length while the HOST process pays
+ * the I/O and JSON memory cost. Bounded reads also refuse FIFOs and every
+ * other non-regular file: those are legal paths under a workspace but reading
+ * them can block the request forever.
+ */
+export const ACP_MAX_TEXT_FILE_BYTES = 1024 * 1024
+
+/**
  * How long to keep draining notifications after `session/prompt` answers.
  *
  * ACP peers legitimately emit the turn's final `agent_message_chunk` AFTER the
@@ -206,6 +222,14 @@ export const ACP_SHUTDOWN_GRACE_MS = 2_000
 export const ACP_FS_ENV = 'DSH_AGENTS_BRIDGE_ACP_FS'
 export const ACP_TERMINAL_ENV = 'DSH_AGENTS_BRIDGE_ACP_TERMINAL'
 export const ACP_AUTH_METHOD_ENV = 'DSH_AGENTS_BRIDGE_ACP_AUTH_METHOD'
+/**
+ * Optional comma-separated terminal executable allow-list, checked only after
+ * {@link ACP_TERMINAL_ENV} opts terminal service in. Bare names match a bare
+ * command's basename; path entries match the exact executable path. Unset keeps
+ * the historical "terminal capability means this deployment trusts it to run
+ * processes" policy.
+ */
+export const ACP_TERMINAL_COMMANDS_ENV = 'DSH_AGENTS_BRIDGE_ACP_TERMINAL_COMMANDS'
 
 /** ACP `stopReason` values that mean the turn did NOT produce an answer. */
 export const ACP_FAILURE_STOP_REASONS: ReadonlySet<string> = new Set([
@@ -227,12 +251,22 @@ function envFlag(env: Readonly<Record<string, string>>, key: string): boolean {
 export interface AcpClientCapabilities {
   readonly fs: boolean
   readonly terminal: boolean
+  /** Optional terminal executable allow-list; empty = the terminal switch is the whole policy. */
+  readonly terminalCommands: readonly string[]
 }
 
 export function acpClientCapabilities(
   env: Readonly<Record<string, string>>,
 ): AcpClientCapabilities {
-  return { fs: envFlag(env, ACP_FS_ENV), terminal: envFlag(env, ACP_TERMINAL_ENV) }
+  const terminalCommands = (env[ACP_TERMINAL_COMMANDS_ENV] ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== '')
+  return {
+    fs: envFlag(env, ACP_FS_ENV),
+    terminal: envFlag(env, ACP_TERMINAL_ENV),
+    terminalCommands,
+  }
 }
 
 /** The `_meta`/`env`-selected auth method, if the caller pinned one. */
@@ -242,6 +276,57 @@ export function acpAuthMethodFromEnv(
   const raw = env[ACP_AUTH_METHOD_ENV]
   if (raw === undefined || raw.trim() === '') return undefined
   return raw.trim()
+}
+
+/**
+ * Whether `terminal/create` with THIS request shape is inside an optional
+ * command allow-list.
+ *
+ * The argv-less form is a shell line, and a basename check cannot say which
+ * executables that shell will go on to run. When an allow-list is configured it
+ * is therefore refused rather than given a false label; argv form keeps the
+ * executable inspectable.
+ */
+export function isAcpTerminalCommandAllowed(
+  command: string,
+  args: readonly string[],
+  allowlist: readonly string[],
+): boolean {
+  if (allowlist.length === 0) return true
+  if (allowlist.includes(command)) return true
+  if (args.length === 0) return false
+  const base = path.basename(command)
+  return command === base && allowlist.includes(base)
+}
+
+/**
+ * Build a terminal child environment without copying host credentials.
+ *
+ * ACP terminals spawn through the client under this driver's own merged env,
+ * which routinely contains provider tokens. The engine already runs as the user,
+ * so this is not a privilege boundary — but it means the capability cannot
+ * accidentally broaden secret visibility for every process it launches.
+ */
+export function acpTerminalEnvironment(
+  base: Readonly<Record<string, string>>,
+  extra: unknown,
+): Record<string, string> {
+  const env: Record<string, string> = {}
+  for (const [name, value] of Object.entries(base)) {
+    if (isSensitiveKey(name) || looksLikeSecret(value)) continue
+    env[name] = value
+  }
+  if (Array.isArray(extra)) {
+    for (const item of extra) {
+      const record = asRecord(item)
+      const name = record === undefined ? undefined : asString(record['name'])
+      const value = record === undefined ? undefined : asString(record['value'])
+      if (name === undefined || name === '' || value === undefined) continue
+      if (isSensitiveKey(name) || looksLikeSecret(value)) continue
+      env[name] = value
+    }
+  }
+  return env
 }
 
 // ── Path confinement (the safety red line) ──────────────────────────────────
@@ -309,6 +394,72 @@ function realpathOfDeepestAncestor(p: string): string {
       missing.push(path.basename(current))
       current = parent
     }
+  }
+}
+
+/**
+ * Refuse a path that is not a regular file. FIFOs are the case that matters:
+ * opening one for a read can wait for a writer the engine never supplies.
+ */
+function requireRegularFile(fd: number, operation: string, absolute: string): fs.Stats {
+  const stat = fs.fstatSync(fd)
+  if (!stat.isFile()) {
+    throw new AcpPathRefusedError(
+      `refusing ${operation} ${JSON.stringify(absolute)}: it is not a regular file (FIFO/socket/device paths are not served)`,
+    )
+  }
+  return stat
+}
+
+/** Bounded `fs/read_text_file`: regular file only, at most `maxBytes` read. */
+function readBoundedUtf8File(absolute: string, maxBytes: number): string {
+  const fd = fs.openSync(absolute, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK)
+  try {
+    const stat = requireRegularFile(fd, 'fs/read_text_file', absolute)
+    if (stat.size > maxBytes) {
+      throw new AcpPathRefusedError(
+        `refusing fs/read_text_file ${JSON.stringify(absolute)}: ${stat.size} bytes exceeds the ${maxBytes}-byte host cap`,
+      )
+    }
+    const chunks: Buffer[] = []
+    let total = 0
+    for (;;) {
+      const remaining = maxBytes + 1 - total
+      const buffer = Buffer.alloc(Math.min(64 * 1024, remaining))
+      const read = fs.readSync(fd, buffer, 0, buffer.length, null)
+      if (read <= 0) break
+      total += read
+      if (total > maxBytes) {
+        throw new AcpPathRefusedError(
+          `refusing fs/read_text_file ${JSON.stringify(absolute)}: content grew past the ${maxBytes}-byte host cap while being read`,
+        )
+      }
+      chunks.push(buffer.subarray(0, read))
+    }
+    return Buffer.concat(chunks, total).toString('utf8')
+  } finally {
+    fs.closeSync(fd)
+  }
+}
+
+/** Bounded `fs/write_text_file`; `O_NOFOLLOW` closes a final-component symlink race. */
+function writeBoundedUtf8File(absolute: string, content: string, maxBytes: number): void {
+  const bytes = Buffer.byteLength(content, 'utf8')
+  if (bytes > maxBytes) {
+    throw new AcpPathRefusedError(
+      `refusing fs/write_text_file ${JSON.stringify(absolute)}: ${bytes} bytes of content exceeds the ${maxBytes}-byte host cap`,
+    )
+  }
+  const fd = fs.openSync(
+    absolute,
+    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW,
+    0o666,
+  )
+  try {
+    requireRegularFile(fd, 'fs/write_text_file', absolute)
+    fs.writeFileSync(fd, content, 'utf8')
+  } finally {
+    fs.closeSync(fd)
   }
 }
 
@@ -1327,9 +1478,13 @@ export class AcpClient {
     const abs = confineToRoot(this.#cwd, requested)
 
     if (method === 'fs/read_text_file') {
-      const offset = typeof p['line'] === 'number' ? p['line'] : undefined
-      const limit = typeof p['limit'] === 'number' ? p['limit'] : undefined
-      let text = fs.readFileSync(abs, 'utf8')
+      const offset = typeof p['line'] === 'number' && Number.isFinite(p['line'])
+        ? Math.max(1, Math.floor(p['line']))
+        : undefined
+      const limit = typeof p['limit'] === 'number' && Number.isFinite(p['limit'])
+        ? Math.max(0, Math.floor(p['limit']))
+        : undefined
+      let text = readBoundedUtf8File(abs, ACP_MAX_TEXT_FILE_BYTES)
       if (offset !== undefined || limit !== undefined) {
         const lines = text.split('\n')
         const start = Math.max(0, (offset ?? 1) - 1)
@@ -1342,7 +1497,7 @@ export class AcpClient {
     const content = asString(p['content'])
     if (content === undefined) throw new Error(`${method}: content required`)
     fs.mkdirSync(path.dirname(abs), { recursive: true })
-    fs.writeFileSync(abs, content, 'utf8')
+    writeBoundedUtf8File(abs, content, ACP_MAX_TEXT_FILE_BYTES)
     return {}
   }
 
@@ -1401,16 +1556,14 @@ export class AcpClient {
 
     const rawArgs = Array.isArray(p['args']) ? p['args'].filter((a) => typeof a === 'string') : []
     const args = rawArgs as string[]
-    const env: Record<string, string> = { ...this.#env }
-    const extraEnv = p['env']
-    if (Array.isArray(extraEnv)) {
-      for (const item of extraEnv) {
-        const rec = asRecord(item)
-        const name = rec === undefined ? undefined : asString(rec['name'])
-        const value = rec === undefined ? undefined : asString(rec['value'])
-        if (name !== undefined && name !== '' && value !== undefined) env[name] = value
-      }
+    if (!isAcpTerminalCommandAllowed(command, args, this.#caps.terminalCommands)) {
+      const shape = args.length === 0 ? 'shell commands' : `command ${JSON.stringify(command)}`
+      throw new AcpPathRefusedError(
+        `refusing terminal/create: ${shape} is not in this deployment's ACP terminal allow-list ` +
+          `(${this.#caps.terminalCommands.join(', ')})`,
+      )
     }
+    const env = acpTerminalEnvironment(this.#env, p['env'])
 
     // The engine sizes this, the host pays for it: `outputByteLimit` arrives on
     // the wire (and `1e12` is a perfectly legal value there), while the retained

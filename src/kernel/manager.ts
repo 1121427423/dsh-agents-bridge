@@ -579,7 +579,64 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
     try {
       const deps: DriverDeps = { command: resolved.command, env: resolved.env, logger: runLogger }
       const backend = options.createBackend(descriptor.family, deps)
-      const handle = await backend.run(rec.options, deps, rec.abort.signal)
+
+      /**
+       * Startup is a RACE, not an unconditional `await backend.run(...)`.
+       *
+       * A driver wedged BEFORE constructing the child handle used to make this
+       * line the exception to the cancellation contract: `cancelInternal` could
+       * abort the signal and even force the session terminal, but this task was
+       * still parked on `backend.run`, so the record stayed in `live` until the
+       * buggy driver happened to settle. An abort therefore releases startup
+       * immediately. If the driver nevertheless produces a handle later, cancel
+       * that child as soon as it appears rather than letting it outlive the run.
+       */
+      const started = Promise.resolve().then(() => backend.run(rec.options, deps, rec.abort.signal))
+      let startAbort: (() => void) | undefined
+      const startAborted = new Promise<undefined>((resolve) => {
+        const signal = rec.abort.signal
+        if (signal.aborted) {
+          resolve(undefined)
+          return
+        }
+        startAbort = () => resolve(undefined)
+        signal.addEventListener('abort', startAbort, { once: true })
+      })
+      const handle = await Promise.race([started, startAborted])
+      // Either side of the race has settled; do not retain this record through a
+      // stale abort listener for the lifetime of a long-running session.
+      if (startAbort !== undefined) rec.abort.signal.removeEventListener('abort', startAbort)
+      if (handle === undefined) {
+        void started.then(
+          (late) => {
+            void Promise.resolve(late.cancel('session cancelled while the backend was starting')).catch(
+              (err: unknown) => {
+                runLogger.warn('late backend startup produced a child the cancel could not stop', {
+                  sessionId: session.sessionId,
+                  error: errorMessage(err),
+                })
+              },
+            )
+          },
+          (err: unknown) => {
+            // Expected for drivers that correctly honour the already-aborted
+            // signal; debug only because cancellation is the user-visible story.
+            runLogger.debug('backend startup failed after the run was cancelled', {
+              sessionId: session.sessionId,
+              error: errorMessage(err),
+            })
+          },
+        )
+        const status = session.terminalOverride() ?? 'cancelled'
+        const reason = session.cancelReason
+        session.complete({
+          status,
+          exitCode: null,
+          text: '',
+          error: reason !== undefined ? `cancelled: ${reason}` : 'cancelled',
+        })
+        return
+      }
       rec.handle = handle
       rec.pid = handle.pid
       // Persist the pid with the `running` row immediately: if the host dies
@@ -838,6 +895,10 @@ export function createAgentManager(options: ManagerCreateOptions): AgentManager 
       if (rec) return liveSnapshot(rec)
       const stored = restored.get(sessionId)
       return stored ? restoredSnapshot(stored) : undefined
+    },
+
+    concurrency(): { readonly running: number; readonly limit: number } {
+      return Object.freeze({ running: runningCount(), limit: policy.maxConcurrent })
     },
 
     list(): readonly SessionSnapshot[] {

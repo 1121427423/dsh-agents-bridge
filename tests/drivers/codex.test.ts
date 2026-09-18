@@ -193,6 +193,28 @@ describe('buildCodexArgs', () => {
     ])
   })
 
+  it('ends option parsing when the prompt itself starts with a dash', () => {
+    expect(buildCodexArgs({ prompt: '-- trim argv quoting' })).toEqual([
+      'exec',
+      '--json',
+      '--skip-git-repo-check',
+      '--',
+      '-- trim argv quoting',
+    ])
+    expect(buildCodexArgs({
+      prompt: '- continue',
+      resumeSessionId: '01a0a0a0-1111-7000-8000-000000000001',
+    })).toEqual([
+      'exec',
+      'resume',
+      '--json',
+      '--skip-git-repo-check',
+      '01a0a0a0-1111-7000-8000-000000000001',
+      '--',
+      '- continue',
+    ])
+  })
+
   it('orders cwd, model, sandbox and effort, then filters blocked extras', () => {
     const args = buildCodexArgs({
       prompt: 'go',

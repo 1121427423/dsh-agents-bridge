@@ -30,9 +30,14 @@ import {
   ACP_DEFAULT_OUTPUT_BYTE_LIMIT,
   ACP_FAILURE_STOP_REASONS,
   ACP_MAX_OUTPUT_BYTE_LIMIT,
+  ACP_MAX_TEXT_FILE_BYTES,
   ACP_SESSION_SCOPED_OPTION_IDS,
+  ACP_TERMINAL_COMMANDS_ENV,
+  acpClientCapabilities,
+  acpTerminalEnvironment,
   buildAcpArgs,
   confineToRoot,
+  isAcpTerminalCommandAllowed,
   isGrantKind,
   parseAcpUsage,
   promptResultUsage,
@@ -262,6 +267,56 @@ describe('buildAcpArgs', () => {
   it('blocks both protocol flags, in the right value mode', () => {
     expect(ACP_BLOCKED_ARGS['--acp']).toBe('standalone')
     expect(ACP_BLOCKED_ARGS['--acp-transport']).toBe('withValue')
+  })
+})
+
+describe('client-side capability hardening knobs', () => {
+  it('parses the optional terminal command allow-list without changing the capability switches', () => {
+    const caps = acpClientCapabilities({
+      DSH_AGENTS_BRIDGE_ACP_FS: '1',
+      DSH_AGENTS_BRIDGE_ACP_TERMINAL: 'yes',
+      [ACP_TERMINAL_COMMANDS_ENV]: ' node , /usr/bin/true ',
+    })
+    expect(caps).toEqual({
+      fs: true,
+      terminal: true,
+      terminalCommands: ['node', '/usr/bin/true'],
+    })
+  })
+
+  it('checks argv-form commands against the allow-list and refuses shell lines when one exists', () => {
+    // Historical policy: no allow-list means the explicit terminal switch is the consent.
+    expect(isAcpTerminalCommandAllowed('echo TERMINAL_OK', [], [])).toBe(true)
+    // Inspectable form can be allowed by bare basename or exact path.
+    expect(isAcpTerminalCommandAllowed('echo', ['TERMINAL_OK'], ['echo'])).toBe(true)
+    expect(isAcpTerminalCommandAllowed('/usr/bin/true', [], ['/usr/bin/true'])).toBe(true)
+    // But an argv-less shell line can run anything under that label, so the
+    // allow-list policy has to refuse it rather than guess a first token.
+    expect(isAcpTerminalCommandAllowed('echo TERMINAL_OK', [], ['echo'])).toBe(false)
+    // An allow-list entry must not authorize a same-named executable elsewhere.
+    expect(isAcpTerminalCommandAllowed('/tmp/echo', [], ['echo'])).toBe(false)
+  })
+
+  it('does not forward credential-shaped base or engine-supplied environment into terminals', () => {
+    const env = acpTerminalEnvironment(
+      {
+        PATH: '/usr/bin',
+        DSH_SAFE_SETTING: 'safe',
+        PROVIDER_API_TOKEN: 'redact-me',
+        LOOKS_RANDOM: 'sk-ant-0123456789abcdef0123456789abcdef',
+      },
+      [
+        { name: 'ENGINE_SAFE', value: 'yes' },
+        { name: 'ENGINE_SECRET', value: 'not-name-filtered-but-value-filtered sk-0123456789abcdef' },
+        { name: 'ENGINE_API_KEY', value: 'key' },
+        { name: '', value: 'dropped' },
+      ],
+    )
+    expect(env).toEqual({
+      PATH: '/usr/bin',
+      DSH_SAFE_SETTING: 'safe',
+      ENGINE_SAFE: 'yes',
+    })
   })
 })
 
@@ -551,6 +606,20 @@ describe('acp driver, real pipes', () => {
       writeFileSync(path.join(cwd, 'README.md'), '# hello from the run dir')
       const { messages } = await runToCompletion('tools', { cwd })
       expect(texts(messages)).toContain('hello from the run dir')
+    },
+    20_000,
+  )
+
+  it(
+    'refuses an over-cap fs/read_text_file instead of making the host load it',
+    async () => {
+      const cwd = makeWorkdir()
+      writeFileSync(path.join(cwd, 'big.txt'), 'x'.repeat(ACP_MAX_TEXT_FILE_BYTES + 1000))
+      const { messages, result } = await runToCompletion('read-large', { cwd })
+      const text = texts(messages)
+      expect(result.status).toBe('completed')
+      expect(text).toContain(`large read: refusing fs/read_text_file`)
+      expect(text).toContain(`${ACP_MAX_TEXT_FILE_BYTES}-byte host cap`)
     },
     20_000,
   )

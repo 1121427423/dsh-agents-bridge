@@ -161,6 +161,25 @@ describe('host API — method dispatch', () => {
     expect(value.now).toBe(42)
   })
 
+  it('reports the run-policy limit, not the presentation row cap', async () => {
+    const manager = fakeManager({
+      list: () => Array.from({ length: 205 }, (_, index) => session({ sessionId: `live-${index}` })),
+      concurrency: () => ({ running: 4, limit: 4 }),
+    })
+    const result = await call(makeHandler(manager), { body: '{}' })
+    expect(result.status).toBe(200)
+    const value = (result.body as {
+      value: {
+        sessions: readonly { sessionId: string }[]
+        concurrency: { running: number; limit: number }
+      }
+    }).value
+    // The route caps rows for presentation; the cap is not the number of runs
+    // this deployment is allowed to have.
+    expect(value.sessions).toHaveLength(200)
+    expect(value.concurrency).toEqual({ running: 4, limit: 4 })
+  })
+
   it('answers output incrementally, echoing nextIndex and the terminal flag', async () => {
     const messages: readonly AgentMessage[] = [
       { type: 'text', content: 'hello', at: 1 },
@@ -187,6 +206,43 @@ describe('host API — method dispatch', () => {
     // reason for existing is that it never re-pulls the transcript.
     const second = await call(makeHandler(manager), { url: `${API_PREFIX}/output`, body: JSON.stringify({ sessionId: 's1', sinceIndex: 2 }) })
     expect((second.body as { value: { messages: unknown[]; nextIndex: number } }).value.messages).toEqual([])
+  })
+
+  it('keeps transcript indexes absolute after the kernel ring trims', async () => {
+    const messages: readonly AgentMessage[] = [
+      { type: 'text', content: 'event 200', at: 200 },
+      { type: 'text', content: 'event 201', at: 201 },
+    ]
+    const manager = fakeManager({
+      output: () => ({
+        sessionId: 's1',
+        status: 'running',
+        messages,
+        firstIndex: 200,
+        nextIndex: 202,
+        dropped: 200,
+      }),
+      status: () => session({ sessionId: 's1' }),
+    })
+
+    const result = await call(makeHandler(manager), {
+      url: `${API_PREFIX}/output`,
+      body: JSON.stringify({ sessionId: 's1', sinceIndex: 0 }),
+    })
+
+    expect(result.status).toBe(200)
+    const value = (result.body as {
+      value: {
+        firstIndex: number
+        dropped: number
+        nextIndex: number
+        messages: readonly { index: number; text?: string }[]
+      }
+    }).value
+    expect(value.firstIndex).toBe(200)
+    expect(value.dropped).toBe(200)
+    expect(value.messages.map((message) => message.index)).toEqual([200, 201])
+    expect(value.nextIndex).toBe(202)
   })
 
   it('404s an unknown session on output, naming it', async () => {

@@ -30,6 +30,8 @@ interface OutputValue {
   readonly sessionId: string
   readonly status: string
   readonly nextIndex: number
+  readonly firstIndex?: number
+  readonly dropped?: number
   readonly terminal: boolean
   readonly messages: readonly { readonly index: number; readonly type: string; readonly text?: string }[]
   readonly hint: string
@@ -137,6 +139,43 @@ describe('agents_output — the cursor never skips an event (IM-17)', () => {
 
     expect(value.messages).toHaveLength(1)
     expect(value.nextIndex).toBe(1)
+  })
+
+  it('keeps absolute indexes and discloses what the bounded transcript dropped', async () => {
+    const messages: readonly AgentMessage[] = [
+      { type: 'text', content: 'event 200', at: 200 },
+      { type: 'text', content: 'event 201', at: 201 },
+    ]
+    const manager = {
+      output: () => ({
+        sessionId: 'sess_long',
+        status: 'running' as const,
+        messages,
+        firstIndex: 200,
+        nextIndex: 202,
+        dropped: 200,
+      }),
+      status: () => ({
+        sessionId: 'sess_long',
+        agentId: 'claude',
+        status: 'running' as const,
+        startedAt: 0,
+        messageCount: 202,
+        terminal: false,
+      }),
+    } as unknown as AgentManager
+    const tools = toolsFor(manager)
+    const args = { sessionId: 'sess_long', sinceIndex: 0 }
+
+    const value = await callTool<OutputValue>(tools, 'agents_output', args)
+
+    expect(value.firstIndex).toBe(200)
+    expect(value.dropped).toBe(200)
+    expect(value.messages.map((message) => message.index)).toEqual([200, 201])
+    const rendered = renderTool(tools, 'agents_output', args, value)
+    expect(rendered).toContain('warning: 200 earlier event(s)')
+    expect(rendered).toContain('#200 [text] event 200')
+    expect(rendered).not.toContain('#0 [text] event 200')
   })
 })
 
