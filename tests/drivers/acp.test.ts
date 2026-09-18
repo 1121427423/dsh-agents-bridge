@@ -86,8 +86,20 @@ const realRuntime: DriverRuntime = {
       stderr: child.stderr!,
       exited,
       terminate() {
+        // SIGTERM, matching the production runtime's documented contract
+        // (`argv.ts`: "SIGTERM → grace (5s) → SIGKILL on the process GROUP").
+        //
+        // This used to be SIGKILL, and that was a FIDELITY GAP with teeth: a
+        // SIGKILLed child reports `{code: null, signal: 'SIGKILL'}`, while a
+        // signalled engine that handles the signal reports
+        // `{code: 143, signal: null}`. The driver's settle logic branches on
+        // the CODE, so the only shape that could ever exercise the exit-code
+        // branch was the one the harness could not produce — and a real
+        // regression (the bridge blaming an engine for the exit code its own
+        // force-kill caused) passed the whole suite. See the `ignores-eof`
+        // scenario.
         try {
-          child.kill('SIGKILL')
+          child.kill('SIGTERM')
         } catch {
           /* already gone */
         }
@@ -885,6 +897,48 @@ describe('acp driver, real pipes', () => {
       const { result } = await runToCompletion('rpc-error')
       expect(result.status).toBe('failed')
       expect(result.error).toContain('model unavailable')
+    },
+    20_000,
+  )
+
+  it(
+    'does NOT blame the engine for the exit code its own force-kill caused',
+    async () => {
+      // MEASURED on Qoder CN 1.1.53: the engine ignores stdin EOF, so the
+      // driver waits out its whole grace window and then signals it, and the
+      // engine's shutdown handler exits 143. The TURN had already answered
+      // `stopReason: "end_turn"` with its text delivered — the 143 is an
+      // artefact of the driver's own kill. Attributing it to the engine
+      // reported a finished turn as `failed` with `text: ''`, discarding the
+      // answer the caller had already paid for.
+      const { messages, result } = await runToCompletion('ignores-eof')
+
+      // The exit code is asserted FIRST and deliberately: it proves the
+      // force-kill path actually ran. Without it the test could pass for the
+      // wrong reason — a fixture that quietly left on EOF with code 0 never
+      // reaches the branch under test.
+      expect(result.exitCode).toBe(143)
+      expect(result.status).toBe('completed')
+      expect(result.text).toBe('The answer is 41.')
+      expect(result.error).toBeUndefined()
+      expect(texts(messages)).toBe('The answer is 41.')
+    },
+    20_000,
+  )
+
+  it(
+    'still reports a non-zero exit the engine chose for itself',
+    async () => {
+      // The control for the test above, and the reason the fix is a narrowed
+      // condition rather than a blanket "ignore non-zero exits". An engine
+      // that leaves on EOF of its OWN accord with a failure code is telling
+      // the truth about the run; exempting it would trade one silent
+      // misreport for a worse one.
+      const { result } = await runToCompletion('exits-nonzero')
+      expect(result.exitCode).toBe(3)
+      expect(result.status).toBe('failed')
+      expect(result.error).toContain('exit status 3')
+      expect(result.text).toBe('')
     },
     20_000,
   )

@@ -2230,7 +2230,21 @@ export async function runAcp(
         diagnosis !== ''
           ? `acp stream ended without a prompt response: ${diagnosis}`
           : 'acp stream ended without a prompt response'
-    } else if ((exit.code ?? 0) !== 0) {
+    } else if (exitedCleanly && (exit.code ?? 0) !== 0) {
+      // Only an exit the ENGINE chose counts against it. `exitedCleanly` is
+      // exactly "it left on its own after EOF": when it is false the bridge
+      // waited out the grace window and signalled the process itself, so the
+      // code observed here is the bridge's doing, not a verdict on the turn.
+      //
+      // MEASURED (Qoder CN 1.1.53): the engine ignores stdin EOF, the bridge
+      // force-kills it, and its shutdown handler exits 143
+      // (`cleanup.handleShutdownSignal`, `reason="signal_term"`). Attributing
+      // that to the engine reported a turn that had already answered
+      // `stopReason: "end_turn"` — text in hand — as `failed` with `text: ''`.
+      // The guard is `exitedCleanly`, NOT a whitelist of exit codes: an engine
+      // that leaves on EOF of its own accord with a failure code is telling
+      // the truth and must still fail the run (see the `exits-nonzero`
+      // fixture scenario).
       status = 'failed'
       const detail = `exit status ${exit.code ?? 'null'}${exit.signal === null ? '' : ` (signal ${exit.signal})`}`
       errMsg = diagnosis !== '' ? `${detail}: ${diagnosis}` : `acp exited with error: ${detail}`

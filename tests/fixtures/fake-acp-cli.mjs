@@ -27,6 +27,14 @@
  *  - An agent→client request with NO `id` (the real engine sends
  *    `_codebuddy.ai/command` that way) must not be answered, and must not
  *    crash the reader.
+ *  - Teardown is NOT uniform across engines, and the difference decides
+ *    whether a finished turn is reported as a success. The default scenario
+ *    leaves on stdin EOF. `ignores-eof` refuses to (as the MEASURED Qoder CN
+ *    engine does) and only leaves when signalled, with 128+SIGTERM — so the
+ *    driver has to force the kill, and must not blame the engine for the exit
+ *    code that kill produced. `exits-nonzero` is the control: an engine that
+ *    leaves on EOF of its OWN accord with a failure code must still be
+ *    reported as failed.
  */
 import { createInterface } from 'node:readline'
 import { existsSync } from 'node:fs'
@@ -498,6 +506,11 @@ const SCENARIOS = {
   // IM-15: a terminal the engine creates and never releases.
   'orphan-terminal': runOrphanTerminal,
   'orphan-terminal-cancel': runOrphanTerminalCancel,
+  // The turn is a plain success in both; only the TEARDOWN differs (see the
+  // bottom of this file). Registered explicitly so the names are discoverable
+  // from here rather than only through the `?? runSuccess` fallback.
+  'ignores-eof': runSuccess,
+  'exits-nonzero': runSuccess,
 }
 
 // ── Protocol loop ────────────────────────────────────────────────────────────
@@ -625,10 +638,40 @@ rl.on('line', (line) => {
   }
 })
 
-// The engine exits when stdin closes, like the real one.
+// ── Teardown ─────────────────────────────────────────────────────────────────
+
+/**
+ * How this engine reacts to the driver's shutdown, per scenario.
+ *
+ * MEASURED (Qoder CN 1.1.53, over ACP): the engine does NOT leave on stdin
+ * EOF — it keeps running, the driver waits out its whole grace window and then
+ * signals it, and its own shutdown handler calls `process.exit(143)`
+ * (`cleanup.handleShutdownSignal`, `reason="signal_term"`). The exit code is
+ * therefore an artefact of the DRIVER's kill, not a verdict on the turn: the
+ * turn had already answered `stopReason: "end_turn"` with its text delivered.
+ *
+ * The default here leaves on EOF, which is the cheap path and keeps every
+ * other scenario free of the grace-window delay. Only `ignores-eof` pays for
+ * modelling the measured engine.
+ */
+const IGNORES_EOF = scenario === 'ignores-eof'
+/** The control: leaves on EOF, of its own accord, with a failure code. */
+const EXITS_NONZERO_ON_EOF = scenario === 'exits-nonzero'
+
+if (IGNORES_EOF) {
+  // A live handle, or node would drain the event loop and exit 0 the moment
+  // readline closes — the exact opposite of ignoring EOF. Bounded well above
+  // the driver's 2 s grace window so a leaked fixture still self-reaps instead
+  // of outliving the suite.
+  setInterval(() => {}, 60_000)
+}
+
+// The engine exits when stdin closes — unless this scenario is one that does not.
 rl.on('close', () => {
-  process.exit(0)
+  if (IGNORES_EOF) return
+  process.exit(EXITS_NONZERO_ON_EOF ? 3 : 0)
 })
 
-process.on('SIGTERM', () => process.exit(0))
-process.on('SIGINT', () => process.exit(0))
+// 128 + SIGTERM, as the measured engine reports when its handler runs.
+process.on('SIGTERM', () => process.exit(143))
+process.on('SIGINT', () => process.exit(143))
