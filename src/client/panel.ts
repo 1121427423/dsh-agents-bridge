@@ -94,6 +94,14 @@ function EngineStrip({ snapshot, translator, onRefresh, onRescan }: {
 }): ReactElement {
   const summary = useMemo(() => summarizeEngines(snapshot.engines.results), [snapshot.engines.results])
   const ok = summary.total > 0 && summary.available > 0
+  // A probe takes seconds — it re-resolves every executable, and a rescan also
+  // re-walks the bundle roots. With no bound loading state the two buttons sat
+  // there enabled and unchanged for that whole window, so a click looked like
+  // it did nothing; the only visible consequence of a failure was a stale error
+  // line, which made a working button read as a broken one. Same contract the
+  // strip's own Refresh button already had (`snapshot.loading`), applied to the
+  // state these two actually drive.
+  const busy = snapshot.engines.loading
   const headline = snapshot.engines.loading && summary.total === 0
     ? translator.t('loadingTitle')
     : summary.available === 0
@@ -116,16 +124,21 @@ function EngineStrip({ snapshot, translator, onRefresh, onRescan }: {
       // the host started. Folding them together would either tax every refresh
       // with the walk (MI-8) or leave the walk undiscoverable (RR-MI-1b), so
       // the walk gets its own labelled button and its reason in the tooltip.
-      createElement('button', { type: 'button', className: `${ROOT_CLASS}__btn`, onClick: onRefresh }, translator.t('refresh')),
+      createElement(
+        'button',
+        { type: 'button', className: `${ROOT_CLASS}__btn`, disabled: busy, onClick: onRefresh },
+        busy ? translator.t('refreshing') : translator.t('refresh'),
+      ),
       createElement(
         'button',
         {
           type: 'button',
           className: `${ROOT_CLASS}__btn`,
+          disabled: busy,
           title: translator.t('rescanInstallsTitle'),
           onClick: onRescan,
         },
-        translator.t('rescanInstalls'),
+        busy ? translator.t('rescanningInstalls') : translator.t('rescanInstalls'),
       ),
     ),
     snapshot.engines.error === undefined

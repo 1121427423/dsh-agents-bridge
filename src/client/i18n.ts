@@ -82,6 +82,8 @@ export interface Dict {
   readonly enginesTrackDesktop: string
   /** Engine-strip button that re-WALKS the bundle roots (the expensive half). */
   readonly rescanInstalls: string
+  /** What that button reads while the walk is in flight. */
+  readonly rescanningInstalls: string
   /** What the re-scan button actually re-walks, and why it is slower. */
   readonly rescanInstallsTitle: string
   readonly pollLive: string
@@ -185,6 +187,7 @@ const zh: Dict = {
   enginesTrackCli: 'CLI',
   enginesTrackDesktop: '桌面应用',
   rescanInstalls: '重新扫描安装',
+  rescanningInstalls: '扫描中…',
   rescanInstallsTitle: '重新走一遍应用安装目录，让上次扫描之后新装的 app 出现在这里。比「刷新」慢。',
   pollLive: '实时刷新中',
   pollIdle: '全部空闲，已停止轮询',
@@ -280,6 +283,7 @@ const en: Dict = {
   enginesTrackCli: 'CLI',
   enginesTrackDesktop: 'desktop app',
   rescanInstalls: 'Rescan installs',
+  rescanningInstalls: 'Scanning…',
   rescanInstallsTitle: 'Re-walk the installed app bundles, so an app installed since the last scan shows up here. Slower than Refresh.',
   pollLive: 'Live',
   pollIdle: 'All idle — polling stopped',

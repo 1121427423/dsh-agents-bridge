@@ -68,6 +68,8 @@ function makeStore(script: {
   readonly sessions?: () => readonly ClientSession[]
   readonly failStatus?: boolean
   readonly output?: (sessionId: string, sinceIndex: number) => { readonly nextIndex: number; readonly messages: readonly { readonly index: number; readonly type: string; readonly text?: string | undefined; readonly tool?: string | undefined; readonly at: number }[] }
+  /** Hold the engine probe open, so the loading state can be observed. */
+  readonly probeGate?: Promise<void>
 } = {}): SupervisorStore {
   const api: BridgeApi = {
     async status() {
@@ -87,6 +89,7 @@ function makeStore(script: {
       return { sessionId: 'x', cancelled: true, status: 'running', note: 'ok' }
     },
     async probe() {
+      if (script.probeGate !== undefined) await script.probeGate
       return {
         available: true,
         results: [{ id: 'claude', available: true, health: { credential: 'ok' }, models: ['a', 'b'] }],
@@ -435,6 +438,49 @@ describe('SupervisorPanel — every state is readable', () => {
     // Never the raw transport text.
     expect(text).not.toContain('offline')
     store.stop()
+  })
+})
+
+/* -------------------------------------------------------------------------- */
+/* The engine strip                                                           */
+/* -------------------------------------------------------------------------- */
+
+describe('SupervisorPanel — the engine strip says when it is working', () => {
+  it('disables both probe buttons and relabels them while the probe is in flight', async () => {
+    // A probe re-resolves every executable, and the rescan also re-walks the
+    // bundle roots: seconds, not milliseconds. The bar's own Refresh button
+    // already bound `snapshot.loading`, but these two bound NOTHING — so for the
+    // whole window they sat enabled with unchanged labels, and a click looked
+    // like it did nothing. A working button read as a broken one, and the only
+    // visible consequence of an earlier transient failure was a stale error
+    // line, which made it look permanently broken.
+    let release: () => void = () => {}
+    const gate = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const store = makeStore({ probeGate: gate })
+    store.start()
+    await store.refresh()
+
+    const tree = SupervisorPanel({ store, translator: createTranslator('en') }) as unknown as StubElement
+    const buttons = findAll(tree, 'button')
+    const working = buttons.filter(button => ['Refreshing…', 'Scanning…'].includes(textOf(button)))
+    expect(working).toHaveLength(2)
+    expect(working.every(button => button.props.disabled === true)).toBe(true)
+    // The bar's Refresh is driven by `snapshot.loading` — a different state — so
+    // it must stay usable while only the engines are loading.
+    expect(buttons.map(button => textOf(button))).toContain('Refresh')
+
+    release()
+    await store.refreshEngines()
+    store.stop()
+  })
+
+  it('offers both verbs again once the probe has landed', async () => {
+    const { text } = await renderPanel(makeStore())
+    expect(text).toContain(DICTS.en.refresh)
+    expect(text).toContain(DICTS.en.rescanInstalls)
+    expect(text).not.toContain(DICTS.en.rescanningInstalls)
   })
 })
 
