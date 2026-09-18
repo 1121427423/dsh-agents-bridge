@@ -2273,6 +2273,15 @@ export async function runAcp(
             configId: option.configId,
             value: opts.effort,
           })
+          // Same reason as the model step's line: a successful dial emits no
+          // frame of its own, so without this the happy path is INVISIBLE to a
+          // full-stack acceptance run — and "the level was sent" versus "the
+          // level was silently skipped" would look identical from outside.
+          deps.logger.debug('acp effort selector driven', {
+            configId: option.configId,
+            requested: opts.effort,
+            optionSource: optionSource === sessionResult ? 'handshake' : 'post-selection',
+          })
         } catch (err) {
           // Never fatal: the prompt runs at the runtime's own default.
           deps.logger.warn('acp runtime rejected the effort request; running anyway', {

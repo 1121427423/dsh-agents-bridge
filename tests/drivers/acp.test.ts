@@ -1216,6 +1216,15 @@ describe('acp driver, config-option dials', () => {
       expect(dials).toContain('model=default-model accepted')
       expect(dials).toContain('thought_level=xhigh accepted')
       expect(logs.join('\n')).not.toContain('does not advertise the requested effort')
+      // The DIAGNOSTIC is part of the contract, not decoration: a successful dial
+      // emits no frame of its own, so this line is the only thing a full-stack
+      // acceptance run can observe. Asserted so that deleting it reddens here
+      // rather than silently blinding the next real-engine verification
+      // (docs/findings-qoder-cn-desktop.md §11.6, §11.8).
+      expect(logs.join('\n')).toContain('acp effort selector driven')
+      // …and it must name WHERE the level set was read from: `post-selection`
+      // here, because the fixture echoes the updated set in its response.
+      expect(logs.join('\n')).toContain('"optionSource":"post-selection"')
     },
     20_000,
   )

@@ -9,12 +9,19 @@
  *
  * Usage:
  *   export PATH=/opt/homebrew/bin:$PATH
- *   node --experimental-strip-types scripts/acceptance.ts <agent> [prompt] [--model=<id>]
+ *   node --experimental-strip-types scripts/acceptance.ts <agent> [prompt] [--model=<id>] [--effort=<level>]
  *
  * Examples:
  *   node --experimental-strip-types scripts/acceptance.ts claude
  *   node --experimental-strip-types scripts/acceptance.ts codex "Reply with exactly: OK"
  *   node --experimental-strip-types scripts/acceptance.ts workbuddy "..." --model=deepseek-v4.1-flash
+ *   node --experimental-strip-types scripts/acceptance.ts qoderclicn "..." --model=qmodel --effort=none
+ *
+ * `--effort` exists to exercise the model→effort ORDERING on a real engine: the
+ * level set is a function of the selected model, so passing both is the only way
+ * to see the driver validate effort against the POST-selection set rather than
+ * the handshake's copy. Pair it with `DSH_AGENTS_BRIDGE_DEBUG=1`, because a
+ * successful dial emits no frame of its own.
  *
  * A NON-ZERO upstream credential is a normal outcome, not a script bug: the
  * engine's own auth is out of scope for the bridge. What matters is that the
@@ -32,6 +39,8 @@ import { createAgentManager } from '../src/kernel/manager.ts'
 const [agent = 'claude', prompt = 'Reply with exactly: OK', ...rest] = process.argv.slice(2)
 const modelFlag = rest.find((arg) => arg.startsWith('--model='))
 const model = modelFlag?.slice('--model='.length)
+const effortFlag = rest.find((arg) => arg.startsWith('--effort='))
+const effort = effortFlag?.slice('--effort='.length)
 
 installDriverRuntime()
 
@@ -49,8 +58,15 @@ const target = probed.find((entry) => entry.id === agent)
 console.log(`probe  ${agent}: track=${target?.track} available=${target?.available}`)
 console.log(`       executable=${target?.executable} version=${target?.version} reason=${target?.reason ?? '-'}`)
 
-const snapshot = await manager.run({ agent, prompt, timeoutMs: 180_000, ...(model ? { model } : {}) })
+const snapshot = await manager.run({
+  agent,
+  prompt,
+  timeoutMs: 180_000,
+  ...(model ? { model } : {}),
+  ...(effort ? { effort } : {}),
+})
 console.log(`run    session=${snapshot.sessionId} status=${snapshot.status}`)
+if (model || effort) console.log(`       requested model=${model ?? '-'} effort=${effort ?? '-'}`)
 
 const deadline = Date.now() + 180_000
 let current = snapshot

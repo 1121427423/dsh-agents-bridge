@@ -1174,3 +1174,58 @@ backendSessionId: 53716d83-c153-42cf-bc9e-7d6ffef52682
 4. **仍然需要一个带外步骤**：`~/.qoder-cn/.auth/user`（1280 B）必须已存在，也就是操作员得先
    `qoderclicn login` 过一次。桥自己**不会**驱动这个登录（§5.3 是那件未做的工作）。
    「桌面版通了」的准确含义是：**凭证就位之后，它通了**。
+
+### 11.8 顺序约束在**真机**上成立（2026-09-19 07:10）—— 此前只在假 peer 上验过
+
+§11.4 的顺序测试跑在 fixture 上。**假 peer 的耦合是我自己写的**，所以它只能证明「驱动按我设想的方式
+工作」，不能证明「真引擎就是这个样子」。§11.1 的探针测的是**响应形状**，也没走完整条栈。
+补三组真机对照（`qoderclicn` 1.1.56，`DSH_AGENTS_BRIDGE_DEBUG=1`）：
+
+```
+########## A) --model=qmodel --effort=xhigh ##########
+       requested model=qmodel effort=xhigh
+[debug] acp model selector driven {"configId":"model","requested":"qmodel","optionSetEchoed":true}
+[debug] acp session does not advertise the requested effort; running without it
+        {"requested":"xhigh","advertised":"none"}
+result status=completed exit=143 durationMs=27464
+text: OK
+
+########## B) --model=qfmodel --effort=xhigh ##########
+       requested model=qfmodel effort=xhigh
+[debug] acp model selector driven {"configId":"model","requested":"qfmodel","optionSetEchoed":true}
+[debug] acp effort selector driven {"configId":"reasoning_effort","requested":"xhigh","optionSource":"post-selection"}
+result status=completed exit=143 durationMs=32483
+text: OK
+
+########## C) --model=qmodel --effort=none ##########
+       requested model=qmodel effort=none
+[debug] acp model selector driven {"configId":"model","requested":"qmodel","optionSetEchoed":true}
+[debug] acp effort selector driven {"configId":"reasoning_effort","requested":"none","optionSource":"post-selection"}
+result status=completed exit=143 durationMs=26797
+text: OK
+```
+
+**A 组就是 §11.3 预测的那个故障场景，而且它没有发生**：`xhigh` 在**握手时是被广告的**
+（§10.4 记录 `qfmodel` 4 档含 `xhigh`），切成 `qmodel` 之后**档位表只剩 `none`**，
+于是驱动**读到了选择后的集合**并跳过它 —— `advertised:"none"` 就是「它读的是新表」的直接证据。
+一个读握手副本的驱动会在这里发出 `xhigh` 并吃 `-32602`（吞掉），而 `status` 仍然是 `completed`
+—— **外部看不出任何差别**。这正是 §11.4 那条断言存在的理由。
+
+**B / C 是两组反证，缺一不可**：
+
+- B 排除「驱动根本不发 effort」—— 同一档位 `xhigh` 在 `qfmodel` 下**照样发出**。
+- C 排除「模型那一步把 effort 整条链弄坏了」—— 换成 `qmodel` 后 `none`（唯一剩下的档位）**发出成功**。
+
+所以 A 组的跳过是**因为那个值**，不是因为别的。三组都拿到了 `[text] OK`，即拨盘没有破坏回合。
+
+**本次为此补的两处工具**（都在 `scripts/acceptance.ts` / `src/drivers/acp.ts`）：
+
+1. `scripts/acceptance.ts` 新增 **`--effort=<level>`**（此前只有 `--model=`）—— 没有它，
+   这个实验在真机上**做不了**。
+2. `src/drivers/acp.ts` 的 effort 成功路径新增 `debug` 行 —— 此前它**只有 warning**，
+   所以「拨成功」在真机上完全不可见，与模型拨盘当初的处境相同。两个拨盘现在对称：
+   成功有一条 `debug`，失败/跳过有一条 `warn`。
+
+**一个自己踩的坑，记下来免得重复**：第一版用 zsh 的 `for combo in "a b"; do set -- $combo` 分词，
+**zsh 默认不对未加引号的变量做词分割**，于是 `qmodel xhigh` 被当成一个 model 值，
+三组全跑成「模型不被广告 → 跳过」。改用显式参数后才有上表。**这类"三组全一样"的结果要先怀疑装置。**
