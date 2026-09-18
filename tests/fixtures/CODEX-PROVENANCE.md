@@ -45,7 +45,8 @@ Two notes on the invocation:
   after 25 s). See the driver's header for what that means for the bridge.
 
 Sanitization applied to the checked-in files: the captured thread UUIDs were
-replaced with fixed ones, `/Users/king/...` became `/Users/example/...`, and the
+replaced with fixed ones, absolute home directories were rewritten to the
+`/Users/example/...` placeholder, and the
 temporary run directory became `/work/project`. Nothing else was edited; the
 `item_*` ids, statuses, token counts and error text are verbatim.
 

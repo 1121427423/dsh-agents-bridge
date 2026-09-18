@@ -65,7 +65,7 @@ process / LaunchServices checks above, and confirmed directly by the user: 「�
 
 ### OBSERVED: a local artifact that names it explicitly
 
-`/Users/king/Desktop/marvis/skills/yyb-engine-install/SKILL.md` (1,699 bytes, mtime 2026-06-24) — `yyb` is the
+`/Users/example/Desktop/marvis/skills/yyb-engine-install/SKILL.md` (1,699 bytes, mtime 2026-06-24) — `yyb` is the
 standard abbreviation for 应用宝. Its front-matter and body state:
 
 > `description: "需要安装或更新腾讯应用宝移动应用引擎时，必须使用本skill。"`
@@ -77,7 +77,7 @@ standard abbreviation for 应用宝. Its front-matter and body state:
 So a locally-recorded meaning of "应用宝" is the **腾讯应用宝移动应用引擎** — an *engine/infrastructure* that
 supports running mobile apps, driven from an agent over MCP tools named `mcp_androws_mcp_*`. It is invoked as a
 remote/componentised service, not as a `/Applications` bundle. Companion config confirms it is a **router keyword**
-rather than a product: in `/Users/king/Desktop/marvis/schemas/routing_signals.yaml` (line 275) `应用宝` sits in a
+rather than a product: in `/Users/example/Desktop/marvis/schemas/routing_signals.yaml` (line 275) `应用宝` sits in a
 list beside `企业微信`, `网易云`, `App Store`, `Google Play` under the reason `"app-agent 第三方应用操作"`; in
 `schemas/agents.yaml` (line 277) it is a `trigger_keyword` of `app-agent`; and in
 `orchestrator/skill_registry.py` (line 198) the skill's `display_name` is `"应用宝引擎安装"` with
@@ -121,7 +121,7 @@ volume is mounted**:
 |---|---|
 | `/Volumes/WorkBuddy 5.2.3-arm64/WorkBuddy.app/...` | **No** — `/Volumes` contains only `Macintosh HD`. |
 | `/Volumes/WorkBuddy AI 5.5.2-arm64/WorkBuddy AI.app/...` | **No** — same. |
-| `/Users/king/Desktop/agent-design/WorkBuddy/app/...` | Path exists, but is **not** an app bundle (see below). |
+| `/Users/example/Desktop/agent-design/WorkBuddy/app/...` | Path exists, but is **not** an app bundle (see below). |
 
 These `/Volumes/...` entries are **stale LaunchServices records** left behind from previously-mounted DMGs. The
 `lsregister -dump` output contains 762 `/Volumes/` references overall (many unrelated, e.g.
@@ -143,7 +143,7 @@ not a broken index**; `mdfind -name WorkBuddy` returns 57 hits. No
 additional copies were discoverable that way, and no extra copy was found in `/Applications`, `~/Applications`,
 `~/Desktop`, `~/Downloads` or `/opt`.
 
-`/Users/king/Desktop/agent-design/WorkBuddy/` is **not** an app copy. It is an unpacked/reverse-engineering
+`/Users/example/Desktop/agent-design/WorkBuddy/` is **not** an app copy. It is an unpacked/reverse-engineering
 workspace (mtime 2026-08-09) containing `app/{main,renderer,preload,cli,node_modules,resources}` plus the user's
 own analysis notes (`architecture-analysis.md`, `module-dependency-graph.md`, `subsystem-agent-engine.md`,
 `subsystem-permission-flow.md`, …). It has **no `Info.plist`** anywhere within depth 3, so it cannot be launched
@@ -171,7 +171,7 @@ WorkBuddy AI 5.5.2 during this window.
 /Applications/WorkBuddy AI.app/Contents/MacOS/Electron      (pid 63779, started 00:10:18)
 ```
 
-with `--user-data-dir=/Users/king/.workbuddy-ai/app` and `--app-path=/Applications/WorkBuddy AI.app/Contents/Resources/app.asar`.
+with `--user-data-dir=/Users/example/.workbuddy-ai/app` and `--app-path=/Applications/WorkBuddy AI.app/Contents/Resources/app.asar`.
 **No process is running from `/Volumes/...` or from the Desktop workspace.** The domestic
 `/Applications/WorkBuddy.app` had **no running process at the time of collection** (it had exited at 00:10:43).
 
@@ -196,7 +196,7 @@ used instead.
 | **23:47:51.736** | intl celljs | **explicitly not logged in at boot** | `[AuthenticationManager] [FirstScreen] [AuthDoInitProbe] stage=afterRestore totalMs=199 sinceLastMs=0 hasSession=false hasAccessToken=false` |
 | 23:47:52.743 | intl daemon | **no auth file on disk** | `[FirstScreen] [FileAuthStorage.restore] stage=noAuthFile totalMs=1 sinceLastMs=0` |
 | ~23:47:56 (inferred) | intl daemon | `auth:login` RPC begins (derived from 46,984 ms ending 23:48:43.226) | — |
-| 23:48:12.977 | intl edge-sync (pid 35109) | extension init, intl home | `[INIT] configDir=/Users/king/.workbuddy-ai migratedFromDb=0 dbReady=true dbPath=/Users/king/.workbuddy-ai/edge-sync-mapping-v3.db initFail=(none)` |
+| 23:48:12.977 | intl edge-sync (pid 35109) | extension init, intl home | `[INIT] configDir=/Users/example/.workbuddy-ai migratedFromDb=0 dbReady=true dbPath=/Users/example/.workbuddy-ai/edge-sync-mapping-v3.db initFail=(none)` |
 | **23:48:43.226** | intl daemon | **login completes (46,984 ms)** | `[DaemonRPC] end #70 auth:login elapsedMs=46984 SLOW` |
 | 23:48:43.313 / .446 | intl window | account snapshot saved for `<acct-A>` | `[FirstScreen] saveAccountSnapshotSync OK: uid=<acct-A> size=234 durationMs=0` (then `size=281`) |
 | **23:48:43.473** | intl daemon | **auth file read: 4503 bytes, `<acct-A>`** | `[FileAuthStorage.restore] stage=afterReadFile … bytes=4503` → `stage=afterEmit … uid=<acct-A>` |
@@ -230,7 +230,7 @@ used instead.
 | 00:06:47.533 | intl main | restores `<acct-B>` | `[FirstScreen] buildInitialRendererQuery injecting accountSnapshot: uid=<acct-B> encodedLen=233` |
 | 00:06:48.444 | intl daemon | still 3832 bytes | `[FileAuthStorage.restore] stage=afterReadFile … bytes=3832` → `uid=<acct-B>` |
 | 00:06:48.607 | intl handler | re-noted | `cleared user-prompt project caches on account change (\| -> <acct-B>\|)` |
-| 00:06:49.140 | intl edge-sync (pid 56635) | new edge-sync instance | `[INIT] configDir=/Users/king/.workbuddy-ai … dbPath=/Users/king/.workbuddy-ai/edge-sync-mapping-v3.db` |
+| 00:06:49.140 | intl edge-sync (pid 56635) | new edge-sync instance | `[INIT] configDir=/Users/example/.workbuddy-ai … dbPath=/Users/example/.workbuddy-ai/edge-sync-mapping-v3.db` |
 | **00:07:55.401** | dom AppStartup | **domestic app RE-launches** | `[AppStartup] appName=WorkBuddy appVersion= … userId=unknown uptimeSec=0 source=app_startup` |
 | 00:07:58.385 | dom AppStartup | session restored in ~3 s | `[ArdotDesignFeatureNotEnabled] … accountUid=<acct-B> value=false hasFeatureKey=true` |
 | 00:07:59.595 | dom daemon | domestic auth file is **4527** bytes, still `<acct-B>` | `[FileAuthStorage.restore] stage=afterReadFile … bytes=4527` → `uid=<acct-B>` |
@@ -319,11 +319,11 @@ The international app's `edge-sync` builtin extension **reacted to** the account
 channel for `<acct-A>` (`reason":"disconnect called"`) and reported `resetForAuthOwnerChange DONE`.
 
 One genuine cross-product coupling worth flagging (**OBSERVED**): the international app's edge-sync extension
-process (**pid 35109 / 56635**, whose own init line says `configDir=/Users/king/.workbuddy-ai
-dbPath=/Users/king/.workbuddy-ai/edge-sync-mapping-v3.db`) writes its log lines into the **domestic** app's log
+process (**pid 35109 / 56635**, whose own init line says `configDir=/Users/example/.workbuddy-ai
+dbPath=/Users/example/.workbuddy-ai/edge-sync-mapping-v3.db`) writes its log lines into the **domestic** app's log
 directory, `~/.workbuddy/logs/2026-09-16/edge-sync.log`. That file contains six different pids — three domestic
-(`13532`, `34642`, `60095`, `configDir=/Users/king/.workbuddy`) and at least two international (`35109`, `56635`,
-`configDir=/Users/king/.workbuddy-ai`). This is a **shared log path only**: the two apps keep separate mapping
+(`13532`, `34642`, `60095`, `configDir=/Users/example/.workbuddy`) and at least two international (`35109`, `56635`,
+`configDir=/Users/example/.workbuddy-ai`). This is a **shared log path only**: the two apps keep separate mapping
 databases (`edge-sync-mapping-v4.db` for domestic, `-v3.db` for international). It means `~/.workbuddy/logs/` can
 NOT be assumed to contain only domestic-app activity — a trap for anyone reading these logs.
 
@@ -447,7 +447,7 @@ never invoked; no command can block on GUI authentication.
 `ls -la ~/Library/Application Support | grep -i -E 'yingyongbao|yyb|应用宝|android|mumu|ldplayer|bluestacks|workbuddy|tencent|codebuddy'`;
 `ls -la ~/Library/Containers | grep -i …`;
 `mdfind -name 应用宝`; `mdfind -name yingyongbao`; `mdfind -name YYB`;
-`grep -ril '应用宝' /Users/king/Desktop/marvis`; `grep -ril 'androws' /Users/king/Desktop/marvis`;
+`grep -ril '应用宝' /Users/example/Desktop/marvis`; `grep -ril 'androws' /Users/example/Desktop/marvis`;
 `cat`/`read` of `…/marvis/skills/yyb-engine-install/SKILL.md`;
 `grep -n -B3 -A6 '应用宝' …/marvis/schemas/agents.yaml …/routing_signals.yaml …/orchestrator/skill_registry.py`;
 `head -40 …/marvis/README.md`; `sed -n '240,300p' …/marvis/schemas/agents.yaml`;
@@ -466,8 +466,8 @@ all `*.app` variants → 0, `mdfind -name 应用宝` → 0. Spotlight is healthy
 `/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier|:CFBundleShortVersionString|:CFBundleVersion|:CFBundleName|:CFBundleDisplayName|:LSMultipleInstancesProhibited|:CFBundleURLTypes'` on both `Info.plist`s;
 `codesign -dv` on both bundles (metadata only);
 `stat -f` on the bundles and on preference plists;
-`ls -la /Users/king/Downloads/*.dmg`; `ls -la /Users/king/Desktop/*.dmg`;
-`ls -la /Users/king/Desktop/agent-design/WorkBuddy{,/app}`; `find …/agent-design/WorkBuddy -maxdepth 3 -name Info.plist`
+`ls -la /Users/example/Downloads/*.dmg`; `ls -la /Users/example/Desktop/*.dmg`;
+`ls -la /Users/example/Desktop/agent-design/WorkBuddy{,/app}`; `find …/agent-design/WorkBuddy -maxdepth 3 -name Info.plist`
 
 *Log reconstruction*
 `ls -laR ~/Library/Logs/WorkBuddy`; `ls -la ~/Library/Logs | grep -i -E 'workbuddy|codebuddy|tencent'`;

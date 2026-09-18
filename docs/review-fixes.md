@@ -386,7 +386,7 @@ TS2322、TS2349）是**脱离工程 tsconfig 独立编译的假象**，不计入
 - `/opt/homebrew/bin/node node_modules/typescript/bin/tsc --noEmit` → **0 errors**
 - `/opt/homebrew/bin/node scripts/build.mjs` → `lib/index.js 360.6kb`
 - `/opt/homebrew/bin/node scripts/build-client.mjs` → `lib/client.js 73.8kb`
-- `python3 /Users/king/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py .` → **11/11 PASS**
+- `python3 /Users/example/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py .` → **11/11 PASS**
 - （额外，非本批门禁）用 `/tmp/tsconfig.b3tests.json`（`extends` 仓库 tsconfig、`rootDir` 上提、只 include
   本批改动的 9 个测试文件 + helpers）复核：**0 errors** —— 提前确认本批的测试改动不会给 IM-14/B3b 添新债。
 
@@ -467,7 +467,7 @@ TS2322、TS2349）是**脱离工程 tsconfig 独立编译的假象**，不计入
 - `/opt/homebrew/bin/node node_modules/typescript/bin/tsc --noEmit -p tsconfig.tests.json` → **0 errors**
 - `/opt/homebrew/bin/node scripts/build.mjs` → `lib/index.js 367.6kb`
 - `/opt/homebrew/bin/node scripts/build-client.mjs` → `lib/client.js 73.8kb`
-- `python3 /Users/king/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py .` → **11/11 PASS**
+- `python3 /Users/example/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py .` → **11/11 PASS**
 
 **未做 / 留给后续**
 
@@ -1221,7 +1221,7 @@ Model Experience 一节写明 `dsh-tool-jobs` 负责渲染 **completion notices*
 **通知自发开进了模型回合，模型全程没有轮询** —— 需求 ② 成立。
 
 **关于 `[status: failed]`（如实记账，别误读）**：那次 claude 委托**本身失败**，不是映射错误 ——
-持久化记录 `/Users/king/.dsh/state/dsh-agents-bridge/sessions.json` 里该行 `agentId=claude status=failed`，
+持久化记录 `/Users/example/.dsh/state/dsh-agents-bridge/sessions.json` 里该行 `agentId=claude status=failed`，
 与通知一致。**首次冒烟的失败是我自己造成的**：我在它还在跑的时候重启了 43121 宿主，宿主启动时的孤儿回收把该会话标成
 `the bridge restarted while this session was running`；第二次冒烟**没有任何重启**，仍是 failed（本地 claude CLI 自己的问题，
 与 §8/§9 记录的「本机 CLI 自身可用性」同类，本批**未**root-cause，因为它与需求正交：通知管的是「结束」，不是「成功」）。
@@ -1465,7 +1465,7 @@ process 4485`（4485 = 正在运行的真 app，单进程账本锁）。**即：
 
 ### W-2 安装（已落盘，**未重启**）
 
-- `~/.dsh/profiles/desktop/package.json`：加入 `"dsh-agents-bridge": "link:/Users/king/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge"`，
+- `~/.dsh/profiles/desktop/package.json`：加入 `"dsh-agents-bridge": "link:/Users/example/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge"`，
   并把 `dsh-agents-bridge` 追加到 `dsh.profile.bundles` 末尾（29 deps / 28 bundles）。
 - `~/.dsh/profiles/desktop/node_modules/dsh-agents-bridge` → 指向本仓库（手工 link，等价于 `link:`；
   **故意不跑 pnpm**，以免它重写该 profile 其余依赖）。

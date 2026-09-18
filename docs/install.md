@@ -16,7 +16,7 @@ cp ~/.dsh/profiles/desktop/package.json ~/.dsh/profiles/desktop/package.json.bak
 {
   "dependencies": {
     // …已有…
-    "dsh-agents-bridge": "link:/Users/king/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge"
+    "dsh-agents-bridge": "link:/Users/example/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge"
   },
   "dsh": {
     "profile": {

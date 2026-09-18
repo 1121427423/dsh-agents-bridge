@@ -14,7 +14,7 @@
 - **执行的命令**：
   ```bash
   export PATH=/opt/homebrew/bin:$PATH
-  cd /Users/king/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge
+  cd /Users/example/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge
   node --experimental-strip-types scripts/acceptance.ts workbuddy \
     "Reply with exactly: ACCEPTANCE_OK" --model=deepseek-v4.1-flash
   ```
@@ -180,7 +180,7 @@ copilot.tencent.com**，两次产出回合后断线。按规程记录、不无�
   但它是那条症状之所以成立的**前提**，且无法在本仓库里消除，故按任务书要求留痕。
 - **事实（本机复验，逐字）**：
   ```bash
-  ls "/Users/king/Library/Application Support/DSH Desktop/runtime-commands/generations/"
+  ls "/Users/example/Library/Application Support/DSH Desktop/runtime-commands/generations/"
   # → 68c24b0a32d4571ebb18d44b97380d522c67e885d64dae302ad011c1ab5f3123-c688fb67-32c9-438a-a7c9-4ca17095609d
 
   ls -l /usr/bin/node
@@ -335,13 +335,13 @@ copilot.tencent.com**，两次产出回合后断线。按规程记录、不无�
 - **执行的命令**：
   ```bash
   export PATH=/opt/homebrew/bin:$PATH
-  cd /Users/king/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge
+  cd /Users/example/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge
   node --experimental-strip-types scripts/acceptance.ts hermes "Reply with exactly: OK"
   ```
 - **原始输出（逐字）**：
   ```
   probe  hermes: track=cli available=true
-         executable=/Users/king/.local/bin/hermes version=0.21.3 reason=-
+         executable=/Users/example/.local/bin/hermes version=0.21.3 reason=-
   run    session=sess_756d58a0-4ada-4fbf-be18-968762c57554 status=running
   [dsh-agents-bridge:acceptance:run:hermes] acp engine advertises auth methods {"authMethods":["openrouter","hermes-setup"]}
 

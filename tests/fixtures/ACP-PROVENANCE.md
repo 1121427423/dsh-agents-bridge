@@ -22,7 +22,7 @@ instead, annotated at each builder.
 ## The real capture (raw evidence)
 
 Taken 2026-09-17 against
-`/Users/king/.nvm/versions/node/v22.22.3/bin/codebuddy-code --acp`
+`/Users/example/.nvm/versions/node/v22.22.3/bin/codebuddy-code --acp`
 (`@tencent-ai/codebuddy-code` 2.151.0), driving
 `initialize` → `session/new` → `session/prompt` over real stdio.
 
@@ -122,7 +122,7 @@ stdout *while* writing, or the exchange stalls — the very trap the driver's ow
 
 Appended 2026-09-17 (D39). Nothing above is changed by this section.
 
-Taken against `/Users/king/.local/bin/hermes` → `~/.hermes/hermes-agent/venv/bin/hermes`,
+Taken against `/Users/example/.local/bin/hermes` → `~/.hermes/hermes-agent/venv/bin/hermes`,
 **`hermes-agent` 0.21.3**, driving `initialize` → `session/new` over real stdio
 with the throwaway script `/tmp/hermes-acp-probe.mjs`. `hermes acp --version`
 prints exactly `0.21.3` [proven].

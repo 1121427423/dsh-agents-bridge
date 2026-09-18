@@ -27,7 +27,7 @@ whichever app's primary key wins, so one app's write can make the other's stored
 ciphertext (`connector-states.v3.json`, `.credentials.v3.json`) undecryptable. **However**, the
 logged-in *session* is not held in that store: it lives in the per-app Chromium profile
 (`<configDir>/app/session/`) and `<configDir>/security/<userId>/cipher`, both namespaced by
-`WORKBUDDY_CONFIG_DIR`, which I confirmed live (`/Users/king/.workbuddy-ai`) — so I cannot show that
+`WORKBUDDY_CONFIG_DIR`, which I confirmed live (`/Users/example/.workbuddy-ai`) — so I cannot show that
 the domestic app makes the international *login* undecryptable. The mechanism that *would* produce
 exactly that symptom is real but latent: the international build's fallback when `product.json`
 fails to resolve is the hardcoded domestic `.workbuddy`, and its early-startup path demonstrably
@@ -47,9 +47,9 @@ found no cross-write into it. *Medium* (≈0.6) that `safeStorage` keychain stri
 
 | location | domestic | international | SHARED / NAMESPACED | evidence |
 |---|---|---|---|---|
-| config home (`~/.workbuddy` vs `~/.workbuddy-ai`) | `~/.workbuddy` | `~/.workbuddy-ai` | NAMESPACED | OBSERVED both dirs; live env `WORKBUDDY_CONFIG_DIR=/Users/king/.workbuddy-ai` on all 11 intl processes; `product.json dataFolderName=.workbuddy/.workbuddy-ai`; code `resolveWorkbuddyConfigDir() = env \|\| homedir + dataFolderName` |
+| config home (`~/.workbuddy` vs `~/.workbuddy-ai`) | `~/.workbuddy` | `~/.workbuddy-ai` | NAMESPACED | OBSERVED both dirs; live env `WORKBUDDY_CONFIG_DIR=/Users/example/.workbuddy-ai` on all 11 intl processes; `product.json dataFolderName=.workbuddy/.workbuddy-ai`; code `resolveWorkbuddyConfigDir() = env \|\| homedir + dataFolderName` |
 | `.../connector-keys/` **fallback** master key | `~/.workbuddy-key-fallback/connector-keys/` | identical path | **SHARED** | OBSERVED: `738c629e…` and `e86c0039…` both present there; code in *both* asars: `path.join(os.homedir(), ".workbuddy-key-fallback")`, byte-identical |
-| `<configDir>/app` (Chromium userData, `--user-data-dir`) | `~/.workbuddy/app` | `~/.workbuddy-ai/app` | NAMESPACED | OBSERVED live `--user-data-dir=/Users/king/.workbuddy-ai/app`; `~/.workbuddy/app/SingletonLock`; code `app.setPath("userData", getWorkbuddyUserDataDir())` where `userDataDir = env WORKBUDDY_USER_DATA_DIR \|\| <configDir>/app` |
+| `<configDir>/app` (Chromium userData, `--user-data-dir`) | `~/.workbuddy/app` | `~/.workbuddy-ai/app` | NAMESPACED | OBSERVED live `--user-data-dir=/Users/example/.workbuddy-ai/app`; `~/.workbuddy/app/SingletonLock`; code `app.setPath("userData", getWorkbuddyUserDataDir())` where `userDataDir = env WORKBUDDY_USER_DATA_DIR \|\| <configDir>/app` |
 | `<configDir>/app/connector-keys/` (injected backup) | `~/.workbuddy/app/connector-keys/` | `~/.workbuddy-ai/app/connector-keys/` | NAMESPACED | OBSERVED both dirs; code `new ConnectorOAuthStore(uid, { backupBaseDir: getWorkbuddyRuntimeUserDataDir() })` |
 | `<configDir>/connectors/<userId>/` | `~/.workbuddy/connectors/f6de4882-…` | `~/.workbuddy-ai/connectors/f6de4882-…`, `…/8486c515-…` | NAMESPACED (same userId in both) | OBSERVED dirs + `.master.key` mtimes |
 | `<configDir>/security/<userId>/cipher` | `~/.workbuddy/security/f6de4882-…/cipher` | `~/.workbuddy-ai/security/f6de4882-…/cipher` | NAMESPACED | OBSERVED (names/sizes only) |
@@ -73,7 +73,7 @@ found no cross-write into it. *Medium* (≈0.6) that `safeStorage` keychain stri
 | `~/.workbuddy/logs/startup/` | domestic traces | **intl traces too** | **SHARED (cross-write, proven)** | OBSERVED `~/.workbuddy/logs/startup/2026-09-17/63779-001019.jsonl` whose records carry `pid 63779`, and pid 63779 = `/Applications/WorkBuddy AI.app/Contents/MacOS/Electron` |
 | `~/WorkBuddy` vs `~/WorkBuddy AI` | `~/WorkBuddy` (Aug 7…) | `~/WorkBuddy AI` (Sep 16 23:47…) | NAMESPACED | OBSERVED; code `getSystemDefaultWorkspaceRoot() = ~/<appNameProvider()>` = `electron.app.name` |
 | `/tmp/WorkBuddy_<16hex>.sock` (`ipcAddress`) | `WorkBuddy_…` | `WorkBuddy_…` (same prefix) | prefix SHARED, suffix random → effectively NAMESPACED | OBSERVED ~19 stale sockets; code `_generateIpcAddress(){ crypto.randomBytes(8).toString("hex") } → \`WorkBuddy_${hex}\`` — prefix hardcoded, not app-derived |
-| `/tmp/workbuddy-sandbox-center-<fnv64>.sock` | `…b0ef6e021ba80a4c…` | `…a9ff45a414b250ad…` | NAMESPACED (hash of appHome) | recomputed FNV-1a-64 of `/Users/king/.workbuddy` → `b0ef6e021ba80a4c` and of `/Users/king/.workbuddy-ai` → `a9ff45a414b250ad`; both `.sock`/`.lock` present on disk |
+| `/tmp/workbuddy-sandbox-center-<fnv64>.sock` | `…b0ef6e021ba80a4c…` | `…a9ff45a414b250ad…` | NAMESPACED (hash of appHome) | recomputed FNV-1a-64 of `/Users/example/.workbuddy` → `b0ef6e021ba80a4c` and of `/Users/example/.workbuddy-ai` → `a9ff45a414b250ad`; both `.sock`/`.lock` present on disk |
 | `/var/folders/…/T/workbuddy-host-cli/`, `…/workbuddy-prompt-vars`, `…/workbuddy-localstorage-*`, `…/workbuddy-pac-*`, `…/workbuddy-product-spill-*` | fixed shared prefixes | same | **SHARED** (fixed names) / distinct for `product-spill-*` | OBSERVED all present; no app token in any name |
 | `/var/folders/…/T/com.tencent.workbuddy.mac`, `com.apple.WebKit.*+com.tencent.workbuddy.mac` | present | — | NAMESPACED (domestic-only) | OBSERVED; no intl equivalents (intl runs under `scoped_dir*` because of `--user-data-dir`) |
 | deep-link URL schemes | `workbuddy` | `workbuddy-ai` | NAMESPACED | OBSERVED `CFBundleURLSchemes` / `product.json urlProtocol`; note both builds hardcode `DEFAULT_DEEPLINK_SCHEMES=["workbuddy"]` as the fallback |
@@ -346,8 +346,8 @@ I recomputed the FNV-1a-64 of the two live `--app_home` values and matched them 
 
 | `--app_home` | recomputed hash | `/tmp/workbuddy-sandbox-center-<hash>.sock` present? |
 |---|---|---|
-| `/Users/king/.workbuddy` | `b0ef6e021ba80a4c` | yes (+ `.lock`, 00:08) |
-| `/Users/king/.workbuddy-ai` | `a9ff45a414b250ad` | yes (+ `.lock`, 00:10) |
+| `/Users/example/.workbuddy` | `b0ef6e021ba80a4c` | yes (+ `.lock`, 00:08) |
+| `/Users/example/.workbuddy-ai` | `a9ff45a414b250ad` | yes (+ `.lock`, 00:10) |
 
 → NAMESPACED, but **only because `appHome` differs**; the prefix again is a fixed domestic-branded
 `workbuddy-sandbox-center-`.
@@ -402,7 +402,7 @@ phase sets**, which rules out a copy:
 
 So the **international app's main process** writes its early startup trace under
 `~/.workbuddy/logs/startup/`, while its child processes (which inherit
-`WORKBUDDY_CONFIG_DIR=/Users/king/.workbuddy-ai`) write under `~/.workbuddy-ai/logs/startup/`. The
+`WORKBUDDY_CONFIG_DIR=/Users/example/.workbuddy-ai`) write under `~/.workbuddy-ai/logs/startup/`. The
 same split exists for the 23:47 (pid 32354) and 00:06 (pid 56116) intl runs, while the domestic run
 (pid 59571) appears **only** in `~/.workbuddy`. This is a **confirmed cross-namespace write by the
 international app into the domestic app's home**, and it is direct evidence that at least one early

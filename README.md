@@ -60,7 +60,7 @@ agents_send   { "sessionId": "s-2", "prompt": "把第 2 步也改掉" } ← 续�
 
 ```bash
 export PATH=/opt/homebrew/bin:$PATH
-cd /Users/king/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge
+cd /Users/example/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge
 
 pnpm install          # 首次
 pnpm run build        # 产出 lib/index.js + lib/client.js（必须成功；client 产物带 ModuleLoader 包装）
@@ -88,7 +88,7 @@ dsh plugin --profile web add .
 
 ```bash
 export PATH=/opt/homebrew/bin:$PATH
-cd /Users/king/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge
+cd /Users/example/BigModel/LLM/tools/dsh-plugins/dsh-agents-bridge
 
 pnpm exec tsc --noEmit    # 类型检查（strict + verbatimModuleSyntax，类型导入必须 import type）
 pnpm run build            # esbuild → lib/index.js，@deepseek-ai/* 全部 external
@@ -124,7 +124,7 @@ agents-bridge:
         executable: /Applications/WorkBuddy.app/Contents/Resources/cli/bin/codebuddy
         interpreter: /Applications/WorkBuddy.app/Contents/Resources/node
   storeDir: ~/.dsh/state/dsh-agents-bridge   # 会话存储目录，缺省在 DSH home 下
-  defaultCwd: /Users/king/BigModel/LLM       # agents_run 不传 cwd 时的默认工作目录
+  defaultCwd: /Users/example/BigModel/LLM       # agents_run 不传 cwd 时的默认工作目录
 ```
 
 ### 4.1 在 DSH 设置界面里改（设置 → 插件 → 可配置）
@@ -155,7 +155,7 @@ agents-bridge:
 
 ```yaml
 agents-bridge:
-  allowedCwd: ["/Users/king/BigModel/LLM"]   # cwd 必须落在其中之一（含子目录）
+  allowedCwd: ["/Users/example/BigModel/LLM"]   # cwd 必须落在其中之一（含子目录）
   deniedCwd: ["/etc", "/System", "/private/var"]  # 优先级高于 allowedCwd
   allowedAgents: ["workbuddy", "autoclaw"]   # 缺省 = 全部内置身份
   maxConcurrent: 4                           # 同时运行的会话上限

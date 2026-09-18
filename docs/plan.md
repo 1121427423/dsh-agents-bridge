@@ -248,7 +248,7 @@ v3 那一批）。配套新增 `RunRejectionCode` 联合与 `AgentRunRejectedErr
 ## 工作流 G — client half 补上 ModuleLoader 包装（D30，2026-09-17）
 
 **症状。** `dsh-plugin-studio` 技能自带的合同校验器
-（`/Users/king/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py`，stdlib-only，
+（`/Users/example/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py`，stdlib-only，
 本机就有）对合并后的树给出 `[FAIL] client 合同（dsh.client + exports + ModuleLoader id）
 — lib/client.js 未以正确的 ModuleLoader id 注册（id 必须等于包名）`，**1/11 未通过**。
 
@@ -311,7 +311,7 @@ v3 那一批）。配套新增 `RunRejectionCode` 联合与 `AgentRunRejectedErr
 **证据（本机真跑）。**
 
 ```
-$ python3 /Users/king/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py .
+$ python3 /Users/example/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py .
   [PASS] package.json 存在且为合法 JSON
   [PASS] package.json 名称合法（小写连字符）
   [PASS] package.json 基础字段（type/main/exports）
@@ -561,7 +561,7 @@ schema 库拖进浏览器包（实测客户端产物 0 次 `schemastery` / `node
          dsh-agents-bridge:
            defaultCwd: /tmp/wb-settings-home/work
            maxConcurrent: 7
-           allowedCwd: [/tmp/wb-settings-home, /Users/king/BigModel]
+           allowedCwd: [/tmp/wb-settings-home, /Users/example/BigModel]
 回读 → 三个字段 overridden，两个 inherited
 拒绝 → {maxConcurrent: 0} → "maxConcurrent must be a positive integer (got 0)"，且未写入
 重置 → {field:"maxConcurrent"} → settings.yaml 里该键消失
@@ -661,7 +661,7 @@ schema 库拖进浏览器包（实测客户端产物 0 次 `schemastery` / `node
 
 ```
 probe  hermes: track=cli available=true
-       executable=/Users/king/.local/bin/hermes version=0.21.3 reason=-
+       executable=/Users/example/.local/bin/hermes version=0.21.3 reason=-
 run    session=sess_756d58a0-4ada-4fbf-be18-968762c57554 status=running
 
 events (6):
@@ -705,7 +705,7 @@ backendSessionId: eeac6539-f93a-4a48-8222-7acd1258e467
 - [x] 集成：入口已接线 `installDriverRuntime()`；**端到端集成测试 5/5 通过**（真子进程 + 真 stream-json 解析 + 取消 + usage + resume 指针）
 - [x] 合同校验：**`verify_plugin.py` 11/11 PASS（2026-09-17，工作流 G）**。更正上一轮的记录：
   脚本本机就有，只是当时的 `find` 只搜了 `~/.dsh` 与 `~/BigModel/LLM/tools`，**没搜 `~/.agents`**
-  —— 真实位置是 `/Users/king/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py`
+  —— 真实位置是 `/Users/example/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py`
   （`dsh-plugin-studio` 技能自带，stdlib-only）。它对本仓库给出 1/11 FAIL，且**报的是事实**：
   `lib/client.js` 没有 `window.__ModuleLoader__.load({ id: "<包名>" … })` 包装，宿主根本不会注册
   这个 client half（详见「工作流 G」）。修复后 **11/11 PASS**，命令与原始输出见该节。
@@ -792,7 +792,7 @@ backendSessionId: eeac6539-f93a-4a48-8222-7acd1258e467
 | 构建产物 · `lib/index.js` | 379.5 KB（esbuild，`@deepseek-ai/*` 全部 external） |
 | 构建产物 · `lib/client.js` | 78.5 KB（web platform，`react` 系列 external；带 `window.__ModuleLoader__.load({ id: <包名>, factory })` 包装）。**注意中文以 `\uXXXX` 转义写进产物**（esbuild ASCII charset）：任何「用中文字面量 grep 产物」的检查都是无效检查 —— 要查得先解码，本仓库出现过这个坑 |
 | 工具面 | **9 个**（`agents_probe` / `run` / `run_many` / `status` / `wait` / `output` / `usage` / `cancel` / `send`） |
-| 合同校验 | **`verify_plugin.py` 11/11 PASS**（`pnpm run verify`；等价命令 `python3 /Users/king/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py .`，原始输出见「工作流 G」）。另有监理自检 `.wb-harness/check-contract.mjs` **19/19**（工具，不入交付物） |
+| 合同校验 | **`verify_plugin.py` 11/11 PASS**（`pnpm run verify`；等价命令 `python3 /Users/example/.agents/skills/dsh-plugin-studio/scripts/verify_plugin.py .`，原始输出见「工作流 G」）。另有监理自检 `.wb-harness/check-contract.mjs` **19/19**（工具，不入交付物） |
 | 端到端集成 | `tests/integration/pipeline.test.ts`（真子进程 + 真 stream-json 解析 + 取消 + usage + resume 指针）全绿；`tests/integration/argv-shape.test.ts`（每个内置身份的最终 argv 形状，5 个用例）全绿 |
 | 真机验收 · web 宿主 API | `dsh --profile web`（standalone harness，127.0.0.1:43121）实测：`host api route mounted {"path":"/agents-bridge/api"}`，`loaded` 仍报 `"tools":9`；`POST /agents-bridge/api/status` 与 `/probe` 返回真实数据，跨站请求 403。命令与原始输出见「工作流 H」一节 |
 | 真机验收 · **无 node 的宿主 PATH**（本缺陷的原始症状） | 协调者在**合并后**的树上复跑：`env PATH=/usr/bin:/bin:/usr/sbin:/sbin ./bin/dsh --profile web --no-open` → `claude` 2.8.4 / `codex` 0.154.0 / `codebuddy-code` 2.151.0 / `codebuddy-code-acp` 2.151.0（修复前这四行是 `version: "env: node: No such file or directory"`），桌面三身份 `workbuddy` 2.137.1 / `workbuddy-ai` 2.137.1 / `autoclaw` 2026.6.8 前后一致；同一宿主上 `host api route mounted` 照常 |

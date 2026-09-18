@@ -51,7 +51,7 @@
 ### 2.1 宿主 PATH 确实没有 node（复验已知事实）
 
 ```bash
-ls "/Users/king/Library/Application Support/DSH Desktop/runtime-commands/generations/"
+ls "/Users/example/Library/Application Support/DSH Desktop/runtime-commands/generations/"
 # → 68c24b0a32d4571ebb18d44b97380d522c67e885d64dae302ad011c1ab5f3123-c688fb67-32c9-438a-a7c9-4ca17095609d
 
 ls -l /usr/bin/node
@@ -70,12 +70,12 @@ env -i PATH='/usr/bin:/bin:/usr/sbin:/sbin' sh -c 'command -v node; echo "exit=$
 head -1 /usr/local/bin/claude
 # → #!/usr/bin/env node
 ls -l /usr/local/bin/claude
-# → /usr/local/bin/claude -> /Users/king/.nvm/versions/node/v22.22.3/bin/ccb
+# → /usr/local/bin/claude -> /Users/example/.nvm/versions/node/v22.22.3/bin/ccb
 
-ls -l /Users/king/.nvm/versions/node/v22.22.3/bin/codex
+ls -l /Users/example/.nvm/versions/node/v22.22.3/bin/codex
 # → …/bin/codex -> ../lib/node_modules/@openai/codex/bin/codex.js
 
-ls -l /Users/king/.nvm/versions/node/v22.22.3/bin/codebuddy-code
+ls -l /Users/example/.nvm/versions/node/v22.22.3/bin/codebuddy-code
 # → …/bin/codebuddy-code -> ../lib/node_modules/@tencent-ai/codebuddy-code/bin/codebuddy
 ```
 
@@ -98,11 +98,11 @@ env -i PATH='/usr/bin:/bin:/usr/sbin:/sbin' /usr/local/bin/claude --version
 # stderr: env: node: No such file or directory
 # exit=127
 
-env -i PATH='/usr/bin:/bin:/usr/sbin:/sbin' /Users/king/.nvm/versions/node/v22.22.3/bin/codex --version
+env -i PATH='/usr/bin:/bin:/usr/sbin:/sbin' /Users/example/.nvm/versions/node/v22.22.3/bin/codex --version
 # stderr: env: node: No such file or directory
 # exit=127
 
-env -i PATH='/usr/bin:/bin:/usr/sbin:/sbin' /Users/king/.nvm/versions/node/v22.22.3/bin/codebuddy-code --version
+env -i PATH='/usr/bin:/bin:/usr/sbin:/sbin' /Users/example/.nvm/versions/node/v22.22.3/bin/codebuddy-code --version
 # stderr: env: node: No such file or directory
 # exit=127
 ```
@@ -114,11 +114,11 @@ env -i PATH='/usr/bin:/bin:/usr/sbin:/sbin' /Users/king/.nvm/versions/node/v22.2
 ### 2.4 经修复后的解释器，三个身份都答得出真版本
 
 ```bash
-/Users/king/.nvm/versions/node/v24.18.0/bin/node /usr/local/bin/claude --version
+/Users/example/.nvm/versions/node/v24.18.0/bin/node /usr/local/bin/claude --version
 # → 2.8.4 (Claude Code)
-/Users/king/.nvm/versions/node/v24.18.0/bin/node /Users/king/.nvm/versions/node/v22.22.3/bin/codex --version
+/Users/example/.nvm/versions/node/v24.18.0/bin/node /Users/example/.nvm/versions/node/v22.22.3/bin/codex --version
 # → codex-cli 0.154.0
-/Users/king/.nvm/versions/node/v24.18.0/bin/node /Users/king/.nvm/versions/node/v22.22.3/bin/codebuddy-code --version
+/Users/example/.nvm/versions/node/v24.18.0/bin/node /Users/example/.nvm/versions/node/v22.22.3/bin/codebuddy-code --version
 # → 2.151.0
 ```
 

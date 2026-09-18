@@ -28,7 +28,7 @@
 #
 # Env:
 #   DSH_BIN   launcher to use (default: `dsh` on PATH, else the standalone
-#             install at /Users/king/BigModel/LLM/tmp/dsh-standalone)
+#             install at /Users/example/BigModel/LLM/tmp/dsh-standalone)
 #
 # @module dsh-agents-bridge/scripts/smoke-notice
 
@@ -43,7 +43,7 @@ if [ -z "${DSH_BIN:-}" ]; then
   if command -v dsh >/dev/null 2>&1; then
     DSH_BIN="$(command -v dsh)"
   else
-    DSH_BIN="/Users/king/BigModel/LLM/tmp/dsh-standalone/node_modules/@deepseek-ai/dsh/lib/bin.js"
+    DSH_BIN="/Users/example/BigModel/LLM/tmp/dsh-standalone/node_modules/@deepseek-ai/dsh/lib/bin.js"
   fi
 fi
 
