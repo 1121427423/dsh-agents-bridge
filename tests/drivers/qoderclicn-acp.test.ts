@@ -32,6 +32,7 @@ import {
   extractAuthMethods,
   extractCurrentModelId,
   extractEffortOption,
+  extractModelOption,
   extractSessionId,
 } from '../../src/drivers/acp.ts'
 import { CLI_TRACK_DESCRIPTORS } from '../../src/tracks/cli/catalog.ts'
@@ -220,23 +221,51 @@ describe('the qoderclicn descriptor agrees with its capture', () => {
     expect(extractEffortOption({ configOptions: [] })).toBeUndefined()
   })
 
-  it('declares `model: false` — a bridge-side gap, not an engine-side denial', () => {
-    // Two separate facts, and conflating them is the mistake this repo already
-    // made once and corrected (docs/plan.md D40 item ⑤):
-    //   * the engine HAS a working, validated model dial — `set_config_option
-    //     {configId:"model"}` accepts a real id, confirms via
-    //     `config_option_update`, and rejects a bogus one with -32602;
-    //   * the DRIVER has no lever for it, because the only model it ever sends
-    //     travels in `session/new` params, which this engine ignores in silence.
-    // `capabilities` describes the bridge, so `false` is right — but the reason
-    // must not be recorded as "the engine cannot".
-    expect(descriptor?.capabilities?.model).toBe(false)
+  it('declares `model: true`, tied to an ADDRESSABLE selector in the capture', () => {
+    // This test used to pin `false`, and the history is worth keeping because
+    // the mistake was subtle: the ENGINE half was measured correctly (a working,
+    // validated `set_config_option {configId:"model"}` dial), and the DRIVER
+    // half was measured correctly too (it had no lever), but the conclusion —
+    // "so the capability is false" — outlived its premise. The lever was a
+    // driver change away, and it has now been made.
+    //
+    // Written as `extractModelOption(...) !== undefined` rather than a bare
+    // `true` so it fails from BOTH sides: a descriptor that under-claims a
+    // selector these bytes advertise, and one that claims a selector this
+    // engine never offered.
+    expect(descriptor?.capabilities?.model).toBe(true)
     // The catalogue is real, so a reader must not conclude there are no models.
     expect(availableModels().length).toBeGreaterThan(1)
     expect(extractCurrentModelId(SESSION_NEW)).not.toBe('')
-    // …and the dial IS advertised, which is what makes the gap a bridge gap.
-    const configIds = ((sessionNewField('configOptions') ?? []) as { id: string }[]).map((o) => o.id)
-    expect(configIds).toContain('model')
+    // …and the selector is ADVERTISED, which is what makes the dial reachable.
+    expect(extractModelOption(SESSION_NEW)?.configId).toBe('model')
+    expect(descriptor?.capabilities?.model).toBe(extractModelOption(SESSION_NEW) !== undefined)
+    // The in-file negative control, mirroring the effort test above: an engine
+    // that advertises no model selector yields undefined, so the assertion is
+    // not vacuous.
+    expect(extractModelOption({ configOptions: [] })).toBeUndefined()
+  })
+
+  it('reads the model selector by ID, because this capture tags effort `category:"model"`', () => {
+    // The trap is IN these bytes, not hypothetical: `reasoning_effort` carries
+    // `category: "model"`. A reader matching on category would return the effort
+    // dial as the model dial, and the driver would address a model id to
+    // `reasoning_effort` and take a guaranteed -32602. So: id only.
+    const opts = (sessionNewField('configOptions') ?? []) as { id: string; category?: string }[]
+    expect(opts.find((o) => o.id === 'reasoning_effort')?.category).toBe('model')
+    expect(extractModelOption(SESSION_NEW)?.configId).toBe('model')
+    // The control that makes that line mean something: the effort dial is
+    // present and readable, so `model` did not win by default.
+    expect(extractEffortOption(SESSION_NEW)?.configId).toBe('reasoning_effort')
+    // And an effort-only session is NOT mistaken for a model session — the shape
+    // a category match gets wrong.
+    expect(
+      extractModelOption({
+        configOptions: [
+          { id: 'reasoning_effort', category: 'model', currentValue: 'none', options: [{ value: 'none' }] },
+        ],
+      }),
+    ).toBeUndefined()
   })
 
   it('claims neither clientTools on this evidence', () => {
@@ -251,14 +280,17 @@ describe('the qoderclicn descriptor agrees with its capture', () => {
     expect(notes).toContain('HIDDEN')
     expect(notes).toContain('~/.qoder-cn/.auth')
     expect(notes).toContain('qoderclicn login')
-    // The measured negative that keeps `model` honest is stated, not implied.
-    // Case-insensitive on purpose: the notes emphasise it in caps, and pinning
-    // the case would make the assertion about typography rather than content.
+    // The measured negative that keeps the model story honest is stated, not
+    // implied. Case-insensitive on purpose: the notes emphasise it in caps, and
+    // pinning the case would make the assertion about typography.
     expect(notes.toLowerCase()).toContain('ignores')
-    // …and it is attributed to the right side of the wire.
-    expect(notes).toContain('BRIDGE gap')
-    // The effort vocabulary trap is spelled out.
+    // …and the two levers are distinguished, because the whole point is that
+    // `set_config_option` VALIDATES what `session/new` params swallow.
+    expect(notes).toContain('VALIDATES')
+    // The effort vocabulary trap is spelled out, along with the ordering it
+    // forces.
     expect(notes).toContain('xhigh')
     expect(notes).toContain('no `high`')
+    expect(notes).toContain('BEFORE')
   })
 })

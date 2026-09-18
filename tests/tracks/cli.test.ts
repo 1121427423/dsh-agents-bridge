@@ -504,7 +504,7 @@ describe('the qoderclicn identity on the CLI track', () => {
     // tests/fixtures/qoderclicn-acp-handshake.ndjson.
     expect(builtinDescriptor('qoderclicn').capabilities).toEqual({
       resume: true,
-      model: false,
+      model: true,
       effort: true,
       mcpConfig: false,
       clientTools: false,

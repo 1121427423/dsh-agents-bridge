@@ -1724,24 +1724,48 @@ export function extractCurrentModelId(result: unknown): string {
 }
 
 /**
- * The effort selector a session advertises, if it has one.
+ * One `select` entry out of a session's `configOptions`, in the shape the
+ * driver needs to ADDRESS it: the id to send back to
+ * `session/set_config_option`, the value in force, and the values on offer.
  *
- * ACP standardises `configOptions` and `session/set_config_option` but NOT the
- * way a reasoning-effort dial is named, so the selector is matched by
- * id/category against a small vocabulary rather than by a per-runtime table
- * (multica `acpEffortOptionIDs`). Values are passed through VERBATIM: the CLI
- * owns its vocabulary (`minimal…max`, `enabled`, `minimal…ultra`), and
- * flattening onto a shared enum would silently drop levels a runtime accepts.
+ * Values are passed through VERBATIM: the CLI owns its vocabulary
+ * (`minimal…max`, `enabled`, `xhigh/low/medium/none`), and flattening onto a
+ * shared enum would silently drop levels a runtime accepts.
  */
-export interface AcpEffortOption {
+export interface AcpSelectOption {
   readonly configId: string
   readonly currentValue: string
   readonly values: readonly string[]
 }
 
+/** The reasoning-effort selector, as advertised by a session. */
+export type AcpEffortOption = AcpSelectOption
+
+/** The model selector, as advertised by a session. */
+export type AcpModelOption = AcpSelectOption
+
 const EFFORT_OPTION_IDS = new Set(['effort', 'thought_level', 'reasoning_effort'])
 
-export function extractEffortOption(result: unknown): AcpEffortOption | undefined {
+/**
+ * ACP's own id for the model selector. Matched by ID ONLY — see
+ * `extractModelOption` for why a `category` match is not merely unhelpful here
+ * but wrong.
+ */
+const MODEL_OPTION_ID = 'model'
+
+/**
+ * Find the first `configOptions` entry the predicate accepts and normalise it.
+ *
+ * Both spellings of the container (`configOptions` / `config_options`) and of
+ * the current value (`currentValue` / `current_value`) appear in the wild, so
+ * both are read. An entry with no id is skipped even when the predicate accepts
+ * it: an option we can read but not ADDRESS is useless, because there would be
+ * nothing to send back to `session/set_config_option`.
+ */
+function readSelectOption(
+  result: unknown,
+  matches: (id: string, category: string) => boolean,
+): AcpSelectOption | undefined {
   const record = asRecord(result)
   if (record === undefined) return undefined
   const raw =
@@ -1754,9 +1778,7 @@ export function extractEffortOption(result: unknown): AcpEffortOption | undefine
     if (opt === undefined) continue
     const id = (asString(opt['id']) ?? '').trim()
     const category = (asString(opt['category']) ?? '').trim().toLowerCase()
-    if (!EFFORT_OPTION_IDS.has(id.toLowerCase()) && !EFFORT_OPTION_IDS.has(category)) continue
-    // An option we can read but not address is useless: without an id there is
-    // nothing to send back to `session/set_config_option`.
+    if (!matches(id.toLowerCase(), category)) continue
     if (id === '') continue
     const values: string[] = []
     const options = Array.isArray(opt['options']) ? opt['options'] : []
@@ -1778,6 +1800,40 @@ export function extractEffortOption(result: unknown): AcpEffortOption | undefine
     }
   }
   return undefined
+}
+
+/**
+ * The reasoning-effort selector a session advertises, if it has one.
+ *
+ * ACP standardises `configOptions` and `session/set_config_option` but NOT the
+ * way a reasoning-effort dial is named, so the selector is matched by
+ * id/category against a small vocabulary rather than by a per-runtime table
+ * (multica `acpEffortOptionIDs`). `category` is accepted as an alternative to
+ * the id because runtimes do disagree about the id — but note that a category
+ * match is ALSO why the model reader below cannot use categories.
+ */
+export function extractEffortOption(result: unknown): AcpEffortOption | undefined {
+  return readSelectOption(
+    result,
+    (id, category) => EFFORT_OPTION_IDS.has(id) || EFFORT_OPTION_IDS.has(category),
+  )
+}
+
+/**
+ * The model selector a session advertises, if it has one.
+ *
+ * Matched by ID ONLY, never by `category` — and that is a MEASURED constraint
+ * rather than a stylistic one. Both Qoder captures tag their
+ * `reasoning_effort` entry with `category: "model"` (the effort dial rides the
+ * model category), so a category match would hand the effort dial back as the
+ * model dial on any engine that advertises effort and no model: the driver
+ * would then send `set_config_option {configId:"reasoning_effort",
+ * value:"<a model id>"}` and take a guaranteed -32602. The id `model` is what
+ * ACP itself uses, and both engines measured here (CodeBuddy 2.151.0 and the
+ * two Qoder builds) use it.
+ */
+export function extractModelOption(result: unknown): AcpModelOption | undefined {
+  return readSelectOption(result, (id) => id === MODEL_OPTION_ID)
 }
 
 /**
@@ -2088,6 +2144,12 @@ export async function runAcp(
         const created = await client.request('session/new', {
           cwd,
           mcpServers: [],
+          // Best effort, and deliberately kept: this is the ACP-standard way to
+          // name a model, and engines that honour it need nothing more. It is
+          // NOT sufficient on its own — at least one engine ignores it in
+          // silence — which is why step 2b below also drives the session's
+          // advertised model selector. Sending both is safe: the engine that
+          // ignores this one ignores it whether or not the dial is set.
           ...(opts.model === undefined || opts.model === '' ? {} : { model: opts.model }),
         })
         sessionResult = created
@@ -2111,13 +2173,90 @@ export async function runAcp(
     // even if the host restarts mid-turn (IM-5).
     session.pinBackendSessionId(client.sessionId)
 
-    // 2b. Reasoning effort, best effort. A session that advertises no effort
-    //     option is normal (most runtimes do not) and must not fail the run; a
-    //     level the session does not offer is skipped rather than sent, because
-    //     an unadvertised token invites a hard error on a call whose failure we
-    //     deliberately swallow.
+    // 2b. Model, best effort — and strictly BEFORE effort, because the effort
+    //     levels are a function of the selected model (see `optionSource`).
+    //
+    //     Two levers exist and only one of them is general. `session/new`'s
+    //     `model` param is the ACP-standard selector and is already sent above,
+    //     but at least one engine IGNORES it: measured on both Qoder builds, a
+    //     bogus id is accepted in silence and `currentModelId` never moves. The
+    //     lever that engine actually obeys — and VALIDATES, answering -32602 for
+    //     an unknown id or a display name — is
+    //     `session/set_config_option {configId:"model"}`, the same call the
+    //     effort dial below already uses. So drive the advertised selector, and
+    //     skip it when the session advertises none rather than guess an id.
+    //
+    //     `optionSource` is what the effort step reads. It starts as the
+    //     handshake result and is replaced by the `set_config_option` RESPONSE
+    //     when the engine echoes one, because that response is the engine's own
+    //     statement of the POST-selection option set. Measured 2026-09-19 on
+    //     `qoderclicn` 1.1.56: the response carries the full updated
+    //     `configOptions` (a trailing `config_option_update` notification
+    //     arrives ~3 ms EARLIER, so reading the response is both sufficient and
+    //     ordered). This matters because the levels really do move with the
+    //     model — `qfmodel` offers `xhigh/low/medium/none`, `qmodel` offers only
+    //     `none` — so validating effort against the handshake's copy would send
+    //     a level the engine has just stopped accepting.
+    let optionSource: unknown = sessionResult
+    if (opts.model !== undefined && opts.model !== '') {
+      const model = extractModelOption(sessionResult)
+      if (model === undefined) {
+        deps.logger.info(
+          'acp session advertises no model selector; the model travelled only in the session/new params',
+          { requested: opts.model },
+        )
+      } else if (!model.values.includes(opts.model)) {
+        deps.logger.warn('acp session does not advertise the requested model; running without it', {
+          requested: opts.model,
+          advertised: model.values.join(','),
+        })
+      } else {
+        try {
+          const applied = await client.request('session/set_config_option', {
+            sessionId: client.sessionId,
+            configId: model.configId,
+            value: opts.model,
+          })
+          const echoed = asRecord(applied)
+          const carriesOptions =
+            echoed !== undefined &&
+            (Array.isArray(echoed['configOptions']) || Array.isArray(echoed['config_options']))
+          if (carriesOptions) {
+            optionSource = applied
+          } else {
+            // Say so rather than pretend the levels were re-read: the effort
+            // step is about to validate against the pre-selection copy.
+            deps.logger.debug(
+              'acp set_config_option echoed no option set; effort will be validated against the handshake copy',
+            )
+          }
+          // The only observable for the happy path: a successful dial emits no
+          // frame of its own, so a full-stack acceptance run needs this line
+          // (DSH_AGENTS_BRIDGE_DEBUG=1) to show the selector was really driven
+          // rather than silently skipped.
+          deps.logger.debug('acp model selector driven', {
+            configId: model.configId,
+            requested: opts.model,
+            optionSetEchoed: carriesOptions,
+          })
+        } catch (err) {
+          // Never fatal: the run proceeds on whatever the engine kept.
+          deps.logger.warn('acp runtime rejected the model request; running anyway', {
+            requested: opts.model,
+            error: errorText(err),
+          })
+        }
+      }
+    }
+
+    // 2c. Reasoning effort, best effort — against the POST-selection option set
+    //     (`optionSource`), never the handshake's copy. A session that
+    //     advertises no effort option is normal (most runtimes do not) and must
+    //     not fail the run; a level the session does not offer is skipped rather
+    //     than sent, because an unadvertised token invites a hard error on a
+    //     call whose failure we deliberately swallow.
     if (opts.effort !== undefined && opts.effort !== '') {
-      const option = extractEffortOption(sessionResult)
+      const option = extractEffortOption(optionSource)
       if (option === undefined) {
         deps.logger.warn('acp session advertises no reasoning-effort option; running without it', {
           requested: opts.effort,

@@ -31,7 +31,12 @@ import { readFileSync } from 'node:fs'
 
 import { describe, expect, it } from 'vitest'
 
-import { extractAuthMethods, extractCurrentModelId, extractEffortOption } from '../../src/drivers/acp.ts'
+import {
+  extractAuthMethods,
+  extractCurrentModelId,
+  extractEffortOption,
+  extractModelOption,
+} from '../../src/drivers/acp.ts'
 import { DESKTOP_TRACK_DESCRIPTORS } from '../../src/tracks/desktop/catalog.ts'
 
 interface RpcError {
@@ -195,21 +200,59 @@ describe('the qoder-cn descriptor agrees with its captures', () => {
     expect(descriptor?.capabilities?.effort).toBe(extractEffortOption(AUTHED_SESSION_NEW) !== undefined)
   })
 
-  it('keeps `model` false even though the session NAMES a model', () => {
-    // The one place this identity looks like it should claim more than it can.
-    // The engine advertises 14 models and reports `currentModelId`, so the
-    // driver can READ a model — but its only lever for SETTING one is
-    // `session/new` params.model, and that parameter is IGNORED. MEASURED, with
-    // controls, on 2026-09-19:
-    //   no model param                  → currentModelId "qfmodel"
-    //   model:"gmodel"                  → currentModelId "qfmodel"  (unchanged)
-    //   model:"NOT-A-REAL-MODEL-xyz"    → ok, NO error              (ignored)
-    // A bogus id that is silently accepted is the proof the parameter is never
-    // read; the same probe showed the engine DOES validate what it consumes
-    // (a bogus configId answers -32602 "Unknown config option"), so the silence
-    // is specific to this parameter and not a general laxity.
+  it('claims `model` exactly when the session advertises an ADDRESSABLE selector', () => {
+    // This assertion used to pin `false`, on the reasoning that the driver's
+    // only model lever was `session/new` params.model and this engine ignores
+    // that parameter. The premise was right and the conclusion was wrong: the
+    // engine advertises a `model` CONFIG OPTION, which is addressable through
+    // the same `session/set_config_option` the effort dial already uses, and
+    // the driver now drives it. So the honest bit is `true` — and the assertion
+    // is written as `extractModelOption(...) !== undefined` rather than a bare
+    // `true` so it fails from BOTH sides: a descriptor that under-claims a
+    // selector the bytes advertise, and one that claims a selector this engine
+    // never offered.
+    //
+    // The measurements behind the engine half, with controls, on 2026-09-19
+    // (both Qoder builds, 1.1.53 desktop and 1.1.56 CLI, identical):
+    //   {configId:"model", value:"qmodel"}            → ACCEPTED, confirmed
+    //   {configId:"model", value:"bogus-model-xyz"}   → -32602 Invalid value
+    //   {configId:"model", value:"Qwen3.8-Flash"}     → -32602 Invalid value
+    //   {configId:"nope-xyz",  value:"qmodel"}        → -32602 Unknown option
+    //   a real turn after the switch → `_meta.quota.model_usage[0].model`
+    //                                  reads "qmodel" (it was "qfmodel")
+    // The last line is what separates a working dial from a label. Contrast
+    // `session/new` params.model, where a BOGUS id is accepted in silence — the
+    // silence is specific to that parameter, not a general laxity.
     expect(extractCurrentModelId(AUTHED_SESSION_NEW)).toBe('qfmodel')
-    expect(descriptor?.capabilities?.model).toBe(false)
+    expect(extractModelOption(AUTHED_SESSION_NEW)).toBeDefined()
+    expect(descriptor?.capabilities?.model).toBe(extractModelOption(AUTHED_SESSION_NEW) !== undefined)
+  })
+
+  it('reads the model selector by ID, because this engine tags effort `category:"model"`', () => {
+    // The trap that decides the reader's shape, and it is in THIS capture rather
+    // than hypothetical: `reasoning_effort` carries `category: "model"`. So a
+    // reader matching on category would hand the effort dial back as the model
+    // dial — and the driver would then address a model id to `reasoning_effort`
+    // and take a guaranteed -32602. `extractModelOption` matches the id only.
+    const opts = (AUTHED_SESSION_NEW as { configOptions?: { id: string; category?: string }[] })
+      .configOptions ?? []
+    const effort = opts.find((o) => o.id === 'reasoning_effort')
+    expect(effort?.category).toBe('model')
+
+    const model = extractModelOption(AUTHED_SESSION_NEW)
+    expect(model?.configId).toBe('model')
+    // The negative control that makes the line above mean something: the effort
+    // dial IS present and IS readable, so `model` did not win by default.
+    expect(extractEffortOption(AUTHED_SESSION_NEW)?.configId).toBe('reasoning_effort')
+    // And the reader does not accept the effort entry as a model entry even when
+    // it is the only one on offer — the shape a category match would get wrong.
+    expect(
+      extractModelOption({
+        configOptions: [
+          { id: 'reasoning_effort', category: 'model', currentValue: 'none', options: [{ value: 'none' }] },
+        ],
+      }),
+    ).toBeUndefined()
   })
 
   it('still claims nothing it never exercised', () => {

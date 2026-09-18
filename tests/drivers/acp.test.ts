@@ -1067,3 +1067,166 @@ describe('ACP_FAILURE_STOP_REASONS', () => {
     expect(ACP_FAILURE_STOP_REASONS.has('cancelled')).toBe(false)
   })
 })
+
+// ── the config-option dials: model, and the order it forces ─────────────────
+//
+// These run against the REAL fixture peer, and they read TWO pieces of
+// evidence, because the behaviours here are decisions as much as messages:
+//
+//  1. `FAKE_ACP_DIAL_LOG` — every `set_config_option` the engine RECEIVED, with
+//     its outcome. "The driver did not send this" has no frame to assert on, so
+//     the engine's own receipt is the only direct evidence — and it is recorded
+//     on receipt, so a value the engine REJECTED still shows up as sent. Without
+//     that, a driver that sends a dead value and swallows the -32602 would look
+//     identical to one that never sent it at all.
+//  2. the driver's logger — the reason it chose not to send one.
+
+describe('acp driver, config-option dials', () => {
+  interface DialRun {
+    readonly result: AgentResult
+    readonly dials: readonly string[]
+    readonly logs: readonly string[]
+  }
+
+  /** Run one turn with a recording logger and a dial log in the run dir. */
+  async function runWithDials(opts: {
+    readonly model?: string
+    readonly effort?: string
+    readonly noModelOption?: boolean
+  }): Promise<DialRun> {
+    const cwd = makeWorkdir()
+    const dialPath = path.join(cwd, 'dials.log')
+    const logs: string[] = []
+    const record =
+      (level: string) =>
+      (message: string, fields?: Record<string, unknown>): void => {
+        logs.push(`${level} ${message}${fields === undefined ? '' : ` ${JSON.stringify(fields)}`}`)
+      }
+    const deps = makeDeps('success', {
+      env: { ...CAPS_ON, FAKE_ACP_DIAL_LOG: dialPath },
+      logger: {
+        debug: record('debug'),
+        info: record('info'),
+        warn: record('warn'),
+        error: record('error'),
+      },
+      // `--no-model-option` models the `hermes` shape: a real catalogue, no
+      // addressable selector. Passed by rebuilding the command rather than by a
+      // second fixture, so the peer stays one file.
+      ...(opts.noModelOption === true
+        ? {
+            command: {
+              executable: process.execPath,
+              argsPrefix: [FIXTURE, '--scenario', 'success', '--no-model-option'],
+              protocolArgs: ['--acp'],
+            },
+          }
+        : {}),
+    })
+    const backend = createBackendWithRuntime('acp', deps, realRuntime)
+    const controller = new AbortController()
+    const handle = await backend.run(
+      {
+        agent: 'codebuddy-code-acp',
+        prompt: 'do the thing',
+        cwd,
+        ...(opts.model === undefined ? {} : { model: opts.model }),
+        ...(opts.effort === undefined ? {} : { effort: opts.effort }),
+      },
+      deps,
+      controller.signal,
+    )
+    const result = await handle.done
+    const dials = existsSync(dialPath)
+      ? readFileSync(dialPath, 'utf8')
+          .trim()
+          .split('\n')
+          .filter((line) => line !== '')
+      : []
+    return { result, dials, logs }
+  }
+
+  it(
+    'drives the session ADVERTISED model selector, not just the session/new param',
+    async () => {
+      const { result, dials } = await runWithDials({ model: 'fast-model' })
+      expect(result.status).toBe('completed')
+      // The engine's receipt. `session/new` params are NOT recorded here — the
+      // log holds only `set_config_option` traffic — so this line proves the
+      // driver reached for the advertised selector, which is the lever this
+      // engine actually obeys.
+      expect(dials).toContain('model=fast-model accepted')
+    },
+    20_000,
+  )
+
+  it(
+    'does NOT send an unadvertised model, and says why',
+    async () => {
+      const { result, dials, logs } = await runWithDials({ model: 'not-a-real-model' })
+      // The run is unharmed: an unadvertised token invites a -32602 we would
+      // swallow anyway, so the driver skips it rather than round-trip for an
+      // error it already knows is coming.
+      expect(result.status).toBe('completed')
+      expect(dials.filter((d) => d.startsWith('model='))).toEqual([])
+      expect(logs.join('\n')).toContain('does not advertise the requested model')
+    },
+    20_000,
+  )
+
+  it(
+    'runs on the session/new param alone when the session offers no selector',
+    async () => {
+      // The `hermes` shape: a real model catalogue, no addressable config option.
+      const { result, dials, logs } = await runWithDials({ model: 'fast-model', noModelOption: true })
+      expect(result.status).toBe('completed')
+      expect(dials.filter((d) => d.startsWith('model='))).toEqual([])
+      expect(logs.join('\n')).toContain('advertises no model selector')
+    },
+    20_000,
+  )
+
+  it(
+    'sets the model BEFORE reading effort, so a retired level is never sent',
+    async () => {
+      // THE ordering test, and the reason the model step exists at all.
+      // Switching to `fast-model` retires every effort level except `low` — the
+      // coupling measured on both Qoder builds. A driver that read effort from
+      // the HANDSHAKE's option set would still see `xhigh` advertised, send it,
+      // and take a -32602 from an engine that had accepted it a moment earlier.
+      const { dials, logs } = await runWithDials({ model: 'fast-model', effort: 'xhigh' })
+      expect(dials).toContain('model=fast-model accepted')
+      // …and it never even went out, which is the whole point. The log records
+      // REJECTED dials too, so this cannot pass merely because the engine said
+      // no: a `thought_level=xhigh rejected` line would fail it just as a
+      // `thought_level=xhigh accepted` line would.
+      expect(dials.filter((d) => d.startsWith('thought_level='))).toEqual([])
+      expect(logs.join('\n')).toContain('does not advertise the requested effort')
+    },
+    20_000,
+  )
+
+  it(
+    'control: the same effort IS sent when the selected model keeps it',
+    async () => {
+      // Without this control the test above would pass even if the driver never
+      // sent effort at all. `default-model` keeps every level, so `xhigh`
+      // survives the model step and must go out.
+      const { dials, logs } = await runWithDials({ model: 'default-model', effort: 'xhigh' })
+      expect(dials).toContain('model=default-model accepted')
+      expect(dials).toContain('thought_level=xhigh accepted')
+      expect(logs.join('\n')).not.toContain('does not advertise the requested effort')
+    },
+    20_000,
+  )
+
+  it(
+    'control: effort alone still works with no model requested',
+    async () => {
+      const { dials } = await runWithDials({ effort: 'medium' })
+      expect(dials).toContain('thought_level=medium accepted')
+      expect(dials.filter((d) => d.startsWith('model='))).toEqual([])
+    },
+    20_000,
+  )
+})

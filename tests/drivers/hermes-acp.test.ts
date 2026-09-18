@@ -33,6 +33,7 @@ import {
   extractAuthMethods,
   extractCurrentModelId,
   extractEffortOption,
+  extractModelOption,
   extractSessionId,
 } from '../../src/drivers/acp.ts'
 import { CLI_SEARCH_PATH, CLI_TRACK_DESCRIPTORS } from '../../src/tracks/index.ts'
@@ -150,6 +151,30 @@ describe('the hermes descriptor agrees with its capture', () => {
     // SECOND engine on the same wire"), not the capture alone.
     expect(descriptor?.capabilities?.model).toBe(false)
     expect(advertisedModels().length).toBeGreaterThan(1)
+  })
+
+  it('stays `model: false` even with the driver\'s second lever, and here is why', () => {
+    // The driver grew a second model lever (`session/set_config_option` on the
+    // session's advertised selector), which flipped `model` to true for the two
+    // Qoder identities. It does NOT help here, and the reason is in these bytes:
+    // there is no `configOptions` at all, so there is no selector to address.
+    // `model: false` therefore survives the driver change — and this test is the
+    // negative control for that, not a restatement of the row above.
+    expect(extractModelOption(SESSION_NEW)).toBeUndefined()
+    expect(descriptor?.capabilities?.model).toBe(extractModelOption(SESSION_NEW) !== undefined)
+    // The two statements together are the point: a real catalogue AND no
+    // addressable selector. A reader who sees 252 models and flips the bit has
+    // to get past both.
+    expect(advertisedModels().length).toBeGreaterThan(1)
+    // And the extractor is not vacuously undefined: hand it the shape a session
+    // WOULD advertise and it finds it.
+    expect(
+      extractModelOption({
+        configOptions: [
+          { id: 'model', category: 'model', currentValue: 'a', options: [{ value: 'a' }, { value: 'b' }] },
+        ],
+      }),
+    ).toEqual({ configId: 'model', currentValue: 'a', values: ['a', 'b'] })
   })
 
   it('claims neither mcpConfig nor clientTools on this evidence', () => {

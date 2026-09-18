@@ -134,9 +134,18 @@ export const CLI_TRACK_DESCRIPTORS: readonly AgentDescriptor[] = [
     command: { executable: 'codebuddy-code', protocolArgs: ['--acp'] },
     envPrefix: 'CODEBUDDY_ACP',
     // Honest about what ACP actually supports here: `resume` (session/resume),
-    // `model` and `effort` (session/new `models` + `configOptions`, driven
-    // through session/set_config_option), `mcpConfig` (session/new `mcpServers`,
-    // which is JSON over the wire rather than a config FILE the bridge writes).
+    // `model` and `effort` (session/new `configOptions`, driven through
+    // session/set_config_option), `mcpConfig` (session/new `mcpServers`, which
+    // is JSON over the wire rather than a config FILE the bridge writes).
+    // Both dials are named in the capture's own `configOptions[]` — five
+    // entries, `mode` / `model` / `thought_level` / `sandbox` / `multitask` —
+    // and that is what makes them ADDRESSABLE rather than merely advertised
+    // (tests/fixtures/ACP-PROVENANCE.md). `model` and `effort` were both claimed
+    // before the driver had a model lever, on the strength of that advertisement
+    // plus `session/new`'s `models`; the lever now exists, so `model: true`
+    // rests on the same evidence it always did. Still UNVERIFIED on this host:
+    // that the engine ACCEPTS a model value — this host is not signed in, so the
+    // dial has never been exercised here, and the notes below say so.
     // Deliberately NOT `clientTools`: this host's engine never issued an fs/*
     // or terminal/* callback, so claiming the capability would be a guess.
     capabilities: { resume: true, model: true, effort: true, mcpConfig: true, clientTools: false },
@@ -172,16 +181,20 @@ export const CLI_TRACK_DESCRIPTORS: readonly AgentDescriptor[] = [
     //  - resume [proven]: `initialize` advertises agentCapabilities.loadSession
     //    plus sessionCapabilities.resume, and a live `session/resume` returned a
     //    normal result (models + modes) with no JSON-RPC error.
-    //  - model: FALSE [proven]: `session/new` ADVERTISES
-    //    models.availableModels (252 entries) + currentModelId, but the model
-    //    was never applied when passed through `session/new` params — both the
-    //    `model` and the `modelId` spelling were silently ignored and
-    //    currentModelId came back unchanged. The driver's ONLY model lever on
-    //    this family is that param, so `model: true` would promise a knob this
-    //    engine does not honour.
+    //  - model: FALSE [proven], and it STAYS false after the driver grew a
+    //    second lever. `session/new` ADVERTISES models.availableModels (252
+    //    entries) + currentModelId, but the model was never applied when passed
+    //    through `session/new` params — both the `model` and the `modelId`
+    //    spelling were silently ignored and currentModelId came back unchanged.
+    //    The driver's other lever, `session/set_config_option`, cannot help
+    //    here either: it addresses a selector the session ADVERTISES, and this
+    //    engine answers no `configOptions` at all (see the next bullet), so
+    //    there is nothing to address. `model: true` would promise a knob this
+    //    identity cannot reach.
     //  - effort: FALSE [proven]: `session/new` (and `session/resume`) answer NO
     //    `configOptions` at all, so the driver's effort selector (id/category
-    //    in effort|thought_level|reasoning_effort) resolves to nothing.
+    //    in effort|thought_level|reasoning_effort) resolves to nothing — and so
+    //    does its model selector, which is matched by id `model`.
     //  - clientTools: FALSE [proven for this handshake]: no `fs/*` or
     //    `terminal/*` request was observed from the engine.
     //  - `mcpConfig` is deliberately NOT claimed: `mcpServers: []` was accepted
@@ -239,19 +252,22 @@ export const CLI_TRACK_DESCRIPTORS: readonly AgentDescriptor[] = [
     //    exercised through `manager.run` on this identity the way the desktop
     //    row was; the read is proven from the capture, the SET is proven at the
     //    protocol level (§10.4b of the findings).
-    //  - `model: false` — a BRIDGE-side gap, not an engine-side denial. The
-    //    engine has a working, VALIDATED model dial
+    //  - `model: true` — the engine has a working, VALIDATED model dial
     //    (`session/set_config_option {configId:"model"}`, which rejects an
-    //    unknown id with -32602 and is confirmed by `config_option_update`),
-    //    but the driver only ever sends a model through `session/new` params,
-    //    which this engine ignores in silence. Same reasoning as the desktop
-    //    row; see that entry for the full measurement.
+    //    unknown id with -32602 and confirms a good one), and the driver now
+    //    drives it. It did not before: its only model lever used to be the
+    //    `model` key of `session/new` params, which this engine ignores in
+    //    silence. Same reasoning as the desktop row; see that entry for the
+    //    full measurement. NOTE the shared trap that shaped the reader: BOTH
+    //    Qoder captures tag `reasoning_effort` with `category: "model"`, so the
+    //    model selector is matched by ID ONLY — a category match would hand
+    //    back the effort dial and then address a model id to it.
     //  - `mcpConfig` / `clientTools` false — `mcpCapabilities {http,sse}` is
     //    advertised, but `mcpServers` was only ever sent as `[]` and no `fs/*`
     //    or `terminal/*` callback appears in the capture. Advertising is not
     //    obeying, so neither is claimed.
-    capabilities: { resume: true, model: false, effort: true, mcpConfig: false, clientTools: false },
+    capabilities: { resume: true, model: true, effort: true, mcpConfig: false, clientTools: false },
     notes:
-      'The standalone CLI, not the app\'s engine: `qoderclicn --acp` (the flag is HIDDEN — absent from the 107-line `--help` — but parsed, and `acp` is one of the runtime\'s own session modes alongside `tui`/`headless`/`sdk`). Same ACP wire and the same capability row as the desktop identity `qoder-cn`, but a DIFFERENT binary and version (1.1.56 vs the app\'s 1.1.53) and a DIFFERENT credential story: this CLI maintains ~/.qoder-cn/.auth itself, so a launch is credentialed as soon as the operator has run `qoderclicn login` ONCE — there is no auth wall, unlike the desktop engine, which never inherits the app login. Its TEARDOWN is the same shape as the desktop engine\'s, which is worth stating because a bare probe suggested otherwise: in the full stack the bridge waits out the grace window and signals it, and the engine\'s shutdown handler exits 143 — the acceptance run reports `status=completed exit=143`, so the D40 §8.2 fix (blame the engine only for an exit IT chose) is load-bearing for BOTH Qoder identities. `initialize` answers agentInfo `{name:"qoder-cli-cn", version:"1.1.56"}` + one authMethod (`qoderclicn-login`, a LOCAL login reuse rather than a device flow) + agentCapabilities incl. `loadSession` and `sessionCapabilities.resume/close/delete/fork/list`; `session/new` answers sessionId + 5 modes (default/acceptEdits/auto/dontAsk/yolo) + 14 models (`currentModelId` = `qfmodel` = Qwen3.8-Flash) + configOptions (`mode`, `model`, `reasoning_effort`). The `model` config option is advertised and the engine really honours it — but the bridge cannot reach it: the driver only ever sends a model through `session/new` params, and this engine IGNORES that parameter in silence (a bogus id is accepted without complaint, while a bogus configId is rejected with -32602). So `model: false` records a BRIDGE gap, never an engine limitation. Effort levels are xhigh/low/medium/none — there is no `high` — and the level SET is a function of the selected model, so a future model dial must be set before the effort options are read. stdout is clean; the only stderr is one skill-config warning. See docs/findings-qoder-cn-desktop.md §10 and docs/plan.md D41.',
+      'The standalone CLI, not the app\'s engine: `qoderclicn --acp` (the flag is HIDDEN — absent from the 107-line `--help` — but parsed, and `acp` is one of the runtime\'s own session modes alongside `tui`/`headless`/`sdk`). Same ACP wire and the same capability row as the desktop identity `qoder-cn`, but a DIFFERENT binary and version (1.1.56 vs the app\'s 1.1.53) and a DIFFERENT credential story: this CLI maintains ~/.qoder-cn/.auth itself, so a launch is credentialed as soon as the operator has run `qoderclicn login` ONCE — there is no auth wall, unlike the desktop engine, which never inherits the app login. Its TEARDOWN is the same shape as the desktop engine\'s, which is worth stating because a bare probe suggested otherwise: in the full stack the bridge waits out the grace window and signals it, and the engine\'s shutdown handler exits 143 — the acceptance run reports `status=completed exit=143`, so the D40 §8.2 fix (blame the engine only for an exit IT chose) is load-bearing for BOTH Qoder identities. `initialize` answers agentInfo `{name:"qoder-cli-cn", version:"1.1.56"}` + one authMethod (`qoderclicn-login`, a LOCAL login reuse rather than a device flow) + agentCapabilities incl. `loadSession` and `sessionCapabilities.resume/close/delete/fork/list`; `session/new` answers sessionId + 5 modes (default/acceptEdits/auto/dontAsk/yolo) + 14 models (`currentModelId` = `qfmodel` = Qwen3.8-Flash) + configOptions (`mode`, `model`, `reasoning_effort`). The `model` config option is advertised and the engine really honours it — a caller CAN now reach it, because the driver drives that selector through `session/set_config_option` instead of relying on the `model` parameter of `session/new`, which this engine IGNORES in silence (a bogus id there is accepted without complaint, while a bogus configId is rejected with -32602). The two levers differ in kind, not just in spelling: `set_config_option` VALIDATES what it is given. Effort levels are xhigh/low/medium/none — there is no `high` — and the level SET is a function of the selected model (measured on this build: `qfmodel` offers four, `qmodel` only `none`, and the engine answers -32602 to a level it accepted a moment earlier), which is why the driver sets the model BEFORE it reads effort. stdout is clean; the only stderr is one skill-config warning. See docs/findings-qoder-cn-desktop.md §10 and docs/plan.md D41.',
   },
 ]

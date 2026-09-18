@@ -16,7 +16,17 @@
  *
  *  - `session/new` is answered with the engine's `configOptions` and `models`,
  *    exactly as the real engine does, because the driver reads
- *    `thought_level` out of there to resolve `effort`.
+ *    `thought_level` out of there to resolve `effort` — and `model` out of
+ *    there to resolve `opts.model`.
+ *  - `session/set_config_option` is STATEFUL and VALIDATING: it answers -32602
+ *    for an unknown `configId` or an unadvertised value, echoes the updated
+ *    option set in its RESPONSE, and makes the effort levels depend on the
+ *    selected model — so the driver's ordering (model before effort) is
+ *    exercised rather than taken on faith. See `sessionState` below.
+ *  - Two opt-in knobs exist for that dial: `--no-model-option` hides the model
+ *    selector (an engine with a real catalogue but nothing addressable), and
+ *    `FAKE_ACP_DIAL_LOG=<path>` records the dials the engine ACCEPTED, which is
+ *    the only direct evidence for a driver decision that emits no frame.
  *  - `usage_update` notifications arrive BEFORE the prompt response and a
  *    partial one arrives AFTER it, so the accumulator's order-independence is
  *    actually exercised rather than assumed.
@@ -37,11 +47,43 @@
  *    reported as failed.
  */
 import { createInterface } from 'node:readline'
-import { existsSync } from 'node:fs'
+import { appendFileSync, existsSync } from 'node:fs'
 
 const argv = process.argv.slice(2)
 const scenarioAt = argv.indexOf('--scenario')
 const scenario = scenarioAt >= 0 ? argv[scenarioAt + 1] : 'success'
+
+/**
+ * `--no-model-option` drops the `model` entry from `configOptions`, modelling an
+ * engine whose model catalogue is real but whose session offers no ADDRESSABLE
+ * selector — the shape `hermes` really has (252 advertised models, no
+ * `configOptions` at all). Without it there is no way to exercise the driver's
+ * "advertises no model selector" branch against a real child process.
+ */
+const noModelOption = argv.includes('--no-model-option')
+
+/**
+ * When `FAKE_ACP_DIAL_LOG` is set to a path, every `session/set_config_option`
+ * the engine RECEIVES is appended there as `<configId>=<value> <outcome>`.
+ *
+ * Recorded on RECEIPT, before validation, and that is the whole point: "the
+ * driver did not send this" is a decision, not a frame, so the engine's own
+ * receipt is the only direct evidence — and a value the engine REJECTED still
+ * counts as sent. A log that recorded only accepted dials would let a driver
+ * that sends a dead value and swallows the -32602 look identical to one that
+ * never sent it.
+ *
+ * Opt-in, so the other scenarios leave no files behind.
+ */
+const dialLog = process.env.FAKE_ACP_DIAL_LOG
+const recordDial = (configId, value, outcome) => {
+  if (dialLog === undefined || dialLog === '') return
+  try {
+    appendFileSync(dialLog, `${configId}=${value} ${outcome}\n`)
+  } catch {
+    /* a test that cannot write its evidence will fail on the assertion instead */
+  }
+}
 
 const SESSION_ID = 'fake-acp-session-0001'
 const PROTOCOL_VERSION = 1
@@ -81,48 +123,98 @@ const INIT_RESULT = {
   ],
 }
 
-/** Trimmed to the two config options the driver reads: `thought_level`, `mode`. */
-const CONFIG_OPTIONS = [
-  {
-    type: 'select',
-    id: 'mode',
-    name: 'Permission Mode',
-    category: 'mode',
-    currentValue: 'default',
-    options: [
-      { value: 'default', name: 'Always Ask', description: 'Prompts for permission' },
-      { value: 'bypassPermissions', name: 'Bypass Permissions', description: 'Skips all prompts' },
-    ],
-  },
-  {
-    type: 'select',
-    id: 'thought_level',
-    name: 'Deep Thinking',
-    category: 'thought_level',
-    currentValue: 'enabled',
-    options: [
-      { value: 'minimal', name: 'Minimal', description: 'Briefest reasoning' },
-      { value: 'low', name: 'Low', description: 'Light reasoning' },
-      { value: 'medium', name: 'Medium', description: 'Balanced reasoning' },
-      { value: 'high', name: 'High', description: 'Deep reasoning' },
-      { value: 'xhigh', name: 'X-High', description: 'Very deep reasoning' },
-      { value: 'max', name: 'Max', description: 'Maximum reasoning effort' },
-      { value: 'enabled', name: 'On (default)', description: 'Use the model default effort' },
-    ],
-  },
+/**
+ * The select options the engine offers, and the state the dials mutate.
+ *
+ * `set_config_option` is STATEFUL here on purpose, because two driver
+ * behaviours can only be exercised against an engine that remembers:
+ *
+ *  1. the RESPONSE to a `set_config_option` call echoes the updated option set
+ *     — measured on `qoderclicn` 1.1.56 (2026-09-19), where the reply to a model
+ *     change carries the full `configOptions` with the new `currentValue`;
+ *  2. the effort levels are a FUNCTION of the selected model — also measured,
+ *     on both Qoder builds, where `qfmodel` offers four levels and `qmodel`
+ *     offers one.
+ *
+ * (2) is what makes the ORDER (model before effort) observable rather than a
+ * matter of taste, so the fixture reproduces the coupling instead of describing
+ * it: switching to `fast-model` RETIRES the levels only it does not offer, and
+ * a driver that validated effort against the handshake's copy would send a dead
+ * value and take a -32602.
+ */
+const EFFORT_OPTIONS = [
+  { value: 'minimal', name: 'Minimal', description: 'Briefest reasoning' },
+  { value: 'low', name: 'Low', description: 'Light reasoning' },
+  { value: 'medium', name: 'Medium', description: 'Balanced reasoning' },
+  { value: 'high', name: 'High', description: 'Deep reasoning' },
+  { value: 'xhigh', name: 'X-High', description: 'Very deep reasoning' },
+  { value: 'max', name: 'Max', description: 'Maximum reasoning effort' },
+  { value: 'enabled', name: 'On (default)', description: 'Use the model default effort' },
 ]
 
-const NEW_RESULT = {
+const EFFORT_LEVELS_BY_MODEL = {
+  'default-model': EFFORT_OPTIONS.map((o) => o.value),
+  // The trap in miniature.
+  'fast-model': ['low'],
+}
+
+const sessionState = { mode: 'default', model: 'default-model', thoughtLevel: 'enabled' }
+
+/** The engine's CURRENT option set — rebuilt after every successful dial move. */
+const buildConfigOptions = () => {
+  const levels = EFFORT_LEVELS_BY_MODEL[sessionState.model]
+  return [
+    {
+      type: 'select',
+      id: 'mode',
+      name: 'Permission Mode',
+      category: 'mode',
+      currentValue: sessionState.mode,
+      options: [
+        { value: 'default', name: 'Always Ask', description: 'Prompts for permission' },
+        { value: 'bypassPermissions', name: 'Bypass Permissions', description: 'Skips all prompts' },
+      ],
+    },
+    // `--no-model-option` removes this entry entirely, so the driver has no
+    // selector to address and must fall back to whatever `session/new` carried.
+    ...(noModelOption
+      ? []
+      : [
+          {
+            type: 'select',
+            id: 'model',
+            name: 'Model',
+            category: 'model',
+            currentValue: sessionState.model,
+            options: [
+              { value: 'default-model', name: 'Auto', description: 'x0.79 credits' },
+              { value: 'fast-model', name: 'Fast', description: 'x0.34 credits' },
+            ],
+          },
+        ]),
+    {
+      type: 'select',
+      id: 'thought_level',
+      name: 'Deep Thinking',
+      category: 'thought_level',
+      currentValue: sessionState.thoughtLevel,
+      options: EFFORT_OPTIONS.filter((o) => levels.includes(o.value)),
+    },
+  ]
+}
+
+const newResult = () => ({
   sessionId: SESSION_ID,
   models: {
     availableModels: [
       { modelId: 'default-model', name: 'Auto', description: 'x0.79 credits' },
       { modelId: 'fast-model', name: 'Fast', description: 'x0.34 credits' },
     ],
+    currentModelId: sessionState.model,
   },
   modes: { currentModeId: 'default', availableModes: [{ id: 'default', name: 'Always Ask' }] },
-  configOptions: CONFIG_OPTIONS,
-}
+  configOptions: buildConfigOptions(),
+})
 
 const textChunk = (text) => ({
   sessionUpdate: 'agent_message_chunk',
@@ -155,7 +247,7 @@ const toolCallUpdate = (id, status) => ({
 
 /** Notification bursts shared by every scenario, before the turn proper. */
 function handshakeNoise() {
-  notify({ sessionUpdate: 'config_option_update', configOptions: CONFIG_OPTIONS })
+  notify({ sessionUpdate: 'config_option_update', configOptions: buildConfigOptions() })
   notify({ sessionUpdate: 'available_commands_update', availableCommands: [{ name: 'background' }] })
 }
 
@@ -572,7 +664,7 @@ rl.on('line', (line) => {
         })()
         return
       }
-      respond(frame.id, NEW_RESULT)
+      respond(frame.id, newResult())
       notify({
         sessionUpdate: 'usage_update',
         used: 0,
@@ -582,11 +674,47 @@ rl.on('line', (line) => {
       return
     }
     case 'session/resume':
-      respond(frame.id, NEW_RESULT)
+      respond(frame.id, newResult())
       return
-    case 'session/set_config_option':
-      respond(frame.id, {})
+    case 'session/set_config_option': {
+      const params = frame.params ?? {}
+      const configId = params.configId
+      const value = params.value
+      const target = buildConfigOptions().find((o) => o.id === configId)
+      if (target === undefined) {
+        // Recorded BEFORE the outcome is known: a rejected dial was still SENT,
+        // and that distinction is exactly what the ordering test depends on.
+        recordDial(configId, value, 'rejected')
+        fail(frame.id, -32602, `Invalid params: Unknown config option: ${configId}`, { configId })
+        return
+      }
+      if (!target.options.some((o) => o.value === value)) {
+        recordDial(configId, value, 'rejected')
+        fail(frame.id, -32602, `Invalid params: Invalid value for config option ${configId}: ${value}`, {
+          configId,
+          value,
+        })
+        return
+      }
+      if (configId === 'model') {
+        sessionState.model = value
+        // The measured coupling: a level the NEW model does not offer does not
+        // survive the switch (the real engine resets it rather than keeping it).
+        const levels = EFFORT_LEVELS_BY_MODEL[value]
+        if (!levels.includes(sessionState.thoughtLevel)) sessionState.thoughtLevel = levels[0]
+      } else if (configId === 'thought_level') {
+        sessionState.thoughtLevel = value
+      } else if (configId === 'mode') {
+        sessionState.mode = value
+      }
+      // The RESPONSE carries the post-change option set — the shape measured on
+      // `qoderclicn` 1.1.56. The notification repeats it so a driver that reads
+      // either sees the same bytes.
+      recordDial(configId, value, 'accepted')
+      respond(frame.id, { configOptions: buildConfigOptions() })
+      notify({ sessionUpdate: 'config_option_update', configOptions: buildConfigOptions() })
       return
+    }
     case 'session/set_model':
       respond(frame.id, {})
       return

@@ -387,9 +387,12 @@ session/set_config_option {configId:"reasoning_effort", value:"NOT_A_REAL_LEVEL"
 
 所以沉默是**这个参数专属**的，不是普遍宽松。
 
-**这一段仍然成立**：`session/new` 的 `model` 参数确实被忽略，而它**是 driver 唯一的模型杠杆**。
-所以 `model: false` 对**当前代码**是对的。但它证明的只是「桥这条路不通」，
+**这一段仍然成立**：`session/new` 的 `model` 参数确实被忽略，而它**曾经是 driver 唯一的模型杠杆**。
+所以 `model: false` 对**当时的代码**是对的。但它证明的只是「桥这条路不通」，
 **不是**「引擎没有模型选择」—— 后者在 §5.5b 被实测否掉。
+
+> **后续（2026-09-19）**：driver 后来**长了第二根杠杆**，`model` 也随之翻成 `true`。
+> 本段描述的「唯一杠杆」已不是现状，见 §11（D42）。留着不改，是因为它是那次误判的现场记录。
 
 引擎 CLI 自己的 `-m/--model` 是第三条路 —— 应用给 worker 传的就是 `--model qfmodel`，
 走的是 SDK 的 stream-json 通道（§1），不是 ACP。
@@ -860,7 +863,11 @@ B/C/D 合起来就是「参数被**忽略**」而不是「参数被拒绝」：�
 
 同样地，`reasoning_effort` 的档位表随模型变：`qfmodel` 4 档，切成 `qmodel` 后只剩 `none`。
 
-**结论：CLI 身份的能力行与桌面版逐字段相同** —— 包括 `model: false` 是**桥侧缺口**这件事。
+**结论：CLI 身份的能力行与桌面版逐字段相同** —— 当时包括 `model: false` 是**桥侧缺口**这件事。
+
+> **后续（2026-09-19）**：这一行**已改**。两个 Qoder 身份的 `model` 都翻成 `true`，
+> 因为 driver 补上了 `set_config_option {configId:"model"}` 这根杠杆；下面的代码块与
+> `model: false` 那条子弹是**改动前**的记录，见 §11（D42）看现状与理由。
 
 ```ts
 capabilities: { resume: true, model: false, effort: true, mcpConfig: false, clientTools: false }
@@ -869,9 +876,9 @@ capabilities: { resume: true, model: false, effort: true, mcpConfig: false, clie
 - `resume: true` — `initialize` 明说 `loadSession` + `sessionCapabilities.resume`。
 - `effort: true` — `configOptions` 里 `reasoning_effort` 命中 `EFFORT_OPTION_IDS`，档位
   `xhigh/low/medium/none`（**没有 `high`**，与桌面版同）。
-- `model: false` — 与桌面版同因同果：**桥侧缺口，不是引擎否定**。`session/new` 的 `model`
+- `model: false`（**已由 §11 / D42 改为 `true`**）— 与桌面版同因同果：**桥侧缺口，不是引擎否定**。`session/new` 的 `model`
   参数被静默忽略（§10.4 的 B/C/D），而引擎自己那条 `set_config_option {configId:"model"}`
-  旋钮**是通的**（§10.4b 实测：假值报 `-32602`、真值改计费模型）。driver 没有这根杠杆，所以 `false`。
+  旋钮**是通的**（§10.4b 实测：假值报 `-32602`、真值改计费模型）。driver 当时没有这根杠杆，所以 `false`。
 - `mcpConfig: false` — 引擎**广播** `mcpCapabilities { http, sse }`，但从没拿真 server 验过，
   广播 ≠ 被遵守（§6 的口径）。
 
@@ -1005,3 +1012,165 @@ backendSessionId: c6e3936d-1095-4b1f-afaa-ce04297c2413
    广告了 `authMethods` 就会推这条提示（`src/drivers/acp.ts:2050-2060`），它**不阻塞**：
    这一轮照样跑通。原因见 §10.5 —— 这条 `authMethods` 是「复用你已有的本地登录」，
    而不是「你必须先去登录」。**别把这条状态当失败**（桌面版那边它确实对应认证墙，这里不是）。
+
+## 11. 模型旋钮接进 driver（2026-09-19，D42）
+
+§5.5b 留了一个明确待办：`capabilities.model` 为 `false` 是**桥没有杠杆**，不是引擎不行；
+要翻成 `true` 得改 driver。本节记录那次改动，以及**改之前必须先测的那件事**。
+
+### 11.1 先测形状，再写代码：`set_config_option` 的**响应**里有什么
+
+动手前有一个问题必须先回答，因为它**决定代码形状**：设完模型之后，驱动从哪里读
+「新的 effort 档位表」？两条可能的路 —— 读响应，或者读紧随其后的 `config_option_update` 通知。
+猜是不行的，所以测（`/tmp/qoderclicn-setmodel-probe.mjs`，独立 CLI 1.1.56）：
+
+```
+=== session/new ===
+  configOptions ids: ["mode","model","reasoning_effort"]
+  model:  {"current":"qfmodel","n":14}
+  effort: {"current":"xhigh","values":["xhigh","low","medium","none"]}
+
+=== response id=3  (set_config_option {configId:"model", value:"qmodel"}) ===
+  error: null
+  result keys: ["configOptions"]          ← 响应自己带完整的新档位表
+  RESULT CARRIES configOptions: ["mode","model","reasoning_effort"]
+    model: {"current":"qmodel","n":14}   effort: {"current":"none","values":["none"]}
+    -3ms  NOTIFICATION config_option_update …（同样内容）
+    +0ms  id=3                            ← 通知比响应早到 3ms
+```
+
+三点：
+
+1. **响应就带**（`result keys: ["configOptions"]`），而且已经是**设完之后**的状态：
+   `model.currentValue` 已是 `qmodel`，effort 已缩到 `["none"]`。
+2. 通知比响应**早到约 3ms**，内容是同一份 —— 所以读响应**既充分又有序**，不必去拦通知。
+   **这条决定了代码形状**：`optionSource = 响应`，不需要给 `AcpClient` 加捕获钩子。
+3. 同一探针跑了**桌面引擎 1.1.53**（`/tmp/qodercn-desktop-setmodel-probe.mjs`），结果
+   **逐字相同**（响应带 `configOptions`、通知早 11ms、档位同样缩到 `none`）。两个 Qoder
+   二进制在这一点上一致 —— 所以这条不是「CLI 的怪癖」，而是这个引擎族的形状。
+
+### 11.2 那条耦合现在是**可执行的实测**，不再是预测
+
+同一探针的 id=4/id=5 把 §5.5b 预测的顺序风险变成了实测（全部在 `qmodel` 已生效之后）：
+
+| 请求 | 结果 |
+|---|---|
+| `{configId:"reasoning_effort", value:"xhigh"}` | **-32602** `Invalid value for config option reasoning_effort: xhigh` |
+| `{configId:"reasoning_effort", value:"none"}` | **ACCEPTED** |
+| `{configId:"NOPE_XYZ", value:"qmodel"}`（负控） | **-32602** `Unknown config option: NOPE_XYZ` |
+
+**`xhigh` 在设模型之前是合法值，设完之后同一句话被拒。** 负控排除了「引擎现在什么都不校验」
+这种解释。所以「先设模型、再读 effort」不是风格问题，是**正确性**问题：拿握手时的档位表去校验，
+会发出一个引擎刚刚停止接受的值。
+
+### 11.3 改动本身（`src/drivers/acp.ts`）
+
+- 抽出 `readSelectOption(result, predicate)`，`extractEffortOption` 与新的 `extractModelOption` 共用。
+- **`extractModelOption` 只按 `id` 匹配，绝不按 `category`** —— 因为**本仓库两份 Qoder 捕获里
+  `reasoning_effort` 的 `category` 就是 `"model"`**。按 category 匹配会把 effort 拨盘当成模型拨盘，
+  然后拿一个模型 id 去喂 `reasoning_effort`，必然 -32602。这是实测约束，不是风格偏好；
+  测试里有一条专门的断言把这两个捕获字段钉住。
+- 新增步骤 **2b（模型）**，并把步骤 **2c（effort）** 的读取源从 `sessionResult` 换成 `optionSource`：
+  初值是握手结果，模型设成功且引擎回了 `configOptions` 时换成**响应**；引擎不回时退回握手副本，
+  并**打一条 debug 说明这件事**（不假装重读过）。
+- **协议层不变**：`session/new` 的 `model` 参数**保留** —— 它是 ACP 标准字段，遵守它的引擎不需要
+  别的。模型拨盘是在此之外**追加**的一根杠杆，不是替换。
+
+### 11.4 一处自证：改动**第一次没生效**，是端到端测试抓出来的
+
+值得记下来，因为它是本项目「负控先红后绿」纪律的又一次兑现，而且**第一次写的测试还不够**。
+
+`optionSource` 一开始**只被赋值、从没被读**：`let optionSource = sessionResult` 与
+`optionSource = applied` 都在，但 effort 那行仍是 `extractEffortOption(sessionResult)`。
+`tsc` 不报（那是合法赋值），读代码也像对的。
+
+抓到它的是端到端测试，但**第一版断言是空跑的**：
+
+- 断言写成 `dials.filter(d => d.startsWith('thought_level='))` 为空，而 fixture 的拨盘日志
+  **只记成功的拨盘**。坏代码把 `xhigh` 发出去、引擎回 -32602、驱动吞掉 —— 日志里**什么都没有**，
+  于是「根本没发」和「发了被拒」长得一模一样，测试**在坏代码上照样绿**。
+- 修法是改**证据本身**，不是改断言：fixture 改成在**收到** `set_config_option` 时就记一行
+  `<configId>=<value> accepted|rejected`，**在校验之前**。
+- 改完再回退一次 driver，测试**按线路证据变红**：
+  `expected [ 'thought_level=xhigh rejected' ] to deeply equal []`。
+
+**教训**（与 §5.6、§10.4 同源，这是第三次）：**测试绿不等于修复在。** 要证明一个测试是载荷，
+必须把修复回退掉看它红不红；而要证明它**红得对**，日志必须记**尝试**，不能只记**成功** ——
+否则「被拒绝」会被记成「没发生」。
+
+### 11.5 能力位的改动
+
+| 身份 | `model` | 依据 |
+|---|---|---|
+| `qoder-cn`（桌面 1.1.53） | `false` → **`true`** | 捕获的 `configOptions` 含 `model`（14 值）；引擎**校验**它并确认；driver 现在会驱动它 |
+| `qoderclicn`（CLI 1.1.56） | `false` → **`true`** | 同上，且 §11.1 证明两个二进制的响应形状逐字相同 |
+| `codebuddy-code-acp` | `true`（**不变**） | `ACP-PROVENANCE.md` 记录其真实 `session/new` 的 `configOptions[]` 有五条、**含 `model`**；但**本机未登录，拨盘从未被真正拨过** —— 这条仍未验证，notes 里写明 |
+| `hermes` | `false`（**不变**） | `session/new` **完全没有 `configOptions`**，所以新杠杆也够不着：没有可寻址的 id。`tests/drivers/hermes-acp.test.ts` 里有一条断言把这件事钉住 |
+
+`codebuddy-code-acp` 那一格值得强调：**我没有动它**。它的 `model: true` 在这次改动**之前**
+就存在，依据只是「广告了 `models` 和 `configOptions`」。现在驱动有了真杠杆，这个 `true`
+才第一次有了实现支撑 —— 但「这台机器上引擎真的接受某个 model 值」仍然**没测过**（本机没登录），
+所以 notes 里把它记成未验证，而不是假装它已经被验证。
+
+### 11.6 复核
+
+**真机全栈验收**（`node --experimental-strip-types scripts/acceptance.ts qoderclicn "Reply with exactly: OK" --model=qmodel`）：
+
+```
+probe  qoderclicn: track=cli available=true
+       executable=/Users/king/.nvm/versions/node/v22.22.3/bin/qoderclicn version=1.1.56
+run    session=sess_170842ee-… status=running
+[debug] acp model selector driven {"configId":"model","requested":"qmodel","optionSetEchoed":true}
+events (9): … [status] available commands update: 285 commands … [text] OK
+result status=completed exit=143 durationMs=38479
+backendSessionId: 3a2612e8-4bff-45ff-a25d-29dbe47ed003
+```
+
+**`optionSetEchoed:true` 是这条链路的正面证据**：驱动真的拨了引擎自己广告的 `model` 选择器，
+且引擎回了新档位表。这就是 §11.4 那条 debug 行存在的理由 —— 成功路径不产生任何帧，
+没有它，一次全栈验收只能证明「没崩」，不能证明「拨了」。
+
+**一个必须诚实记录的插曲**：这一轮**第一次跑失败了**，报的是
+`acp session/new failed: … -32603 … [safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED] {"count":80,"threshold":50,…"~/.qoder-cn/security-resources/.security-scan-*.previous"}`。
+那是**宿主侧的 safe-delete 钩子**拦下了引擎自己的安全扫描清理（80 个文件超过阈值 50），
+与模型拨盘无关。**但我没有凭一次观测就下结论** —— 同一条命令紧接着**不带 `--model`** 跑成功
+（`status=completed exit=143`，`text: OK`），再**带上 `--model`** 又跑成功（上面这次）。
+三次两结果、且失败信息指向引擎自己的目录清理，所以判定为**宿主瞬时状态**，不是本改动的性质。
+这正是 §5.6 与 §10.4 的教训第四次生效：**一次观测不是性质。**
+
+- `tsc` src + tests：**0 错误**。
+- 受影响测试：`tests/drivers/acp.test.ts`（新增 6 条拨盘端到端）、`qoder-cn-acp`、
+  `qoderclicn-acp`、`hermes-acp`、`codebuddy-code`、`tracks/cli`、`tracks/desktop`、
+  `kernel/registry`、`integration/argv-shape` —— **204 passed**。
+- `verify` 与全量 `vitest run` 的结果见 D42 决策行。
+
+### 11.7 桌面版也重跑了一遍：同一条拨盘链，同一个结果 [proven，2026-09-19 06:59]
+
+§11.6 验的是 CLI（`qoderclicn` 1.1.56）。**桌面版必须单独验**，因为它是另一个二进制、
+另一个版本（1.1.53）、且 §8.1 那次「跑通」发生在驱动改动**之前**。同一条命令跑两遍，原始输出：
+
+```
+########## A) qoder-cn, no model ##########
+events (16): … [status] available commands update: 270 commands … [text] OK
+result status=completed exit=143 durationMs=36662
+backendSessionId: 8d9bc291-d1df-4259-a214-b7b438455b1c
+
+########## B) qoder-cn, --model=qmodel ##########
+probe  qoder-cn: track=desktop available=true  version=1.1.53
+[debug] acp model selector driven {"configId":"model","requested":"qmodel","optionSetEchoed":true}
+[debug] acp: engine ignored stdin EOF; forcing shutdown {"graceMs":2000}
+events (9): … [status] available commands update: 270 commands … [text] OK
+result status=completed exit=143 durationMs=31955
+backendSessionId: 53716d83-c153-42cf-bc9e-7d6ffef52682
+```
+
+四点：
+
+1. **桌面身份在新驱动下依然通**（A 组：`completed` + `text: OK`），所以 §11 的改动没有把它弄坏。
+2. **桌面引擎也接受拨盘**（B 组：`optionSetEchoed:true`），与 §11.1 的探针结论一致 ——
+   §11.1 测的是响应**形状**，这里测的是**穿过整条栈之后它仍然成立**。
+3. `[status] engine requires authentication …` 照旧出现，照旧是**噪声**：`session/new` 紧接着就
+   回了真实 `sessionId`。判断依据见 §8.1 第 1 条。
+4. **仍然需要一个带外步骤**：`~/.qoder-cn/.auth/user`（1280 B）必须已存在，也就是操作员得先
+   `qoderclicn login` 过一次。桥自己**不会**驱动这个登录（§5.3 是那件未做的工作）。
+   「桌面版通了」的准确含义是：**凭证就位之后，它通了**。

@@ -168,9 +168,9 @@ export const DESKTOP_TRACK_DESCRIPTORS: readonly AgentDescriptor[] = [
     //    own `extractEffortOption` reads it; and
     //    `session/set_config_option {configId:"reasoning_effort", value:"low"}`
     //    is ACCEPTED and confirmed by a `config_option_update` notification.
-    //  - `model: false` — and this one is a statement about the BRIDGE, not
-    //    about the engine. Two separate things were measured, and the first
-    //    draft of this comment ran them together:
+    //  - `model: true` — flipped 2026-09-19, when the DRIVER grew the lever the
+    //    engine had had all along. The measurement has two halves, and the
+    //    earlier draft of this comment carried only the first:
     //
     //      * the ENGINE can choose a model. `session/set_config_option`
     //        `{configId:"model"}` is ACCEPTED, is confirmed by a
@@ -179,22 +179,28 @@ export const DESKTOP_TRACK_DESCRIPTORS: readonly AgentDescriptor[] = [
     //        that makes it real rather than cosmetic — the turn that follows is
     //        billed against the chosen model (`_meta.quota.model_usage[0].model`
     //        reads `qmodel` after the dial moves, `qfmodel` before).
-    //      * the DRIVER has no lever for that dial. Its only model lever is the
-    //        `model` key of `session/new` params, and this engine IGNORES it:
-    //        the same `currentModelId` with and without the parameter, and a
-    //        bogus id accepted in silence (contrast the bogus configId above,
-    //        which answers -32602). It calls `set_config_option` for EFFORT only.
+    //      * the DRIVER now has a lever for that dial. It did not before: its
+    //        only model lever used to be the `model` key of `session/new`
+    //        params, and this engine IGNORES that (the same `currentModelId`
+    //        with and without the parameter, and a bogus id accepted in
+    //        silence — contrast the bogus configId above, which answers
+    //        -32602). The driver now also drives the session's OWN advertised
+    //        model selector through `set_config_option`, so `true` is accurate
+    //        for both halves. See docs/findings-qoder-cn-desktop.md §5.5, §6.
     //
-    //    So `false` is correct for the code as it stands, and the honest
-    //    sentence is "no caller can choose a model on this identity today" —
-    //    NOT "the engine cannot". Wiring the dial up is a driver change that
-    //    would flip this bit for every ACP identity at once; it is not made
-    //    here. See docs/findings-qoder-cn-desktop.md §5.5, §6.
+    //    ORDER IS LOAD-BEARING, and it is why the driver sets the model BEFORE
+    //    it reads effort: the effort levels are a function of the selected
+    //    model. Measured on BOTH Qoder builds (1.1.53 desktop, 1.1.56 CLI):
+    //    `qfmodel` offers xhigh/low/medium/none; after the switch to `qmodel`
+    //    the engine retires three of them and offers only `none`, and it
+    //    ANSWERS -32602 to the level it had accepted a moment earlier. So a
+    //    driver validating effort against the handshake's copy would send a
+    //    dead value.
     //  - `mcpConfig` / `clientTools` false — never demonstrated: no `fs/*`,
     //    `terminal/*` or `mcpServers` traffic appears in either capture.
-    capabilities: { resume: true, model: false, effort: true, mcpConfig: false, clientTools: false },
+    capabilities: { resume: true, model: true, effort: true, mcpConfig: false, clientTools: false },
     notes:
-      'Speaks ACP (`--yolo --acp`, both hidden options) and reads its OWN credential store (~/.qoder-cn/.auth) on launch. A bare launch does NOT inherit the running desktop login: the app keeps its own encrypted store and mints a PER-JOB token it pushes via QODER_SDK_AUTH_PAYLOAD_FILE instead of writing that store. So while that store is empty every run fails as `failed` at session/new with -32000 "Authentication required" — never as an empty success. The fix is out-of-band and needs no bridge change: run `qoderclicn login` once. Both directions are verified on this host — empty store → -32000; after login → a full turn with status=completed and the answer text intact. The bridge\'s own `authenticate` channel does NOT work here: the engine never answers that frame, so no login URL ever reaches the model. Once credentialed the session advertises `reasoning_effort` (xhigh/low/medium/none — there is no `high`), so the bridge can set the effort dial. It also advertises 14 models and reports a `currentModelId`, and the ENGINE really can switch between them via `session/set_config_option` — but no caller can reach that dial today, because the driver only ever sends the model through `session/new` params, which this engine ignores. So `model: false` means "the bridge has no lever", not "the engine has no dial". One more measured coupling: the effort levels are a function of the selected model (qfmodel offers four, qmodel offers only `none`), so a future model dial must be set BEFORE the effort options are read (docs/findings-qoder-cn-desktop.md §3–6, §8.2, §10; docs/handoff-blockers.md record 11).',
+      'Speaks ACP (`--yolo --acp`, both hidden options) and reads its OWN credential store (~/.qoder-cn/.auth) on launch. A bare launch does NOT inherit the running desktop login: the app keeps its own encrypted store and mints a PER-JOB token it pushes via QODER_SDK_AUTH_PAYLOAD_FILE instead of writing that store. So while that store is empty every run fails as `failed` at session/new with -32000 "Authentication required" — never as an empty success. The fix is out-of-band and needs no bridge change: run `qoderclicn login` once. Both directions are verified on this host — empty store → -32000; after login → a full turn with status=completed and the answer text intact. The bridge\'s own `authenticate` channel does NOT work here: the engine never answers that frame, so no login URL ever reaches the model. Once credentialed the session advertises `reasoning_effort` (xhigh/low/medium/none — there is no `high`), so the bridge can set the effort dial. It also advertises 14 models and reports a `currentModelId`, and a caller CAN now choose among them: the driver drives the session\'s own advertised model selector through `session/set_config_option`, because the engine ignores the model passed in `session/new` params (a bogus id there is accepted in silence, while a bogus configId is rejected with -32602). The coupling that makes the ORDER matter is measured on both Qoder builds: the effort levels are a function of the selected model (qfmodel offers four, qmodel offers only `none`, and the engine answers -32602 to a level it had accepted a moment earlier), so the driver sets the model BEFORE it reads effort (docs/findings-qoder-cn-desktop.md §3–6, §8.2, §10; docs/handoff-blockers.md record 11).',
   },
   {
     id: 'mimo',
