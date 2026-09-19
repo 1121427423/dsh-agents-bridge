@@ -204,20 +204,20 @@ describe('the qoder-cn descriptor agrees with its captures', () => {
     // This assertion used to pin `false`, on the reasoning that the driver's
     // only model lever was `session/new` params.model and this engine ignores
     // that parameter. The premise was right and the conclusion was wrong: the
-    // engine advertises a `model` CONFIG OPTION, which is addressable through
-    // the same `session/set_config_option` the effort dial already uses, and
-    // the driver now drives it. So the honest bit is `true` — and the assertion
-    // is written as `extractModelOption(...) !== undefined` rather than a bare
-    // `true` so it fails from BOTH sides: a descriptor that under-claims a
-    // selector the bytes advertise, and one that claims a selector this engine
-    // never offered.
+    // engine advertises a `model` CONFIG OPTION, addressable through
+    // `session/set_model` — the same call the reference implementation
+    // (multica `qoder.go`) uses — and the driver now drives it. So the honest
+    // bit is `true` — and the assertion is written as
+    // `extractModelOption(...) !== undefined` rather than a bare `true` so it
+    // fails from BOTH sides: a descriptor that under-claims a selector the
+    // bytes advertise, and one that claims a selector this engine never
+    // offered.
     //
     // The measurements behind the engine half, with controls, on 2026-09-19
     // (both Qoder builds, 1.1.53 desktop and 1.1.56 CLI, identical):
-    //   {configId:"model", value:"qmodel"}            → ACCEPTED, confirmed
-    //   {configId:"model", value:"bogus-model-xyz"}   → -32602 Invalid value
-    //   {configId:"model", value:"Qwen3.8-Flash"}     → -32602 Invalid value
-    //   {configId:"nope-xyz",  value:"qmodel"}        → -32602 Unknown option
+    //   session/set_model {modelId:"qmodel"}          → ACCEPTED, confirmed
+    //   session/set_model {modelId:"bogus-model-xyz"} → -32602 Invalid model
+    //   session/set_model {modelId:"Qwen3.8-Flash"}   → -32602 Invalid model
     //   a real turn after the switch → `_meta.quota.model_usage[0].model`
     //                                  reads "qmodel" (it was "qfmodel")
     // The last line is what separates a working dial from a label. Contrast

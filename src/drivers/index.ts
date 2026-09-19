@@ -35,6 +35,7 @@
  */
 
 import type { AgentBackend, DriverDeps, ProtocolFamily } from '../kernel/types.ts'
+import type { AcpResidentPool } from './acp-resident.ts'
 
 import {
   clearDriverRuntime,
@@ -91,7 +92,11 @@ export const DRIVER_FAMILIES: readonly ProtocolFamily[] = [
  * a misconfigured descriptor must be loud, because a silent fallback would run
  * the wrong CLI with the wrong flags.
  */
-export function createBackend(family: ProtocolFamily, deps: DriverDeps): AgentBackend {
+export function createBackend(
+  family: ProtocolFamily,
+  deps: DriverDeps,
+  resident?: AcpResidentPool,
+): AgentBackend {
   switch (family) {
     case 'claude':
       return createClaudeBackend(deps)
@@ -102,7 +107,7 @@ export function createBackend(family: ProtocolFamily, deps: DriverDeps): AgentBa
     case 'openclaw':
       return createOpenclawBackend(deps)
     case 'acp':
-      return createAcpBackend(deps)
+      return createAcpBackend(deps, undefined, resident)
     case 'generic':
       return createGenericBackend(deps)
     case 'zcode':
@@ -127,6 +132,7 @@ export function createBackendWithRuntime(
   family: ProtocolFamily,
   deps: DriverDeps,
   runtime: DriverRuntime,
+  resident?: AcpResidentPool,
 ): AgentBackend {
   switch (family) {
     case 'claude':
@@ -138,7 +144,7 @@ export function createBackendWithRuntime(
     case 'openclaw':
       return createOpenclawBackend(deps, runtime)
     case 'acp':
-      return createAcpBackend(deps, runtime)
+      return createAcpBackend(deps, runtime, resident)
     case 'generic':
       return createGenericBackend(deps, runtime)
     case 'zcode':
@@ -165,3 +171,13 @@ export {
   type SpawnSpec,
   type SpawnedProcess,
 }
+
+// ── ACP resident pool, re-exported for the plugin entry ────────────────────
+
+export { ACP_KEEPALIVE_ENV, ACP_KEEPALIVE_IDLE_DEFAULT_MS, createAcpBackend, residentKey } from './acp.ts'
+export {
+  createAcpResidentPool,
+  type AcpResidentEntry,
+  type AcpResidentPool,
+  type AcpResidentPoolOptions,
+} from './acp-resident.ts'

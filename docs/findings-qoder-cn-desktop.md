@@ -1181,6 +1181,11 @@ backendSessionId: 53716d83-c153-42cf-bc9e-7d6ffef52682
 工作」，不能证明「真引擎就是这个样子」。§11.1 的探针测的是**响应形状**，也没走完整条栈。
 补三组真机对照（`qoderclicn` 1.1.56，`DSH_AGENTS_BRIDGE_DEBUG=1`）：
 
+> **字段名已于 D45 变更（测量结论不变）**：下面引用的
+> `acp model selector driven {"configId":"model","requested":…}` 是 **D45 之前**那一版的输出。
+> 现行驱动改走 multica 的 `session/set_model`，同一行打印为 `{"modelId":…,"optionSetEchoed":…}`
+> —— 按 §11.8 复现验证时请以现行字段名为准（见 §12.2）。
+
 ```
 ########## A) --model=qmodel --effort=xhigh ##########
        requested model=qmodel effort=xhigh
@@ -1229,3 +1234,73 @@ text: OK
 **一个自己踩的坑，记下来免得重复**：第一版用 zsh 的 `for combo in "a b"; do set -- $combo` 分词，
 **zsh 默认不对未加引号的变量做词分割**，于是 `qmodel xhigh` 被当成一个 model 值，
 三组全跑成「模型不被广告 → 跳过」。改用显式参数后才有上表。**这类"三组全一样"的结果要先怀疑装置。**
+
+## 12. Qoder 接入全面对齐 multica（2026-09-19，D45）
+
+用户要求「全部跟 multica 的实现对齐」。multica 是同一根 ACP 线上的**生产参考实现**，qoder 的接入在
+`server/pkg/agent/qoder.go`（Go）。逐行对比下来只有两处可观察差异，本次都改了。
+
+### 12.1 启动参数：`--acp` → `--yolo --acp`
+
+multica 硬编码 `qodercli --yolo --acp` / `qoderclicn --yolo --acp`（见其 `CLI_AND_DAEMON.md`），
+并把 `--yolo` / `--acp` 列入「不可被 custom_args 覆盖」的封锁表。桌面身份 `qoder-cn` 早就钉了
+`--yolo --acp`；CLI 身份 `qoderclicn` 此前刻意只带 `--acp`（D41 的理由是「带内权限握手足够」）。
+本次对齐：CLI 也钉 `--yolo --acp`。
+
+**实测（qoderclicn 1.1.56，本机）**：
+
+| argv | `session/new` 的 `modes.currentModeId` |
+|------|----------------------------------------|
+| `--acp` | `default`（工具调用会弹 `session/request_permission`） |
+| `--yolo --acp` | **`yolo`**（Bypass Permissions，自动批准所有工具） |
+
+所以 `--yolo` 不是空旗标，它真的选模式。**注意**：`currentModeId` **随 `--yolo` 变**，所以旧的完整回合
+捕获 `qoderclicn-acp-handshake.ndjson`（`--acp`，mode=`default`，含 prompt 结果）不再与描述符 argv
+一致。由于 Qoder ACP 后端当前 `session/prompt` 全面 500（§12.3），无法重捕「带成功 prompt 结果」的
+完整回合，因此**新增一份真实捕获** `qoderclicn-acp-yolo-session.ndjson`（`--yolo --acp`，只含
+`initialize` + `session/new`，mode=`yolo`），由它钉住「描述符 argv ↔ 模式」这条守卫；旧的那份保留，
+用于 prompt 结果与消息块。两份 fixture 各自诚实标注（`ACP-PROVENANCE.md` 两行）。
+
+### 12.2 模型拨盘：`set_config_option {configId:"model"}` → `session/set_model`
+
+multica 用 ACP 标准方法 `session/set_model {sessionId, modelId}`。D42 当时选的是
+`set_config_option {configId:"model"}`（因为它回显 configOptions，方便 effort 顺序校验），
+**从未测过 `session/set_model`**。本次补测（真机，qoderclicn 1.1.56）：
+
+| 请求 | 响应 |
+|------|------|
+| `session/set_model {modelId:"qmodel"}` | **OK `{}`** |
+| `session/set_model {modelId:"qfmodel"}` | **OK `{}`** |
+| `session/set_model {modelId:"NOT_A_REAL_MODEL"}` | **-32602 `Invalid or unavailable model`** |
+
+即它是**被校验**的真杠杆，与 `set_config_option {configId:"model"}` 一样；而 `session/new` 的 `model`
+参数依旧被静默忽略（假 id 也通过）。所以换到 multica 的方法**不损失校验能力**。
+
+**代价与补偿**：`set_model` 的**响应是 `{}`**，不携带新的 `configOptions`。真机同时观测到它紧跟一条
+`config_option_update` **通知**（内容就是更新后的档位表），且该通知**先于响应帧**到达（与 §11.1 里
+`set_config_option` 的测量一致）。因此 `AcpClient` 新增 `latestConfigOptions` 字段，在**通知到达时**
+捕获（早于 accept 闸门 —— 拨盘发生在 `session/prompt` 之前，闸门还关着），模型拨完后就拿它当 effort 的
+档位源 —— D42 的「先设模型、再对着**选择后**的档位表校验 effort」这条顺序正确性因此**没有退化**。
+端到端测试（真子进程 + `FAKE_ACP_DIAL_LOG` 线路证据）验证：`--model=fast-model --effort=xhigh`
+（fast-model 只保留 `low`）下 `thought_level=xhigh` **一条都不发**；而 `--model=default-model
+--effort=xhigh` 下**照发**。
+
+**debug 行的字段名随之变更**（避免读者按旧串 grep 不到）：`acp model selector driven` 现在打印
+`{"modelId":…,"optionSetEchoed":…}`，不再是 D45 之前的 `{"configId":"model","requested":…}`。
+`acp effort selector driven` 未变。§11.8 的三组真机输出保留原文并已就地标注为 D45 前。
+
+### 12.3 对齐前先证伪：multica 的方式在当前服务端也调不通
+
+为回答「multica 的方式能不能调通」，用最小脚本**逐字复刻** multica 的调用序列
+（`qoderclicn --yolo --acp` → `initialize {protocolVersion:1, clientInfo:"multica-agent-sdk"}`
+→ `session/new {cwd, mcpServers:[]}` → `session/prompt`）：
+
+```
+initialize:   OK（agentInfo qoder-cli-cn 1.1.56）
+session/new:  OK（currentModeId=yolo，14 模型）
+session/prompt: ERR {code:500, message:"Sorry, something went wrong. Please try again. Report Issue (input /feedback)"}（1.1s）
+```
+
+**与桥此前在 `qfmodel` / `qmodel` / `kmodel` 三个模型上得到的 500 逐个字段相同。** 所以当前 500 是
+**Qoder ACP 后端（`session/prompt` 上游）的故障**，对所有客户端实现一视同仁，与 `--yolo`、模型选择、
+桥/常驻代码均无关。对齐工作本身可以在服务端恢复后直接实测。

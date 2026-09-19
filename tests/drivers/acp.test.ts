@@ -24,11 +24,13 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import type { AgentMessage, AgentResult, DriverDeps } from '../../src/kernel/types.ts'
+import { filterLaunchPrefix } from '../../src/drivers/argv.ts'
 import type { DriverRuntime, SpawnSpec, SpawnedProcess } from '../../src/drivers/argv.ts'
 import {
   ACP_BLOCKED_ARGS,
   ACP_DEFAULT_OUTPUT_BYTE_LIMIT,
   ACP_FAILURE_STOP_REASONS,
+  ACP_LAUNCH_PREFIX_BLOCKED_ARGS,
   ACP_MAX_OUTPUT_BYTE_LIMIT,
   ACP_MAX_TEXT_FILE_BYTES,
   ACP_SESSION_SCOPED_OPTION_IDS,
@@ -276,10 +278,81 @@ describe('buildAcpArgs', () => {
     ).toEqual(['--acp', '--keep'])
   })
 
+  it('drops a caller-supplied --yolo, which the Qoder descriptors own (D45)', () => {
+    // The descriptor already supplies `--yolo` through `protocolArgs` for both
+    // Qoder identities, and the reference implementation blocks the same token
+    // as daemon-owned. Without this the caller could produce
+    // `--yolo --acp --yolo`. The token is blocked, not the capability:
+    // `--permission-mode` remains available below.
+    expect(
+      buildAcpArgs({ protocolArgs: ['--yolo', '--acp'], extraArgs: ['--yolo', '--keep'] }),
+    ).toEqual(['--yolo', '--acp', '--keep'])
+  })
+
   it('blocks both protocol flags, in the right value mode', () => {
     expect(ACP_BLOCKED_ARGS['--acp']).toBe('standalone')
     expect(ACP_BLOCKED_ARGS['--acp-transport']).toBe('withValue')
+    expect(ACP_BLOCKED_ARGS['--yolo']).toBe('standalone')
+    // The escape hatch stays open: the TOKEN is bridge-owned, the MODE is not.
+    expect(ACP_BLOCKED_ARGS['--permission-mode']).toBeUndefined()
   })
+
+  it('keeps a DESCRIPTOR-pinned --yolo in argsPrefix, while still filtering the protocol selector', () => {
+    // The block above is aimed at CALLER input (`extraArgs`). `argsPrefix` is
+    // descriptor launch data the bridge does not own, so a custom descriptor that
+    // pins its own permission mode must not have it silently stripped — only the
+    // protocol selector is filtered there (MI-5).
+    expect(ACP_LAUNCH_PREFIX_BLOCKED_ARGS['--yolo']).toBeUndefined()
+    expect(ACP_LAUNCH_PREFIX_BLOCKED_ARGS['--acp']).toBe('standalone')
+    expect(ACP_LAUNCH_PREFIX_BLOCKED_ARGS['--acp-transport']).toBe('withValue')
+    expect(
+      filterLaunchPrefix(['node', '--yolo', '--acp', '--acp-transport', 'stdio', 'run.mjs'], {
+        ...ACP_LAUNCH_PREFIX_BLOCKED_ARGS,
+      }),
+    ).toEqual(['node', '--yolo', 'run.mjs'])
+  })
+})
+
+// The scopes above are asserted on the CONSTANTS. This drives the real run path
+// instead, because the constants being right does not prove the CALL SITE
+// reaches for the right one: pointing `filterLaunchPrefix` back at the full set
+// would leave every constant-level assertion green (MI-8).
+describe('acp launch-prefix filtering on the run path', () => {
+  it('keeps a descriptor-pinned --yolo and still strips protocol flags from argsPrefix', async () => {
+    const spawned: string[][] = []
+    const recordingRuntime: DriverRuntime = {
+      spawn(spec: SpawnSpec): SpawnedProcess {
+        spawned.push([...(spec.args ?? [])])
+        return realRuntime.spawn(spec)
+      },
+    }
+    const deps = makeDeps('success', {
+      command: {
+        executable: process.execPath,
+        // A descriptor that pins its own permission mode, plus a protocol flag
+        // that must STILL be filtered — together with its value.
+        argsPrefix: [FIXTURE, '--scenario', 'success', '--yolo', '--acp-transport', 'stdio'],
+        protocolArgs: ['--acp'],
+      },
+    })
+    const backend = createBackendWithRuntime('acp', deps, recordingRuntime)
+    const handle = await backend.run(
+      { agent: 'codebuddy-code-acp', prompt: 'do the thing', cwd: makeWorkdir() },
+      deps,
+      new AbortController().signal,
+    )
+    const result = await handle.done
+    expect(result.status).toBe('completed')
+
+    const args = spawned[0] ?? []
+    // Descriptor-owned: survives (this is what MI-5 fixed).
+    expect(args).toContain('--yolo')
+    // Protocol-critical: still filtered, value included.
+    expect(args).not.toContain('--acp-transport')
+    expect(args).not.toContain('stdio')
+    // …and the protocol selector itself arrives through `protocolArgs`.
+    expect(args).toContain('--acp')
+  }, 20_000)
 })
 
 describe('client-side capability hardening knobs', () => {
@@ -1099,12 +1172,14 @@ describe('ACP_FAILURE_STOP_REASONS', () => {
 // These run against the REAL fixture peer, and they read TWO pieces of
 // evidence, because the behaviours here are decisions as much as messages:
 //
-//  1. `FAKE_ACP_DIAL_LOG` — every `set_config_option` the engine RECEIVED, with
-//     its outcome. "The driver did not send this" has no frame to assert on, so
-//     the engine's own receipt is the only direct evidence — and it is recorded
-//     on receipt, so a value the engine REJECTED still shows up as sent. Without
-//     that, a driver that sends a dead value and swallows the -32602 would look
-//     identical to one that never sent it at all.
+//  1. `FAKE_ACP_DIAL_LOG` — every model/effort dial the engine RECEIVED (the
+//     model dial arrives as `session/set_model`, the effort dial as
+//     `session/set_config_option`), with its outcome. "The driver did not send
+//     this" has no frame to assert on, so the engine's own receipt is the only
+//     direct evidence — and it is recorded on receipt, so a value the engine
+//     REJECTED still shows up as sent. Without that, a driver that sends a dead
+//     value and swallows the -32602 would look identical to one that never sent
+//     it at all.
 //  2. the driver's logger — the reason it chose not to send one.
 
 describe('acp driver, config-option dials', () => {
@@ -1178,9 +1253,9 @@ describe('acp driver, config-option dials', () => {
       const { result, dials } = await runWithDials({ model: 'fast-model' })
       expect(result.status).toBe('completed')
       // The engine's receipt. `session/new` params are NOT recorded here — the
-      // log holds only `set_config_option` traffic — so this line proves the
-      // driver reached for the advertised selector, which is the lever this
-      // engine actually obeys.
+      // log holds only `session/set_model` (model) and `set_config_option`
+      // (effort) traffic — so this line proves the driver reached for the
+      // advertised selector, which is the lever this engine actually obeys.
       expect(dials).toContain('model=fast-model accepted')
     },
     20_000,

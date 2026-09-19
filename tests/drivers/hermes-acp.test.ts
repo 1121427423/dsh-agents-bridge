@@ -154,7 +154,7 @@ describe('the hermes descriptor agrees with its capture', () => {
   })
 
   it('stays `model: false` even with the driver\'s second lever, and here is why', () => {
-    // The driver grew a second model lever (`session/set_config_option` on the
+    // The driver grew a second model lever (`session/set_model` on the
     // session's advertised selector), which flipped `model` to true for the two
     // Qoder identities. It does NOT help here, and the reason is in these bytes:
     // there is no `configOptions` at all, so there is no selector to address.

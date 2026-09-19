@@ -24,7 +24,13 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { PromptSection } from '@deepseek-ai/dsh-system-prompt'
-import { createBackend } from './drivers/index.ts'
+import {
+  ACP_KEEPALIVE_ENV,
+  ACP_KEEPALIVE_IDLE_DEFAULT_MS,
+  createAcpBackend,
+  createAcpResidentPool,
+  createBackend,
+} from './drivers/index.ts'
 import { attachHostApi, type WebRuntimeFace, type WebServerFace } from './host/api.ts'
 import { installDriverRuntime } from './integrate.ts'
 import { createJobRegistrar, type JobSeat, type JobsFace } from './host/jobs.ts'
@@ -102,6 +108,16 @@ export interface Config {
    * SIGTERM → SIGKILL grace window for cancellation, in ms. Default 5000.
    */
   readonly graceMs?: number
+  /**
+   * Idle time (ms) before a resident ACP engine process is parked away.
+   *
+   * When > 0, a completed ACP turn leaves the engine process alive and the next
+   * run reuses it, skipping the cold start. Default
+   * `ACP_KEEPALIVE_IDLE_DEFAULT_MS` (1h); `<= 0` disables residency (every run
+   * spawns fresh, the pre-residency behaviour). Overridable per deployment with
+   * `DSH_AGENTS_BRIDGE_ACP_KEEPALIVE_MS`.
+   */
+  readonly acpKeepAliveMs?: number
 }
 
 /**
@@ -121,6 +137,19 @@ export function apply(ctx: Context, config: Config = {}): void {
   installDriverRuntime(config.graceMs)
 
   /**
+   * ACP residency: keep a completed engine process alive so the next run skips
+   * the cold start. Defaults to 1h idle; `acpKeepAliveMs <= 0` (or the
+   * `DSH_AGENTS_BRIDGE_ACP_KEEPALIVE_MS=0` env) disables it, restoring the
+   * one-shot behaviour. The pool is owned by this plugin fiber and torn down
+   * with it.
+   */
+  const acpKeepAliveMs = resolveAcpKeepAliveMs(config.acpKeepAliveMs)
+  const acpResident =
+    acpKeepAliveMs > 0
+      ? createAcpResidentPool({ idleMs: acpKeepAliveMs, logger })
+      : undefined
+
+  /**
    * The manager options object, kept MUTABLE on purpose.
    *
    * The settings namespace below resolves to `schema ← this composition entry ←
@@ -136,8 +165,10 @@ export function apply(ctx: Context, config: Config = {}): void {
   const managerOptions: MutableManagerOptions = {
     logger,
     // `createBackend` is the seam that keeps the kernel free of driver imports:
-    // the kernel asks for a family, the entry decides what implements it.
-    createBackend,
+    // the kernel asks for a family, the entry decides what implements it. The
+    // ACP family gets the resident pool; every other family is untouched.
+    createBackend: (family, deps) =>
+      family === 'acp' ? createAcpBackend(deps, undefined, acpResident) : createBackend(family, deps),
     ...(config.overrides === undefined ? {} : { overrides: config.overrides }),
     ...(config.descriptors === undefined ? {} : { extraDescriptors: config.descriptors }),
     ...(config.storeDir === undefined ? {} : { storeDir: config.storeDir }),
@@ -217,6 +248,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       // fiber's effects CONCURRENTLY, so the scope below cannot rely on its own
       // teardown winning that race — the handle is closed here, synchronously.
       unmountHostApi?.()
+      // Tear down resident ACP engine processes before the manager goes away.
+      void acpResident?.dispose()
       // `void`: the effect disposer is synchronous by contract; disposal of the
       // child process groups continues in the background and is not awaited
       // (awaiting it would make plugin unload wait on a kill grace window).
@@ -325,6 +358,23 @@ export function apply(ctx: Context, config: Config = {}): void {
   // still a working plugin — `agents_probe` reports the empty surface and the
   // model learns the boundary (see docs/design.md §3, type ③).
   logger.info('dsh-agents-bridge loaded', { tools: TOOL_NAMES.length, configuredIds })
+}
+
+/**
+ * Resolve the ACP residency idle window.
+ *
+ * Precedence: the plugin's `acpKeepAliveMs` config field, then the
+ * `DSH_AGENTS_BRIDGE_ACP_KEEPALIVE_MS` environment variable, then the 1h
+ * default. A non-positive result disables residency.
+ */
+function resolveAcpKeepAliveMs(configured?: number): number {
+  if (configured !== undefined && Number.isFinite(configured)) return configured
+  const raw = process.env[ACP_KEEPALIVE_ENV]
+  if (raw !== undefined && raw.trim() !== '') {
+    const parsed = Number(raw)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return ACP_KEEPALIVE_IDLE_DEFAULT_MS
 }
 
 /**

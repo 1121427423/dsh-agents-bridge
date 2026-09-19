@@ -172,20 +172,21 @@ export const DESKTOP_TRACK_DESCRIPTORS: readonly AgentDescriptor[] = [
     //    engine had had all along. The measurement has two halves, and the
     //    earlier draft of this comment carried only the first:
     //
-    //      * the ENGINE can choose a model. `session/set_config_option`
-    //        `{configId:"model"}` is ACCEPTED, is confirmed by a
-    //        `config_option_update` notification, REJECTS an unknown id with
-    //        -32602 "Invalid value for config option model: …", and — the part
-    //        that makes it real rather than cosmetic — the turn that follows is
-    //        billed against the chosen model (`_meta.quota.model_usage[0].model`
-    //        reads `qmodel` after the dial moves, `qfmodel` before).
+    //      * the ENGINE can choose a model. `session/set_model {sessionId,
+    //        modelId}` — the same call the reference implementation (multica
+    //        `server/pkg/agent/qoder.go`) sends — is ACCEPTED, is confirmed by a
+    //        trailing `config_option_update` notification, REJECTS an unknown id
+    //        with -32602 "Invalid or unavailable model: …", and — the part that
+    //        makes it real rather than cosmetic — the turn that follows is billed
+    //        against the chosen model (`_meta.quota.model_usage[0].model` reads
+    //        `qmodel` after the dial moves, `qfmodel` before).
     //      * the DRIVER now has a lever for that dial. It did not before: its
     //        only model lever used to be the `model` key of `session/new`
     //        params, and this engine IGNORES that (the same `currentModelId`
     //        with and without the parameter, and a bogus id accepted in
-    //        silence — contrast the bogus configId above, which answers
+    //        silence — contrast the bogus modelId above, which answers
     //        -32602). The driver now also drives the session's OWN advertised
-    //        model selector through `set_config_option`, so `true` is accurate
+    //        model selector through `session/set_model`, so `true` is accurate
     //        for both halves. See docs/findings-qoder-cn-desktop.md §5.5, §6.
     //
     //    ORDER IS LOAD-BEARING, and it is why the driver sets the model BEFORE
@@ -200,7 +201,7 @@ export const DESKTOP_TRACK_DESCRIPTORS: readonly AgentDescriptor[] = [
     //    `terminal/*` or `mcpServers` traffic appears in either capture.
     capabilities: { resume: true, model: true, effort: true, mcpConfig: false, clientTools: false },
     notes:
-      'Speaks ACP (`--yolo --acp`, both hidden options) and reads its OWN credential store (~/.qoder-cn/.auth) on launch. A bare launch does NOT inherit the running desktop login: the app keeps its own encrypted store and mints a PER-JOB token it pushes via QODER_SDK_AUTH_PAYLOAD_FILE instead of writing that store. So while that store is empty every run fails as `failed` at session/new with -32000 "Authentication required" — never as an empty success. The fix is out-of-band and needs no bridge change: run `qoderclicn login` once. Both directions are verified on this host — empty store → -32000; after login → a full turn with status=completed and the answer text intact. The bridge\'s own `authenticate` channel does NOT work here: the engine never answers that frame, so no login URL ever reaches the model. Once credentialed the session advertises `reasoning_effort` (xhigh/low/medium/none — there is no `high`), so the bridge can set the effort dial. It also advertises 14 models and reports a `currentModelId`, and a caller CAN now choose among them: the driver drives the session\'s own advertised model selector through `session/set_config_option`, because the engine ignores the model passed in `session/new` params (a bogus id there is accepted in silence, while a bogus configId is rejected with -32602). The coupling that makes the ORDER matter is measured on both Qoder builds: the effort levels are a function of the selected model (qfmodel offers four, qmodel offers only `none`, and the engine answers -32602 to a level it had accepted a moment earlier), so the driver sets the model BEFORE it reads effort (docs/findings-qoder-cn-desktop.md §3–6, §8.2, §10; docs/handoff-blockers.md record 11).',
+      'Speaks ACP (`--yolo --acp`, both hidden options) and reads its OWN credential store (~/.qoder-cn/.auth) on launch. A bare launch does NOT inherit the running desktop login: the app keeps its own encrypted store and mints a PER-JOB token it pushes via QODER_SDK_AUTH_PAYLOAD_FILE instead of writing that store. So while that store is empty every run fails as `failed` at session/new with -32000 "Authentication required" — never as an empty success. The fix is out-of-band and needs no bridge change: run `qoderclicn login` once. Both directions are verified on this host — empty store → -32000; after login → a full turn with status=completed and the answer text intact. The bridge\'s own `authenticate` channel does NOT work here: the engine never answers that frame, so no login URL ever reaches the model. Once credentialed the session advertises `reasoning_effort` (xhigh/low/medium/none — there is no `high`), so the bridge can set the effort dial. It also advertises 14 models and reports a `currentModelId`, and a caller CAN now choose among them: the driver drives the session\'s own advertised model selector through `session/set_model` — the same call the reference implementation uses — because the engine ignores the model passed in `session/new` params (a bogus id there is accepted in silence, while `set_model` rejects a bogus modelId with -32602). The coupling that makes the ORDER matter is measured on both Qoder builds: the effort levels are a function of the selected model (qfmodel offers four, qmodel offers only `none`, and the engine answers -32602 to a level it had accepted a moment earlier), so the driver sets the model BEFORE it reads effort (docs/findings-qoder-cn-desktop.md §3–6, §8.2, §10; docs/handoff-blockers.md record 11).',
   },
   {
     id: 'mimo',

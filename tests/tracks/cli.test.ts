@@ -431,11 +431,9 @@ describe('the qoderclicn identity on the CLI track', () => {
     expect(descriptor.track).toBe('cli')
     expect(descriptor.family).toBe('acp')
     expect(descriptor.command.executable).toBe('qoderclicn')
-    // `--acp` and ONLY `--acp`. The sibling desktop row pins `--yolo` too; here
-    // that would bake a permission bypass into an identity for no functional
-    // gain, because the driver's in-band `session/request_permission` handling
-    // is sufficient (measured — see tests/drivers/qoderclicn-acp.test.ts).
-    expect(descriptor.command.protocolArgs).toEqual(['--acp'])
+    // `--yolo --acp`, the same launch the reference implementation (multica)
+    // uses and the same protocol token as the desktop sibling row.
+    expect(descriptor.command.protocolArgs).toEqual(['--yolo', '--acp'])
     expect(descriptor.envPrefix).toBe('QODERCLICN')
     // Distinct namespace from every other identity, so pinning QODERCLICN_PATH
     // moves nothing else (and vice versa) — including its desktop sibling.
@@ -473,7 +471,7 @@ describe('the qoderclicn identity on the CLI track', () => {
     expect(resolved.reason).toBeUndefined()
     expect(resolved.executablePath).toBe(shim)
     expect(resolved.command.interpreter).toBe(node)
-    expect(resolved.command.protocolArgs).toEqual(['--acp'])
+    expect(resolved.command.protocolArgs).toEqual(['--yolo', '--acp'])
     expect(resolved.descriptor.family).toBe('acp')
   })
 
@@ -511,17 +509,20 @@ describe('the qoderclicn identity on the CLI track', () => {
     })
   })
 
-  it('keeps the two Qoder identities distinct: different binary, namespace, argv', () => {
+  it('keeps the two Qoder identities distinct: different binary and namespace, aligned argv', () => {
     // The trap this guards: collapsing them into one row with a flag, on the
     // theory that "it is the same product". It is not the same BINARY — the
     // desktop one is the app's private bundle (1.1.53), this one the npm CLI
-    // (1.1.56) — and their argv legitimately differs.
+    // (1.1.56) — so the two rows stay. Their argv is now IDENTICAL
+    // (`--yolo --acp`, aligned with the reference implementation), which is why
+    // argv is asserted as EQUAL here and the distinction is carried by the
+    // binary, the env namespace and the track.
     const cli = builtinDescriptor('qoderclicn')
     const desktop = builtinDescriptor('qoder-cn')
     expect(cli.command.executable).not.toBe(desktop.command.executable)
     expect(cli.envPrefix).not.toBe(desktop.envPrefix)
     expect(cli.track).not.toBe(desktop.track)
-    expect(cli.command.protocolArgs).not.toEqual(desktop.command.protocolArgs)
+    expect(cli.command.protocolArgs).toEqual(desktop.command.protocolArgs)
   })
 })
 

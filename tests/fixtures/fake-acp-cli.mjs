@@ -23,6 +23,10 @@
  *    option set in its RESPONSE, and makes the effort levels depend on the
  *    selected model — so the driver's ordering (model before effort) is
  *    exercised rather than taken on faith. See `sessionState` below.
+ *  - `session/set_model` is the model dial (the reference implementation's
+ *    lever): VALIDATING (-32602 on an unknown model id), answers `{}`, and
+ *    emits the refreshed `config_option_update` notification BEFORE the
+ *    response — the real-engine ordering the driver reads.
  *  - Two opt-in knobs exist for that dial: `--no-model-option` hides the model
  *    selector (an engine with a real catalogue but nothing addressable), and
  *    `FAKE_ACP_DIAL_LOG=<path>` records the dials the engine ACCEPTED, which is
@@ -63,8 +67,23 @@ const scenario = scenarioAt >= 0 ? argv[scenarioAt + 1] : 'success'
 const noModelOption = argv.includes('--no-model-option')
 
 /**
- * When `FAKE_ACP_DIAL_LOG` is set to a path, every `session/set_config_option`
- * the engine RECEIVES is appended there as `<configId>=<value> <outcome>`.
+ * `--notify-set-model-once`: emit the post-dial `config_option_update` only for
+ * the FIRST `session/set_model` on this process.
+ *
+ * It exercises the driver's fallback path on a REUSED (adopted) client: with no
+ * notification for a later dial, the driver must fall back to the session's
+ * handshake rather than read back a capture left by the previous conversation.
+ * See the `session/set_model` handler.
+ */
+const notifySetModelOnce = argv.includes('--notify-set-model-once')
+/** How many `config_option_update` notifications this process has emitted. */
+let setModelNotified = 0
+
+/**
+ * When `FAKE_ACP_DIAL_LOG` is set to a path, every model/effort dial the engine
+ * RECEIVES is appended there as `<configId>=<value> <outcome>`. The model dial
+ * arrives as `session/set_model` (recorded as `model=<modelId>`), the effort
+ * dial as `session/set_config_option {configId:"thought_level"}`.
  *
  * Recorded on RECEIPT, before validation, and that is the whole point: "the
  * driver did not send this" is a decision, not a frame, so the engine's own
@@ -722,9 +741,41 @@ rl.on('line', (line) => {
       notify({ sessionUpdate: 'config_option_update', configOptions: buildConfigOptions() })
       return
     }
-    case 'session/set_model':
+    case 'session/set_model': {
+      // The reference implementation's model lever (multica qoder.go). On the
+      // real Qoder engines the RESPONSE is `{}` and the refreshed option set
+      // arrives in a trailing `config_option_update` notification — so this
+      // handler mirrors that: stateful, validating (-32602 on an unknown id),
+      // recording the dial on receipt, answering `{}`, then notifying.
+      const params = frame.params ?? {}
+      const modelId = params.modelId
+      const modelOption = buildConfigOptions().find((o) => o.id === 'model')
+      if (modelOption === undefined || !modelOption.options.some((o) => o.value === modelId)) {
+        recordDial('model', modelId, 'rejected')
+        fail(frame.id, -32602, `Invalid or unavailable model: ${modelId}`, { modelId })
+        return
+      }
+      sessionState.model = modelId
+      // The measured coupling: a level the NEW model does not offer does not
+      // survive the switch (the real engine resets it rather than keeping it).
+      const levels = EFFORT_LEVELS_BY_MODEL[modelId]
+      if (!levels.includes(sessionState.thoughtLevel)) sessionState.thoughtLevel = levels[0]
+      recordDial('model', modelId, 'accepted')
+      // Real-engine ordering (measured on qoderclicn 1.1.56): the
+      // `config_option_update` notification precedes the `{}` response, and the
+      // driver reads the notification — so it must be written FIRST.
+      //
+      // `--notify-set-model-once` models an engine that refreshes the option set
+      // only for the FIRST dial on a process. That is the shape which would let
+      // a stale capture survive on an ADOPTED (reused) client, so it is how the
+      // driver's "clear before dialing" fallback is exercised.
+      if (!notifySetModelOnce || setModelNotified < 1) {
+        setModelNotified += 1
+        notify({ sessionUpdate: 'config_option_update', configOptions: buildConfigOptions() })
+      }
       respond(frame.id, {})
       return
+    }
     case 'authenticate':
       respond(frame.id, {})
       return

@@ -136,6 +136,7 @@ import {
   type SpawnFn,
   type SpawnedProcess,
 } from './argv.ts'
+import type { AcpResidentEntry, AcpResidentPool } from './acp-resident.ts'
 
 // ── Launch contract ─────────────────────────────────────────────────────────
 
@@ -150,19 +151,65 @@ import {
  *    this driver cannot read.
  *  - `--acp-transport` selects stdio vs streamable-http. This driver is a stdio
  *    implementation, so the value is the run's, not a caller's.
+ *  - `--yolo` is the headless bypass-permissions switch the Qoder descriptors
+ *    supply in `protocolArgs` (aligned with the reference implementation, D45).
+ *    A caller must not be able to duplicate it into `--yolo --acp --yolo`; the
+ *    same token is already bridge-owned in the generic dialect
+ *    (`generic-argv.ts`). Blocking the TOKEN does not close the escape hatch —
+ *    `--permission-mode` below still is the run's choice.
  *
  * `--permission-mode` is deliberately NOT blocked: unlike the stream-json
  * dialects, ACP has a real in-band permission handshake
  * (`session/request_permission`), so the engine's mode is a legitimate choice
  * rather than something the bridge must force.
+ *
+ * THE TWO SCOPES DIFFER, and that is the point of the second constant below:
+ *
+ *  - **Caller-supplied `extraArgs`** are filtered by the FULL set. `--yolo`
+ *    belongs here: a caller must not be able to duplicate a switch the
+ *    descriptor already pinned.
+ *  - **Descriptor-supplied `argsPrefix`** (launch data the bridge does not own —
+ *    an interpreter plus a script path, say) is filtered by
+ *    {@link ACP_LAUNCH_PREFIX_BLOCKED_ARGS}, which carries ONLY the protocol
+ *    selector. A descriptor that legitimately pins its own `--yolo` keeps it;
+ *    dropping it there would silently change how a custom runtime launches.
  */
 export const ACP_BLOCKED_ARGS: BlockedArgs = {
+  '--acp': 'standalone',
+  '--acp-transport': 'withValue',
+  '--yolo': 'standalone',
+}
+
+/**
+ * The subset of {@link ACP_BLOCKED_ARGS} applied to a DESCRIPTOR-supplied
+ * `argsPrefix`.
+ *
+ * Only the protocol selector is filtered there, because the prefix is launch
+ * data rather than caller input: a descriptor may pin its own permission mode
+ * (`--yolo`) and must not have it removed silently. Caller-supplied `extraArgs`
+ * still get the full set — see the note on {@link ACP_BLOCKED_ARGS}.
+ */
+export const ACP_LAUNCH_PREFIX_BLOCKED_ARGS: BlockedArgs = {
   '--acp': 'standalone',
   '--acp-transport': 'withValue',
 }
 
 /** Idle-watchdog default, matching the other 300s families. */
 export const DEFAULT_ACP_IDLE_TIMEOUT_MS = 300_000
+
+/**
+ * Default idle time before a RESIDENT ACP engine process is parked away.
+ *
+ * Residency keeps a completed engine process alive so the next run skips the
+ * cold start (spawn → initialize → command-table load). The user picks the
+ * trade-off: only the first initialization is acceptable. Override with the
+ * `DSH_AGENTS_BRIDGE_ACP_KEEPALIVE_MS` environment variable or the plugin's
+ * `acpKeepAliveMs` config field; `<= 0` disables residency entirely.
+ */
+export const ACP_KEEPALIVE_IDLE_DEFAULT_MS = 3_600_000
+
+/** Environment variable that overrides {@link ACP_KEEPALIVE_IDLE_DEFAULT_MS}. */
+export const ACP_KEEPALIVE_ENV = 'DSH_AGENTS_BRIDGE_ACP_KEEPALIVE_MS'
 
 /** `initialize` protocol version. ACP v1 is the only one multica speaks. */
 export const ACP_PROTOCOL_VERSION = 1
@@ -1162,6 +1209,16 @@ export class AcpClient {
   /** The backend session id, learned from `session/new` (or `session/resume`). */
   sessionId = ''
 
+  /**
+   * The most recent `config_option_update` payload, captured even while the
+   * update gate is closed (before `session/prompt`). `session/set_model`
+   * answers `{}` on the Qoder engines — the refreshed option set arrives in a
+   * trailing `config_option_update` notification instead of the response — so
+   * the model dial reads this to validate effort against the POST-selection
+   * set. Set for any `config_option_update`, whatever its source.
+   */
+  latestConfigOptions: Record<string, unknown> | undefined = undefined
+
   /** Invoked for every accepted `session/update` notification. */
   onUpdate: (type: AcpUpdateType, update: Record<string, unknown>) => void = () => {}
   /** Invoked for every non-`session/update` notification (vendor extensions). */
@@ -1397,9 +1454,16 @@ export class AcpClient {
     const update = p === undefined ? undefined : p['update']
     if (update === undefined) return
     const type = classifyUpdate(update)
+    const updateRecord = asRecord(update) ?? {}
+    // Captured BEFORE the accept gate: `session/set_model` refreshes the option
+    // set in a `config_option_update` notification that can arrive while the
+    // gate is still closed (setup phase), and the dial reads it afterwards.
+    if (type === 'config_option_update') {
+      this.latestConfigOptions = updateRecord
+    }
     if (!this.acceptUpdate()) return
     this.onActivity()
-    this.onUpdate(type, asRecord(update) ?? {})
+    this.onUpdate(type, updateRecord)
   }
 
   // ── agent → client requests ───────────────────────────────────────────────
@@ -1690,6 +1754,19 @@ function nextSessionId(at: number): string {
   return `dsh-acp-${at.toString(36)}-${sessionCounter.toString(36)}`
 }
 
+/**
+ * Pool key for a resident engine process.
+ *
+ * `agentId` separates identities that happen to share one binary (qoder-cn vs
+ * qoderclicn), and `cwd` separates conversations rooted in different
+ * directories — the ACP session's `cwd` is fixed at `session/new`, so a pooled
+ * process must never serve a run whose cwd differs from the one it was created
+ * with.
+ */
+export function residentKey(agentId: string, cwd: string): string {
+  return `${agentId}::${cwd}`
+}
+
 /** Extract the session id from a `session/new` / `session/resume` result. */
 export function extractSessionId(result: unknown): string {
   const record = asRecord(result)
@@ -1854,12 +1931,15 @@ export async function runAcp(
   deps: DriverDeps,
   signal: AbortSignal,
   rt: DriverRuntime,
+  resident?: AcpResidentPool,
 ): Promise<AgentSessionHandle> {
   const now = rt.now ?? Date.now
   const startedAt = now()
 
   const caps = acpClientCapabilities(deps.env)
   const authMethod = acpAuthMethodFromEnv(deps.env)
+  const cwd = opts.cwd ?? process.cwd()
+  const key = residentKey(opts.agent, cwd)
 
   const args = buildAcpArgs(
     { protocolArgs: deps.command.protocolArgs, extraArgs: opts.extraArgs },
@@ -1868,7 +1948,11 @@ export async function runAcp(
   const commandLine = buildCommandLine(
     {
       ...deps.command,
-      argsPrefix: filterLaunchPrefix(deps.command.argsPrefix, ACP_BLOCKED_ARGS, deps.logger),
+      argsPrefix: filterLaunchPrefix(
+        deps.command.argsPrefix,
+        ACP_LAUNCH_PREFIX_BLOCKED_ARGS,
+        deps.logger,
+      ),
     },
     args,
   )
@@ -1885,32 +1969,63 @@ export async function runAcp(
     onCancel: (reason) => settleCancelled(reason),
   })
 
-  const child = rt.spawn({
-    command: commandLine.command,
-    args: commandLine.args,
-    cwd: opts.cwd,
-    env: deps.env,
-  })
+  // Adopt a parked resident process when one is available and compatible: same
+  // agent + same cwd, and — for a resume — bound to the exact backend session
+  // being continued. Anything else falls through to a fresh spawn.
+  let adopted: AcpResidentEntry | undefined
+  if (resident !== undefined && resident.enabled) {
+    const candidate = resident.acquire(key)
+    if (candidate !== undefined) {
+      const resume = opts.resumeSessionId
+      if (resume !== undefined && resume !== '' && candidate.sessionId !== resume) {
+        // The parked process is bound to a DIFFERENT conversation; leave it
+        // idle rather than force a foreign resume onto it.
+        resident.release(candidate, candidate.sessionId)
+      } else {
+        adopted = candidate
+      }
+    }
+  }
+
+  let child: SpawnedProcess
+  let client: AcpClient
+  if (adopted !== undefined) {
+    child = adopted.child
+    client = adopted.client
+    deps.logger.debug('acp resident process adopted', {
+      agentId: opts.agent,
+      cwd,
+      backendSessionId: client.sessionId,
+    })
+  } else {
+    child = rt.spawn({
+      command: commandLine.command,
+      args: commandLine.args,
+      cwd,
+      env: deps.env,
+    })
+    client = new AcpClient({
+      child,
+      logger: deps.logger,
+      now,
+      caps,
+      cwd,
+      env: deps.env,
+      spawn: rt.spawn,
+    })
+    // Attach the reader BEFORE anything is written (see the module header).
+    client.start()
+    deps.logger.debug('driver launched', {
+      family: 'acp',
+      command: commandLine.command,
+      args: commandLine.args,
+      fsCapability: caps.fs,
+      terminalCapability: caps.terminal,
+    })
+  }
   // ABI v6: hand the kernel the pid it persists for the post-restart reap (IM-4).
+  // For an adopted process this is the SAME group leader the first run parked.
   session.attachProcess(child.pid)
-
-  deps.logger.debug('driver launched', {
-    family: 'acp',
-    command: commandLine.command,
-    args: commandLine.args,
-    fsCapability: caps.fs,
-    terminalCapability: caps.terminal,
-  })
-
-  const client = new AcpClient({
-    child,
-    logger: deps.logger,
-    now,
-    caps,
-    cwd: opts.cwd,
-    env: deps.env,
-    spawn: rt.spawn,
-  })
 
   const usage = emptyAccumulator()
   let rawReasoning = 0
@@ -1989,9 +2104,6 @@ export async function runAcp(
     deps.logger.debug('acp: vendor notification', { method, params: JSON.stringify(params).slice(0, 200) })
   }
 
-  // Attach the reader BEFORE anything is written (see the module header).
-  client.start()
-
   // RR-MI-7: a stream-limit breach is a terminal condition, not bookkeeping.
   // `dead` is read by nobody and rejecting the pending requests is a no-op when
   // the run is not awaiting one, so settle through the same failure path the
@@ -2030,6 +2142,8 @@ export async function runAcp(
       ...(client.sessionId === '' ? {} : { backendSessionId: client.sessionId }),
     })
     void child.terminate().catch(() => {})
+    // A cancelled/timed-out resident process may be wedged; never park it again.
+    if (adopted !== undefined && resident !== undefined) void resident.evict(key)
   }
 
   settleCancelled = (reason: string) => {
@@ -2076,97 +2190,133 @@ export async function runAcp(
 
   // ── the conversation, on a detached task (invariant 1) ──
   void (async () => {
-    // 1. Handshake. The client capabilities advertised here are exactly the ones
-    //    the handlers above will actually serve: never advertise, then refuse.
-    const initParams: Record<string, unknown> = {
-      protocolVersion: ACP_PROTOCOL_VERSION,
-      clientInfo: { name: 'dsh-agents-bridge', version: '0.1.0' },
-      clientCapabilities: {},
-    }
-    if (caps.fs || caps.terminal) {
-      initParams['clientCapabilities'] = {
-        ...(caps.fs ? { fs: { readTextFile: true, writeTextFile: true } } : {}),
-        ...(caps.terminal ? { terminal: true } : {}),
-      }
-    }
+    let sessionResult: unknown
 
-    let initResult: unknown
-    try {
-      initResult = await client.request('initialize', initParams)
-    } catch (err) {
-      // A missing binary or a refused launch surfaces here as a closed stream,
-      // because the reader dies before any response arrives. Attach the spawn
-      // error so the message names the REAL cause (ENOENT, EACCES, …) instead
-      // of only the symptom.
-      const spawnError = await child.exited
-        .then((e) => e.error)
-        .catch(() => undefined)
-      return failBeforePrompt(
-        spawnError === undefined
-          ? `acp initialize failed: ${errorText(err)}`
-          : `acp initialize failed: ${spawnError}`,
-      )
-    }
-
-    const authMethods = extractAuthMethods(initResult)
-    if (authMethods.length > 0) {
-      deps.logger.info('acp engine advertises auth methods', { authMethods })
-      if (authMethod === undefined) {
-        // Reported, not guessed: picking a login flow is the user's decision.
-        session.push(
-          event(now, 'status', {
-            content:
-              `engine requires authentication; it accepts: ${authMethods.join(', ')}. ` +
-              `Set ${ACP_AUTH_METHOD_ENV} to one of these to have the bridge authenticate.`,
-          }),
-        )
-      } else if (!authMethods.includes(authMethod)) {
-        return failBeforePrompt(
-          `acp engine does not offer auth method ${JSON.stringify(authMethod)}; ` +
-            `it accepts: ${authMethods.join(', ')}`,
-        )
+    if (adopted !== undefined) {
+      // The transport is already initialized (and, where required, already
+      // authenticated). Reuse it:
+      //  - a resume of the SAME backend session skips `session/new` and the
+      //    model/effort dials — the engine kept the conversation's state;
+      //  - a fresh run on the pooled process pays only `session/new` + dials.
+      const resuming =
+        opts.resumeSessionId !== undefined &&
+        opts.resumeSessionId !== '' &&
+        client.sessionId === opts.resumeSessionId
+      if (resuming) {
+        deps.logger.debug('acp resident session reused', {
+          agentId: opts.agent,
+          backendSessionId: client.sessionId,
+        })
+        sessionResult = undefined
       } else {
         try {
-          await client.request('authenticate', { methodId: authMethod })
+          const created = await client.request('session/new', {
+            cwd,
+            mcpServers: [],
+            ...(opts.model === undefined || opts.model === '' ? {} : { model: opts.model }),
+          })
+          sessionResult = created
+          client.sessionId = extractSessionId(created)
+          if (client.sessionId === '') {
+            return failBeforePrompt('acp session/new returned no session id')
+          }
         } catch (err) {
-          return failBeforePrompt(`acp authenticate failed: ${errorText(err)}`)
+          return failBeforePrompt(`acp session/new failed: ${errorText(err)}`)
         }
       }
-    }
+    } else {
+      // 1. Handshake. The client capabilities advertised here are exactly the
+      //    ones the handlers above will actually serve: never advertise, then
+      //    refuse.
+      const initParams: Record<string, unknown> = {
+        protocolVersion: ACP_PROTOCOL_VERSION,
+        clientInfo: { name: 'dsh-agents-bridge', version: '0.1.0' },
+        clientCapabilities: {},
+      }
+      if (caps.fs || caps.terminal) {
+        initParams['clientCapabilities'] = {
+          ...(caps.fs ? { fs: { readTextFile: true, writeTextFile: true } } : {}),
+          ...(caps.terminal ? { terminal: true } : {}),
+        }
+      }
 
-    // 2. Session. `session/resume` when the caller pinned an id, else `session/new`.
-    const cwd = opts.cwd ?? process.cwd()
-    let sessionResult: unknown
-    try {
-      if (opts.resumeSessionId !== undefined && opts.resumeSessionId !== '') {
-        const resumed = await client.request('session/resume', {
-          cwd,
-          sessionId: opts.resumeSessionId,
-          mcpServers: [],
-        })
-        sessionResult = resumed
-        client.sessionId = extractSessionId(resumed) || opts.resumeSessionId
-      } else {
-        const created = await client.request('session/new', {
-          cwd,
-          mcpServers: [],
-          // Best effort, and deliberately kept: this is the ACP-standard way to
-          // name a model, and engines that honour it need nothing more. It is
-          // NOT sufficient on its own — at least one engine ignores it in
-          // silence — which is why step 2b below also drives the session's
-          // advertised model selector. Sending both is safe: the engine that
-          // ignores this one ignores it whether or not the dial is set.
-          ...(opts.model === undefined || opts.model === '' ? {} : { model: opts.model }),
-        })
-        sessionResult = created
-        client.sessionId = extractSessionId(created)
-        if (client.sessionId === '') {
-          return failBeforePrompt('acp session/new returned no session id')
+      let initResult: unknown
+      try {
+        initResult = await client.request('initialize', initParams)
+      } catch (err) {
+        // A missing binary or a refused launch surfaces here as a closed stream,
+        // because the reader dies before any response arrives. Attach the spawn
+        // error so the message names the REAL cause (ENOENT, EACCES, …) instead
+        // of only the symptom.
+        const spawnError = await child.exited
+          .then((e) => e.error)
+          .catch(() => undefined)
+        return failBeforePrompt(
+          spawnError === undefined
+            ? `acp initialize failed: ${errorText(err)}`
+            : `acp initialize failed: ${spawnError}`,
+        )
+      }
+
+      const authMethods = extractAuthMethods(initResult)
+      if (authMethods.length > 0) {
+        deps.logger.info('acp engine advertises auth methods', { authMethods })
+        if (authMethod === undefined) {
+          // Reported, not guessed: picking a login flow is the user's decision.
+          session.push(
+            event(now, 'status', {
+              content:
+                `engine requires authentication; it accepts: ${authMethods.join(', ')}. ` +
+                `Set ${ACP_AUTH_METHOD_ENV} to one of these to have the bridge authenticate.`,
+            }),
+          )
+        } else if (!authMethods.includes(authMethod)) {
+          return failBeforePrompt(
+            `acp engine does not offer auth method ${JSON.stringify(authMethod)}; ` +
+              `it accepts: ${authMethods.join(', ')}`,
+          )
+        } else {
+          try {
+            await client.request('authenticate', { methodId: authMethod })
+          } catch (err) {
+            return failBeforePrompt(`acp authenticate failed: ${errorText(err)}`)
+          }
         }
       }
-    } catch (err) {
-      const rpc = opts.resumeSessionId === undefined ? 'session/new' : 'session/resume'
-      return failBeforePrompt(`acp ${rpc} failed: ${errorText(err)}`)
+
+      // 2. Session. `session/resume` when the caller pinned an id, else
+      //    `session/new`.
+      try {
+        if (opts.resumeSessionId !== undefined && opts.resumeSessionId !== '') {
+          const resumed = await client.request('session/resume', {
+            cwd,
+            sessionId: opts.resumeSessionId,
+            mcpServers: [],
+          })
+          sessionResult = resumed
+          client.sessionId = extractSessionId(resumed) || opts.resumeSessionId
+        } else {
+          const created = await client.request('session/new', {
+            cwd,
+            mcpServers: [],
+            // Best effort, and deliberately kept: this is the ACP-standard way to
+            // name a model, and engines that honour it need nothing more. It is
+            // NOT sufficient on its own — at least one engine ignores it in
+            // silence — which is why step 2b below also drives the session's
+            // advertised model selector. Sending both is safe: the engine that
+            // ignores this one ignores it whether or not the dial is set.
+            ...(opts.model === undefined || opts.model === '' ? {} : { model: opts.model }),
+          })
+          sessionResult = created
+          client.sessionId = extractSessionId(created)
+          if (client.sessionId === '') {
+            return failBeforePrompt('acp session/new returned no session id')
+          }
+        }
+      } catch (err) {
+        const rpc = opts.resumeSessionId === undefined ? 'session/new' : 'session/resume'
+        return failBeforePrompt(`acp ${rpc} failed: ${errorText(err)}`)
+      }
     }
 
     session.push(
@@ -2182,118 +2332,122 @@ export async function runAcp(
     // 2b. Model, best effort — and strictly BEFORE effort, because the effort
     //     levels are a function of the selected model (see `optionSource`).
     //
-    //     Two levers exist and only one of them is general. `session/new`'s
-    //     `model` param is the ACP-standard selector and is already sent above,
-    //     but at least one engine IGNORES it: measured on both Qoder builds, a
-    //     bogus id is accepted in silence and `currentModelId` never moves. The
-    //     lever that engine actually obeys — and VALIDATES, answering -32602 for
-    //     an unknown id or a display name — is
-    //     `session/set_config_option {configId:"model"}`, the same call the
-    //     effort dial below already uses. So drive the advertised selector, and
-    //     skip it when the session advertises none rather than guess an id.
+    //     The dial is `session/set_model` — the reference implementation's
+    //     lever (multica `server/pkg/agent/qoder.go` sends exactly
+    //     `{sessionId, modelId}`). Measured on both Qoder builds it VALIDATES,
+    //     answering -32602 for an unknown id, where the `model` param of
+    //     `session/new` is accepted in silence and never moves
+    //     `currentModelId`. `session/new`'s `model` param is still sent above
+    //     (ACP-standard, harmless), but the advertised selector is what the
+    //     engine actually obeys. Skip the dial when the session advertises no
+    //     selector rather than guess an id.
     //
     //     `optionSource` is what the effort step reads. It starts as the
-    //     handshake result and is replaced by the `set_config_option` RESPONSE
-    //     when the engine echoes one, because that response is the engine's own
-    //     statement of the POST-selection option set. Measured 2026-09-19 on
-    //     `qoderclicn` 1.1.56: the response carries the full updated
-    //     `configOptions` (a trailing `config_option_update` notification
-    //     arrives ~3 ms EARLIER, so reading the response is both sufficient and
-    //     ordered). This matters because the levels really do move with the
-    //     model — `qfmodel` offers `xhigh/low/medium/none`, `qmodel` offers only
-    //     `none` — so validating effort against the handshake's copy would send
-    //     a level the engine has just stopped accepting.
-    let optionSource: unknown = sessionResult
-    if (opts.model !== undefined && opts.model !== '') {
-      const model = extractModelOption(sessionResult)
-      if (model === undefined) {
-        deps.logger.info(
-          'acp session advertises no model selector; the model travelled only in the session/new params',
-          { requested: opts.model },
-        )
-      } else if (!model.values.includes(opts.model)) {
-        deps.logger.warn('acp session does not advertise the requested model; running without it', {
-          requested: opts.model,
-          advertised: model.values.join(','),
-        })
-      } else {
-        try {
-          const applied = await client.request('session/set_config_option', {
-            sessionId: client.sessionId,
-            configId: model.configId,
-            value: opts.model,
+    //     handshake result. `session/set_model` answers `{}` on the Qoder
+    //     engines, so the POST-selection option set arrives in a trailing
+    //     `config_option_update` notification (measured 2026-09-19 on
+    //     `qoderclicn` 1.1.56) — captured on the client even while the update
+    //     gate is closed, and read here after the dial. This matters because
+    //     the levels really do move with the model — `qfmodel` offers
+    //     `xhigh/low/medium/none`, `qmodel` offers only `none` — so validating
+    //     effort against the handshake's copy would send a level the engine has
+    //     just stopped accepting.
+    // 2b/2c only run when this run produced (or refreshed) a session this turn:
+    // a resident RESUME inherits the model/effort the engine already applied.
+    if (sessionResult !== undefined) {
+      let optionSource: unknown = sessionResult
+      if (opts.model !== undefined && opts.model !== '') {
+        const model = extractModelOption(sessionResult)
+        if (model === undefined) {
+          deps.logger.info(
+            'acp session advertises no model selector; the model travelled only in the session/new params',
+            { requested: opts.model },
+          )
+        } else if (!model.values.includes(opts.model)) {
+          deps.logger.warn('acp session does not advertise the requested model; running without it', {
+            requested: opts.model,
+            advertised: model.values.join(','),
           })
-          const echoed = asRecord(applied)
-          const carriesOptions =
-            echoed !== undefined &&
-            (Array.isArray(echoed['configOptions']) || Array.isArray(echoed['config_options']))
-          if (carriesOptions) {
-            optionSource = applied
-          } else {
-            // Say so rather than pretend the levels were re-read: the effort
-            // step is about to validate against the pre-selection copy.
-            deps.logger.debug(
-              'acp set_config_option echoed no option set; effort will be validated against the handshake copy',
-            )
+        } else {
+          try {
+            // Drop any capture from an EARLIER session before dialing: on an
+            // adopted (resident) process this client is reused across turns, so a
+            // stale set from the previous conversation would otherwise be read
+            // back below and passed off as this turn's post-selection options.
+            client.latestConfigOptions = undefined
+            await client.request('session/set_model', {
+              sessionId: client.sessionId,
+              modelId: opts.model,
+            })
+            if (client.latestConfigOptions !== undefined) {
+              // The engine's own statement of the POST-selection set, delivered
+              // as a notification because the set_model RESPONSE is `{}`.
+              optionSource = client.latestConfigOptions
+            } else {
+              // Say so rather than pretend the levels were re-read: the effort
+              // step is about to validate against the pre-selection copy.
+              deps.logger.debug(
+                'acp set_model emitted no config_option_update; effort will be validated against the handshake copy',
+              )
+            }
+            // The only observable for the happy path: a successful dial emits no
+            // frame of its own, so a full-stack acceptance run needs this line
+            // (DSH_AGENTS_BRIDGE_DEBUG=1) to show the selector was really driven
+            // rather than silently skipped.
+            deps.logger.debug('acp model selector driven', {
+              modelId: opts.model,
+              optionSetEchoed: client.latestConfigOptions !== undefined,
+            })
+          } catch (err) {
+            // Never fatal: the run proceeds on whatever the engine kept.
+            deps.logger.warn('acp runtime rejected the model request; running anyway', {
+              requested: opts.model,
+              error: errorText(err),
+            })
           }
-          // The only observable for the happy path: a successful dial emits no
-          // frame of its own, so a full-stack acceptance run needs this line
-          // (DSH_AGENTS_BRIDGE_DEBUG=1) to show the selector was really driven
-          // rather than silently skipped.
-          deps.logger.debug('acp model selector driven', {
-            configId: model.configId,
-            requested: opts.model,
-            optionSetEchoed: carriesOptions,
-          })
-        } catch (err) {
-          // Never fatal: the run proceeds on whatever the engine kept.
-          deps.logger.warn('acp runtime rejected the model request; running anyway', {
-            requested: opts.model,
-            error: errorText(err),
-          })
         }
       }
-    }
 
-    // 2c. Reasoning effort, best effort — against the POST-selection option set
-    //     (`optionSource`), never the handshake's copy. A session that
-    //     advertises no effort option is normal (most runtimes do not) and must
-    //     not fail the run; a level the session does not offer is skipped rather
-    //     than sent, because an unadvertised token invites a hard error on a
-    //     call whose failure we deliberately swallow.
-    if (opts.effort !== undefined && opts.effort !== '') {
-      const option = extractEffortOption(optionSource)
-      if (option === undefined) {
-        deps.logger.warn('acp session advertises no reasoning-effort option; running without it', {
-          requested: opts.effort,
-        })
-      } else if (!option.values.includes(opts.effort)) {
-        deps.logger.warn('acp session does not advertise the requested effort; running without it', {
-          requested: opts.effort,
-          advertised: option.values.join(','),
-        })
-      } else {
-        try {
-          await client.request('session/set_config_option', {
-            sessionId: client.sessionId,
-            configId: option.configId,
-            value: opts.effort,
-          })
-          // Same reason as the model step's line: a successful dial emits no
-          // frame of its own, so without this the happy path is INVISIBLE to a
-          // full-stack acceptance run — and "the level was sent" versus "the
-          // level was silently skipped" would look identical from outside.
-          deps.logger.debug('acp effort selector driven', {
-            configId: option.configId,
+      // 2c. Reasoning effort, best effort — against the POST-selection option set
+      //     (`optionSource`), never the handshake's copy. A session that
+      //     advertises no effort option is normal (most runtimes do not) and must
+      //     not fail the run; a level the session does not offer is skipped rather
+      //     than sent, because an unadvertised token invites a hard error on a
+      //     call whose failure we deliberately swallow.
+      if (opts.effort !== undefined && opts.effort !== '') {
+        const option = extractEffortOption(optionSource)
+        if (option === undefined) {
+          deps.logger.warn('acp session advertises no reasoning-effort option; running without it', {
             requested: opts.effort,
-            optionSource: optionSource === sessionResult ? 'handshake' : 'post-selection',
           })
-        } catch (err) {
-          // Never fatal: the prompt runs at the runtime's own default.
-          deps.logger.warn('acp runtime rejected the effort request; running anyway', {
+        } else if (!option.values.includes(opts.effort)) {
+          deps.logger.warn('acp session does not advertise the requested effort; running without it', {
             requested: opts.effort,
-            error: errorText(err),
+            advertised: option.values.join(','),
           })
+        } else {
+          try {
+            await client.request('session/set_config_option', {
+              sessionId: client.sessionId,
+              configId: option.configId,
+              value: opts.effort,
+            })
+            // Same reason as the model step's line: a successful dial emits no
+            // frame of its own, so without this the happy path is INVISIBLE to a
+            // full-stack acceptance run — and "the level was sent" versus "the
+            // level was silently skipped" would look identical from outside.
+            deps.logger.debug('acp effort selector driven', {
+              configId: option.configId,
+              requested: opts.effort,
+              optionSource: optionSource === sessionResult ? 'handshake' : 'post-selection',
+            })
+          } catch (err) {
+            // Never fatal: the prompt runs at the runtime's own default.
+            deps.logger.warn('acp runtime rejected the effort request; running anyway', {
+              requested: opts.effort,
+              error: errorText(err),
+            })
+          }
         }
       }
     }
@@ -2328,23 +2482,12 @@ export async function runAcp(
     //     the response boundary would drop the answer.
     await drainNotifications(client, opts, deps)
 
-    // 4. Settle. Close the engine's stdin and give it a bounded window to exit:
-    //    an ACP engine is a PERSISTENT SERVER that keeps running after a turn,
-    //    so awaiting its exit without signalling EOF would hang the run forever
-    //    (measured against the real engine and against the fixture peer).
+    // 4. Settle. When residency is enabled and the turn is healthy, the engine
+    //    process stays alive for the next run (an ACP engine is a persistent
+    //    server). Otherwise close stdin and give it a bounded window to exit —
+    //    awaiting its exit without signalling EOF would hang the run forever.
     accepting = false
-    const exitedCleanly = await client.shutdown(ACP_SHUTDOWN_GRACE_MS)
-    if (!exitedCleanly) {
-      deps.logger.debug('acp: engine ignored stdin EOF; forcing shutdown', {
-        graceMs: ACP_SHUTDOWN_GRACE_MS,
-      })
-      void child.terminate().catch(() => {})
-    }
-    const exit: ProcessExit = await child.exited.catch(() => ({
-      code: null,
-      signal: null,
-      error: 'process exit unavailable',
-    }))
+    const keepAlive = resident !== undefined && resident.enabled
 
     if (terminalReason !== 'none' || session.result !== undefined) {
       // Cancel/timeout already settled; make sure the group is gone so nothing
@@ -2353,6 +2496,8 @@ export async function runAcp(
       // — an engine that never releases one would otherwise leak it (IM-15).
       await client.dispose()
       void child.terminate().catch(() => {})
+      // A cancelled/timed-out resident process must not be parked again.
+      if (adopted !== undefined && resident !== undefined) void resident.evict(key)
       return
     }
 
@@ -2361,6 +2506,7 @@ export async function runAcp(
 
     let status: AgentResult['status'] = 'completed'
     let errMsg = ''
+    let exit: ProcessExit = { code: null, signal: null }
 
     if (promptError !== '') {
       status = 'failed'
@@ -2375,50 +2521,98 @@ export async function runAcp(
         upstreamError !== ''
           ? upstreamError
           : `acp turn ended with stopReason "${promptStopReason}"`
-    } else if (exit.error !== undefined) {
-      status = 'failed'
-      errMsg = `acp failed to start: ${exit.error}`
-    } else if (!promptAnswered) {
-      status = 'failed'
-      errMsg =
-        diagnosis !== ''
-          ? `acp stream ended without a prompt response: ${diagnosis}`
-          : 'acp stream ended without a prompt response'
-    } else if (exitedCleanly && (exit.code ?? 0) !== 0) {
-      // Only an exit the ENGINE chose counts against it. `exitedCleanly` is
-      // exactly "it left on its own after EOF": when it is false the bridge
-      // waited out the grace window and signalled the process itself, so the
-      // code observed here is the bridge's doing, not a verdict on the turn.
-      //
-      // MEASURED (Qoder CN 1.1.53): the engine ignores stdin EOF, the bridge
-      // force-kills it, and its shutdown handler exits 143
-      // (`cleanup.handleShutdownSignal`, `reason="signal_term"`). Attributing
-      // that to the engine reported a turn that had already answered
-      // `stopReason: "end_turn"` — text in hand — as `failed` with `text: ''`.
-      // The guard is `exitedCleanly`, NOT a whitelist of exit codes: an engine
-      // that leaves on EOF of its own accord with a failure code is telling
-      // the truth and must still fail the run (see the `exits-nonzero`
-      // fixture scenario).
-      status = 'failed'
-      const detail = `exit status ${exit.code ?? 'null'}${exit.signal === null ? '' : ` (signal ${exit.signal})`}`
-      errMsg = diagnosis !== '' ? `${detail}: ${diagnosis}` : `acp exited with error: ${detail}`
+    } else if (!keepAlive) {
+      // The exit-dependent checks only apply to the one-shot path: a resident
+      // process is already up, so there is no spawn failure or teardown verdict
+      // to read.
+      const exitedCleanly = await client.shutdown(ACP_SHUTDOWN_GRACE_MS)
+      if (!exitedCleanly) {
+        deps.logger.debug('acp: engine ignored stdin EOF; forcing shutdown', {
+          graceMs: ACP_SHUTDOWN_GRACE_MS,
+        })
+        void child.terminate().catch(() => {})
+      }
+      exit = await child.exited.catch(() => ({
+        code: null,
+        signal: null,
+        error: 'process exit unavailable',
+      }))
+      if (exit.error !== undefined) {
+        status = 'failed'
+        errMsg = `acp failed to start: ${exit.error}`
+      } else if (!promptAnswered) {
+        status = 'failed'
+        errMsg =
+          diagnosis !== ''
+            ? `acp stream ended without a prompt response: ${diagnosis}`
+            : 'acp stream ended without a prompt response'
+      } else if (exitedCleanly && (exit.code ?? 0) !== 0) {
+        // Only an exit the ENGINE chose counts against it. `exitedCleanly` is
+        // exactly "it left on its own after EOF": when it is false the bridge
+        // waited out the grace window and signalled the process itself, so the
+        // code observed here is the bridge's doing, not a verdict on the turn.
+        //
+        // MEASURED (Qoder CN 1.1.53): the engine ignores stdin EOF, the bridge
+        // force-kills it, and its shutdown handler exits 143
+        // (`cleanup.handleShutdownSignal`, `reason="signal_term"`). Attributing
+        // that to the engine reported a turn that had already answered
+        // `stopReason: "end_turn"` — text in hand — as `failed` with `text: ''`.
+        // The guard is `exitedCleanly`, NOT a whitelist of exit codes: an engine
+        // that leaves on EOF of its own accord with a failure code is telling
+        // the truth and must still fail the run (see the `exits-nonzero`
+        // fixture scenario).
+        status = 'failed'
+        const detail = `exit status ${exit.code ?? 'null'}${exit.signal === null ? '' : ` (signal ${exit.signal})`}`
+        errMsg = diagnosis !== '' ? `${detail}: ${diagnosis}` : `acp exited with error: ${detail}`
+      }
     }
     if (status !== 'completed' && errMsg !== '' && diagnosis !== '' && !errMsg.includes(diagnosis)) {
       errMsg = `${errMsg}: ${diagnosis}`
     }
 
-    // Both exits dispose the client: it is the ONLY owner of the terminal
-    // children the engine asked us to spawn (each in its own detached group),
-    // and settle-time `child.terminate()` only reaches the engine itself. The
-    // engine is free to create a terminal and never release it; the run ending
-    // must still leave no process behind (IM-15).
-    await client.dispose()
+    if (keepAlive) {
+      if (status === 'completed') {
+        // Park the live engine process for the next run. The run settles here;
+        // the process stays up with its ACP session, and the next call adopts
+        // it and skips the cold start.
+        await client.flushWrites().catch(() => {})
+        if (adopted !== undefined) {
+          resident?.release(adopted, client.sessionId)
+        } else {
+          const entry: AcpResidentEntry = {
+            key,
+            agentId: opts.agent,
+            cwd,
+            client,
+            child,
+            sessionId: client.sessionId,
+            lastUsedAt: now(),
+            inUse: true,
+            dead: false,
+            idleTimer: undefined,
+          }
+          resident?.release(entry, client.sessionId)
+        }
+      } else {
+        // A failed turn must not keep a possibly-poisoned process resident.
+        await client.dispose()
+        void child.terminate().catch(() => {})
+        if (resident !== undefined) void resident.evict(key)
+      }
+    } else {
+      // Both exits dispose the client: it is the ONLY owner of the terminal
+      // children the engine asked us to spawn (each in its own detached group),
+      // and settle-time `child.terminate()` only reaches the engine itself. The
+      // engine is free to create a terminal and never release it; the run ending
+      // must still leave no process behind (IM-15).
+      await client.dispose()
+    }
 
     finishOnce({
       sessionId: session.sessionId,
       agentId: opts.agent,
       status,
-      exitCode: exit.code,
+      exitCode: keepAlive ? null : exit.code,
       // Failed runs report no text, so a partial transcript cannot be mistaken
       // for a final answer.
       text: status === 'completed' ? deliverableText : '',
@@ -2431,6 +2625,7 @@ export async function runAcp(
       status,
       stopReason: promptStopReason,
       activity: turnActivity,
+      ...(keepAlive ? { resident: true, backendSessionId: client.sessionId } : {}),
     })
   })()
 
@@ -2447,8 +2642,14 @@ export async function runAcp(
    */
   async function failBeforePrompt(message: string): Promise<void> {
     accepting = true
-    await client.dispose()
-    void child.terminate().catch(() => {})
+    if (adopted !== undefined && resident !== undefined) {
+      // A pre-prompt failure on a pooled process means the engine is in an
+      // unknown state; drop it from the pool instead of parking it again.
+      await resident.evict(key)
+    } else {
+      await client.dispose()
+      void child.terminate().catch(() => {})
+    }
     finishOnce({
       sessionId: session.sessionId,
       agentId: opts.agent,
@@ -2637,9 +2838,13 @@ function stderrDiagnosis(tail: string): string {
   return lines.slice(-3).join(' | ').slice(0, 500)
 }
 
-export function createAcpBackend(deps: DriverDeps, rt?: DriverRuntime): AgentBackend {
+export function createAcpBackend(
+  deps: DriverDeps,
+  rt?: DriverRuntime,
+  resident?: AcpResidentPool,
+): AgentBackend {
   return {
     family: 'acp',
-    run: (opts, runDeps, signal) => runAcp(opts, runDeps, signal, resolveRuntime(rt)),
+    run: (opts, runDeps, signal) => runAcp(opts, runDeps, signal, resolveRuntime(rt), resident),
   }
 }
