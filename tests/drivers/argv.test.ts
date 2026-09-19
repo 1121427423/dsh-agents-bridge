@@ -340,9 +340,12 @@ describe('createBackend', () => {
   })
 
   it('rejects an unknown family with a readable error', () => {
-    expect(() => createBackend('no-such-dialect' as never, deps)).toThrowError(
-      /unknown protocol family "no-such-dialect".*Known families: claude, codebuddy, codex, openclaw, acp, generic/s,
-    )
+    // Both halves are derived from `DRIVER_FAMILIES` rather than transcribed:
+    // this assertion used to hard-code the family list, so a new dialect broke it
+    // for a reason that had nothing to do with the error path under test (D46).
+    const call = () => createBackend('no-such-dialect' as never, deps)
+    expect(call).toThrowError('unknown protocol family "no-such-dialect"')
+    expect(call).toThrowError(`Known families: ${DRIVER_FAMILIES.join(', ')}.`)
   })
 })
 

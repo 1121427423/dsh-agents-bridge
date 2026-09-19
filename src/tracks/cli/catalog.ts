@@ -276,4 +276,28 @@ export const CLI_TRACK_DESCRIPTORS: readonly AgentDescriptor[] = [
     notes:
       'The standalone CLI, not the app\'s engine: `qoderclicn --yolo --acp` (`--acp` is HIDDEN — absent from the 107-line `--help` — but parsed, and `acp` is one of the runtime\'s own session modes alongside `tui`/`headless`/`sdk`; `--yolo` is the headless bypass-permissions switch the reference implementation uses, matching the desktop row). Same ACP wire and the same capability row as the desktop identity `qoder-cn`, but a DIFFERENT binary and version (1.1.56 vs the app\'s 1.1.53) and a DIFFERENT credential story: this CLI maintains ~/.qoder-cn/.auth itself, so a launch is credentialed as soon as the operator has run `qoderclicn login` ONCE — there is no auth wall, unlike the desktop engine, which never inherits the app login. Its TEARDOWN is the same shape as the desktop engine\'s, which is worth stating because a bare probe suggested otherwise: in the full stack the bridge waits out the grace window and signals it, and the engine\'s shutdown handler exits 143 — the acceptance run reports `status=completed exit=143`, so the D40 §8.2 fix (blame the engine only for an exit IT chose) is load-bearing for BOTH Qoder identities. `initialize` answers agentInfo `{name:"qoder-cli-cn", version:"1.1.56"}` + one authMethod (`qoderclicn-login`, a LOCAL login reuse rather than a device flow) + agentCapabilities incl. `loadSession` and `sessionCapabilities.resume/close/delete/fork/list`; `session/new` answers sessionId + 5 modes (default/acceptEdits/auto/dontAsk/yolo) + 14 models (`currentModelId` = `qfmodel` = Qwen3.8-Flash) + configOptions (`mode`, `model`, `reasoning_effort`). The `model` config option is advertised and the engine really honours it — a caller CAN now reach it, because the driver drives that selector through `session/set_model` (the same call multica uses) instead of relying on the `model` parameter of `session/new`, which this engine IGNORES in silence (a bogus id there is accepted without complaint, while `set_model` rejects a bogus modelId with -32602). The two levers differ in kind, not just in spelling: `set_model` VALIDATES what it is given. Effort levels are xhigh/low/medium/none — there is no `high` — and the level SET is a function of the selected model (measured on this build: `qfmodel` offers four, `qmodel` only `none`, and the engine answers -32602 to a level it accepted a moment earlier), which is why the driver sets the model BEFORE it reads effort. stdout is clean; the only stderr is one skill-config warning. See docs/findings-qoder-cn-desktop.md §10 and docs/plan.md D41.',
   },
+  {
+    // THE HEADLESS SIBLING OF THE ROW ABOVE — same binary, different wire, and
+    // the transport the switch (`qoderTransport`) defaults to (D46).
+    //
+    // `qoderclicn -p --output-format stream-json` instead of `--yolo --acp`.
+    // The FRAMES are the claude/CodeBuddy dialect; the FLAGS are this CLI's own
+    // (`bypass_permissions`, no `--verbose`), which is why it rides the
+    // stream-json engine as a third dialect rather than reusing codebuddy.
+    //
+    // WHY IT EXISTS: the ACP wire became unusable on this host — `session/prompt`
+    // answers an upstream {code:500} for EVERY client, reproduced frame-for-frame
+    // with multica's own call sequence, so the fault is server-side. Headless
+    // answers normally, so it is the default. The ACP rows stay (see
+    // `qoderTransport`); nothing was removed.
+    id: 'qoderclicn-print',
+    track: 'cli',
+    family: 'qoderclicn',
+    displayName: 'Qoder CLI CN (qoderclicn) — headless stream-json',
+    command: { executable: 'qoderclicn' },
+    envPrefix: 'QODERCLICN_PRINT',
+    capabilities: { resume: true, model: true, effort: true, mcpConfig: true },
+    notes:
+      'Headless mode of the standalone CLI (D46), measured on 1.1.56 (2026-09-19): `qoderclicn -p --output-format stream-json --input-format stream-json --permission-mode bypass_permissions`, prompt as ONE stream-json line on stdin — byte-identical to what the claude dialect writes. Frames are the claude/CodeBuddy set: `system/init` (session_id, model, tools, mcp_servers, permissionMode) → `assistant` (message.content[] with thinking/text) → `result{subtype:"success", is_error:false, result:"PONG", stop_reason}`, and EVERY frame carries `session_id`, so resume travels through `-r/--resume`. Three flag differences are why this is its own dialect rather than a codebuddy reuse: `--verbose` does NOT exist (`error: unknown option`), the permission mode is spelled `bypass_permissions` (the siblings use `bypassPermissions`), the effort dial is `--reasoning-effort` (not `--effort`, measured), and the tool set contains no `AskUserQuestion` to deny. UNVERIFIED and left conservative: `--strict-mcp-config` scope behaviour (never passed), whether the CLI loads its own project context (system prompt not forwarded), and which key its permission client reads (both keys sent). Plain `-p` without `-o stream-json` writes exactly the answer to stdout, which is the fallback if the frame set ever moves. RESUME IS cwd-SCOPED, measured: the session store lives per PROJECT directory (`~/.qoder-cn/projects/<cwd-slug>`), so `--resume <id>` from a different cwd answers "Searched current project and same-repo worktrees … Use --list-sessions" and the run fails cleanly, while the same id from the session\'s own cwd continues the conversation (verified with a real round-trip). The bridge replays a session\'s recorded cwd, so this only surfaces if a caller changes cwd between turns.',
+  },
 ]

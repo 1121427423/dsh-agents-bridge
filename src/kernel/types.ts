@@ -76,6 +76,10 @@
  *        - `AgentManager.concurrency?`: the live count against the POLICY cap.
  *          Entry surfaces use it when present; an older structural stub may omit
  *          it and the surface falls back to counting the snapshots it can see.
+ *  v9  + `ProtocolFamily` += 'qoderclicn' (decision D46): the standalone Qoder
+ *      CN CLI's `-p --output-format stream-json` mode. Purely additive — the
+ *      union widens, no existing field changes meaning, and every existing
+ *      descriptor compiles unchanged.
  *
  * @module dsh-agents-bridge/kernel/types
  */
@@ -98,8 +102,25 @@ export type AgentId = string
  * `{eventId, seq, sessionId, turnId, type, payload}` with dotted lifecycle
  * names. It mimics the claude FLAG names but shares no wire with claude —
  * see docs/findings-zcode-headless.md §3 for the measured envelope.
+ *
+ * `'qoderclicn'` (ABI v9, D46) is the standalone Qoder CN CLI driven through
+ * its `-p --output-format stream-json` headless mode. The FRAMES are the claude
+ * dialect (measured: `system/init` → `assistant` → `result{subtype:success}`,
+ * with `session_id` on every frame), but the FLAG spellings are its own, and it
+ * has no `--verbose` at all — so it is a dialect of the stream-json engine
+ * rather than a reuse of `claude`/`codebuddy`. It exists because Qoder's ACP
+ * `session/prompt` is failing upstream while this mode answers normally
+ * (docs/findings-qoder-cn-desktop.md §13).
  */
-export type ProtocolFamily = 'claude' | 'codebuddy' | 'codex' | 'openclaw' | 'acp' | 'generic' | 'zcode'
+export type ProtocolFamily =
+  | 'claude'
+  | 'codebuddy'
+  | 'codex'
+  | 'openclaw'
+  | 'acp'
+  | 'generic'
+  | 'zcode'
+  | 'qoderclicn'
 
 /**
  * Integration track: HOW the bridge obtains a launchable engine. This is a

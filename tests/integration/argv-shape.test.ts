@@ -38,6 +38,7 @@ import { buildCodebuddyArgs } from '../../src/drivers/codebuddy.ts'
 import { buildCodexArgs } from '../../src/drivers/codex.ts'
 import { buildGenericArgs } from '../../src/drivers/generic-argv.ts'
 import { buildOpenclawArgs } from '../../src/drivers/openclaw.ts'
+import { buildQoderclicnArgs } from '../../src/drivers/qoderclicn.ts'
 import { buildZcodeArgs } from '../../src/drivers/zcode.ts'
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-bridge-argv-shape-'))
@@ -59,6 +60,10 @@ function driverArgs(family: ProtocolFamily, command: CommandSpec): string[] {
       return buildClaudeArgs({})
     case 'codebuddy':
       return buildCodebuddyArgs({})
+    case 'qoderclicn':
+      // Same stream-json engine as codebuddy, this CLI's own flag spellings
+      // (D46): `bypass_permissions`, no `--verbose`.
+      return buildQoderclicnArgs({})
     case 'acp':
       // ACP carries the turn over the pipe; argv is only the protocol selector.
       return buildAcpArgs({ protocolArgs: command.protocolArgs })

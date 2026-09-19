@@ -118,6 +118,137 @@ export interface Config {
    * `DSH_AGENTS_BRIDGE_ACP_KEEPALIVE_MS`.
    */
   readonly acpKeepAliveMs?: number
+  /**
+   * Which wire drives the standalone Qoder CN CLI (`qoderclicn`).
+   *
+   * `'stream-json'` (the default) uses `qoderclicn -p --output-format
+   * stream-json`; `'acp'` uses `qoderclicn --yolo --acp`. BOTH implementations
+   * are kept — the switch only decides which one is OFFERED, and the other
+   * reports as unavailable with a reason naming this setting, so flipping it
+   * brings the row straight back.
+   *
+   * It defaults to stream-json because Qoder's ACP `session/prompt` began
+   * answering an upstream 500 for every client (reproduced with multica's own
+   * call sequence), while the headless mode answers normally. The desktop row
+   * `qoder-cn` is always ACP and is NOT affected by this switch. Overridable per
+   * deployment with `DSH_AGENTS_BRIDGE_QODER_TRANSPORT`.
+   */
+  readonly qoderTransport?: QoderTransport
+}
+
+/** The two wires the standalone Qoder CN CLI can be driven over. */
+export type QoderTransport = 'stream-json' | 'acp'
+
+/** Environment variable that overrides {@link Config.qoderTransport}. */
+export const QODER_TRANSPORT_ENV = 'DSH_AGENTS_BRIDGE_QODER_TRANSPORT'
+
+/** Default transport — the one that answers while ACP is failing upstream. */
+export const QODER_TRANSPORT_DEFAULT: QoderTransport = 'stream-json'
+
+/** The descriptor id each transport owns on the CLI track. */
+const QODER_TRANSPORT_DESCRIPTOR: Readonly<Record<QoderTransport, AgentId>> = {
+  'stream-json': 'qoderclicn-print',
+  acp: 'qoderclicn',
+}
+
+/** Where a transport value could come from, and the raw text it supplied. */
+interface TransportCandidate {
+  readonly source: 'config' | 'env'
+  readonly raw: string
+}
+
+function normaliseTransport(raw: string | undefined): string {
+  return raw === undefined ? '' : raw.trim().toLowerCase()
+}
+
+function isTransportValue(value: string): value is QoderTransport {
+  return value === 'stream-json' || value === 'acp'
+}
+
+/** What the switch decided, and the value it had to throw away to decide it. */
+export interface QoderTransportDecision {
+  readonly transport: QoderTransport
+  /** Which door the winning value came through. */
+  readonly from: 'config' | 'env' | 'default'
+  /**
+   * The first non-empty value, in precedence order, that was NOT one of the two
+   * accepted literals — whichever door it came through. `apply()` warns on it.
+   */
+  readonly ignored?: { readonly source: 'config' | 'env'; readonly value: string }
+}
+
+/**
+ * Decide the Qoder CLI transport, and report anything it had to ignore.
+ *
+ * Precedence: the plugin's `qoderTransport` field, then
+ * `DSH_AGENTS_BRIDGE_QODER_TRANSPORT`, then stream-json. BOTH sources are
+ * normalised the same way (`trim().toLowerCase()`), so a YAML row writing `ACP`
+ * means ACP rather than "fall back to the default because of the case".
+ *
+ * MISCONFIGURATION AND PRECEDENCE ARE DIFFERENT THINGS, and this function is
+ * what keeps them apart: a value that is merely SHADOWED by the other door is
+ * valid — its source simply lost — so it is not reported; a value that is
+ * UNUSABLE is reported no matter which door it came through. Warning about the
+ * first would be noise, and noise is how a real warning gets ignored.
+ */
+export function decideQoderTransport(configured?: QoderTransport): QoderTransportDecision {
+  const candidates: TransportCandidate[] = []
+  // ANY supplied value becomes a candidate, not just a string one: a YAML type
+  // slip (`qoderTransport: 1`) used to be filtered out here, which put it beyond
+  // the reach of the "unusable" scan below and made it fail SILENTLY — the same
+  // class of bug as a typo, one gate further out. `String(...)` is what the
+  // warning reports, so the operator sees the value that was written.
+  if (configured !== undefined) candidates.push({ source: 'config', raw: String(configured) })
+  const envRaw = process.env[QODER_TRANSPORT_ENV]
+  if (envRaw !== undefined) candidates.push({ source: 'env', raw: envRaw })
+
+  const winner = candidates.find((candidate) => isTransportValue(normaliseTransport(candidate.raw)))
+  const ignored = candidates.find((candidate) => {
+    const value = normaliseTransport(candidate.raw)
+    return value !== '' && !isTransportValue(value)
+  })
+
+  return {
+    transport:
+      winner === undefined
+        ? QODER_TRANSPORT_DEFAULT
+        : (normaliseTransport(winner.raw) as QoderTransport),
+    from: winner === undefined ? 'default' : winner.source,
+    ...(ignored === undefined ? {} : { ignored: { source: ignored.source, value: ignored.raw } }),
+  }
+}
+
+/** The transport alone, for callers that do not need the decision's provenance. */
+export function resolveQoderTransport(configured?: QoderTransport): QoderTransport {
+  return decideQoderTransport(configured).transport
+}
+
+/**
+ * Descriptor overrides that implement the switch.
+ *
+ * The UNSELECTED row is marked `unsupported` rather than deleted: the kernel
+ * already refuses a run against such an identity with a machine-readable reason
+ * and `probe` surfaces it (`launch: 'unsupported'`), so the model learns the
+ * boundary instead of the bridge silently omitting an identity — and flipping
+ * the setting restores it with no code change and no lost evidence.
+ */
+export function qoderTransportOverrides(
+  transport: QoderTransport,
+): Record<AgentId, Partial<AgentDescriptor>> {
+  const selected = QODER_TRANSPORT_DESCRIPTOR[transport]
+  const overrides: Record<AgentId, Partial<AgentDescriptor>> = {}
+  for (const [other, id] of Object.entries(QODER_TRANSPORT_DESCRIPTOR)) {
+    if (id === selected) continue
+    overrides[id] = {
+      unsupported: {
+        reason:
+          `not selected: qoderTransport=${transport} (env ${QODER_TRANSPORT_ENV}). ` +
+          `This CLI is driven over "${transport}" right now; set the switch to "${other}" ` +
+          `to use this identity instead.`,
+      },
+    }
+  }
+  return overrides
 }
 
 /**
@@ -150,6 +281,47 @@ export function apply(ctx: Context, config: Config = {}): void {
       : undefined
 
   /**
+   * Which wire the standalone Qoder CN CLI is driven over (D46).
+   *
+   * Both rows stay in the catalog — the switch marks the unselected one
+   * `unsupported` so `probe` explains why it is not offered, and the operator can
+   * flip it back with one setting.
+   *
+   * The merge is FIELD-level, not key-level, and that distinction is the whole
+   * point: a caller's `overrides.qoderclicn` is a legitimate two-line patch
+   * (pinning the executable, say), and `{...switch, ...caller}` would let it
+   * replace the switch's patch object wholesale — deleting `unsupported` and
+   * silently re-enabling the row. So the switch owns exactly ONE field and the
+   * caller keeps every other one.
+   */
+  const decision = decideQoderTransport(config.qoderTransport)
+  const qoderTransport = decision.transport
+  const qoderOverrides = qoderTransportOverrides(qoderTransport)
+  if (decision.ignored !== undefined) {
+    // A misconfigured switch must be LOUD, through EITHER door — the alternative
+    // is an operator who believes they selected ACP while the bridge quietly
+    // kept the default. A value that merely lost the precedence contest is not
+    // reported: it is valid, and warning about it would train the reader to
+    // ignore this line.
+    logger.warn('qoderTransport value not recognised and was ignored', {
+      source: decision.ignored.source,
+      value: decision.ignored.value,
+      using: qoderTransport,
+      accepted: ['stream-json', 'acp'],
+    })
+  }
+  const overrides: Record<AgentId, Partial<AgentDescriptor>> = { ...config.overrides }
+  for (const [id, patch] of Object.entries(qoderOverrides)) {
+    overrides[id] = { ...overrides[id], ...patch }
+  }
+  logger.info('qoder cli transport selected', {
+    transport: qoderTransport,
+    agent: QODER_TRANSPORT_DESCRIPTOR[qoderTransport],
+    disabled: Object.keys(qoderOverrides),
+    source: decision.from,
+  })
+
+  /**
    * The manager options object, kept MUTABLE on purpose.
    *
    * The settings namespace below resolves to `schema ← this composition entry ←
@@ -169,7 +341,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     // ACP family gets the resident pool; every other family is untouched.
     createBackend: (family, deps) =>
       family === 'acp' ? createAcpBackend(deps, undefined, acpResident) : createBackend(family, deps),
-    ...(config.overrides === undefined ? {} : { overrides: config.overrides }),
+    // Unconditional since D46: the transport switch always contributes one entry,
+    // so this object is never empty. The old `length === 0` guard read as if
+    // overrides could be absent, which they no longer can.
+    overrides,
     ...(config.descriptors === undefined ? {} : { extraDescriptors: config.descriptors }),
     ...(config.storeDir === undefined ? {} : { storeDir: config.storeDir }),
     ...(config.defaultCwd === undefined ? {} : { defaultCwd: config.defaultCwd }),

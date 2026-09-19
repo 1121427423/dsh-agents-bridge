@@ -27,6 +27,7 @@
 
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { DRIVER_FAMILIES } from '../drivers/index.ts'
 import type { AgentManager, AgentMessage, AgentResult, SessionSnapshot } from '../kernel/types.ts'
 import { AgentRunRejectedError } from '../kernel/types.ts'
 import { MAX_TIMER_DELAY_MS, normalizeRunWindowMs } from '../kernel/watchdog.ts'
@@ -625,7 +626,12 @@ export function createToolDefinitions(manager: AgentManager, seat: JobSeat = {})
             id: { type: 'string' },
             displayName: { type: 'string' },
             track: { type: 'string', enum: ['cli', 'desktop'] },
-            family: { type: 'string', enum: ['claude', 'codebuddy', 'codex', 'openclaw', 'acp', 'generic', 'zcode'] },
+            // Derived, not transcribed: this list used to be a hand-kept copy of
+            // `ProtocolFamily`, so adding a family meant remembering a spot the
+            // compiler could not point at (it caught `DRIVER_FAMILIES` and both
+            // idle-timeout tables, but this enum is data). Reading the driver's
+            // own list keeps the model-facing schema and the union in step.
+            family: { type: 'string', enum: [...DRIVER_FAMILIES] },
             available: { type: 'boolean' },
             executable: { type: 'string' },
             version: { type: 'string' },

@@ -104,7 +104,12 @@ export const CODEBUDDY_BLOCKED_ARGS: BlockedArgs = { ...CLAUDE_BLOCKED_ARGS }
 // ── Dialect description ────────────────────────────────────────────────────
 
 export interface StreamJsonDialect {
-  readonly family: 'claude' | 'codebuddy'
+  /**
+   * Which family this dialect serves. Widened in ABI v9 (D46) for
+   * `'qoderclicn'`: the frames are claude's, the flags are not, so it rides the
+   * same engine as a third dialect rather than a reuse of `claude`/`codebuddy`.
+   */
+  readonly family: 'claude' | 'codebuddy' | 'qoderclicn'
   /** Used in error strings, mirroring multica's `provider` argument. */
   readonly label: string
   /** Everything before the per-run flags; differs between the fork. */
@@ -150,6 +155,14 @@ export interface StreamJsonDialect {
    * stay byte-identical), codebuddy true.
    */
   readonly controlResponseIncludesAllowed: boolean
+  /**
+   * Flag that carries `effort`. Optional and defaulted to `'--effort'` so the
+   * two original dialects stay byte-identical; the Qoder CN CLI spells it
+   * `--reasoning-effort` and answers `error: unknown option '--effort'` to the
+   * old spelling (measured on 1.1.56). An empty string disables the dial
+   * entirely, the same convention `resumeFlag` uses in the generic dialect.
+   */
+  readonly effortFlag?: string
 }
 
 export const CLAUDE_DIALECT: StreamJsonDialect = {
@@ -219,10 +232,13 @@ export function buildStreamJsonArgs(
   if (opts.model !== undefined && opts.model !== '') {
     args.push('--model', assertArgvSafeValue(`${dialect.label} model`, opts.model))
   }
-  if (opts.effort !== undefined && opts.effort !== '') {
+  const effortFlag = dialect.effortFlag ?? '--effort'
+  if (opts.effort !== undefined && opts.effort !== '' && effortFlag !== '') {
     // Slotted right after --model so the launch line reads as one model+effort
-    // decision; the CLI accepts the flag in any order.
-    args.push('--effort', assertArgvSafeValue(`${dialect.label} effort`, opts.effort))
+    // decision; the CLI accepts the flag in any order. The flag NAME is the
+    // dialect's (`--reasoning-effort` on the Qoder CN CLI), defaulted above so
+    // claude and codebuddy emit exactly what they always did.
+    args.push(effortFlag, assertArgvSafeValue(`${dialect.label} effort`, opts.effort))
   }
   if (opts.maxTurns !== undefined && opts.maxTurns > 0) {
     args.push('--max-turns', String(opts.maxTurns))

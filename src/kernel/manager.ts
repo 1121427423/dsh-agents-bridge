@@ -97,6 +97,9 @@ const ORPHAN_CLOCK_SLACK_MS = 5_000
 const DEFAULT_IDLE_TIMEOUT_MS: Readonly<Record<ProtocolFamily, number>> = {
   claude: 1_800_000,
   codebuddy: 1_800_000,
+  // Must equal `DEFAULT_IDLE_TIMEOUT_MS.qoderclicn` in src/drivers/argv.ts (D46):
+  // both stream-json dialects go silent for the whole duration of a tool call.
+  qoderclicn: 1_800_000,
   codex: 300_000,
   openclaw: 600_000,
   generic: 300_000,

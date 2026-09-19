@@ -776,6 +776,10 @@ export const STREAM_JSON_IDLE_TIMEOUT_MS = 1_800_000
 export const DEFAULT_IDLE_TIMEOUT_MS = {
   claude: STREAM_JSON_IDLE_TIMEOUT_MS,
   codebuddy: STREAM_JSON_IDLE_TIMEOUT_MS,
+  // The Qoder CN CLI rides the same stream-json engine (D46): it emits nothing
+  // between a `tool_use` frame and its `tool_result`, so the 30-minute window
+  // applies for the same reason claude/codebuddy take it (IM-8).
+  qoderclicn: STREAM_JSON_IDLE_TIMEOUT_MS,
   openclaw: 600_000,
   generic: 300_000,
   // zcode streams lifecycle events throughout a turn; 300s of SILENCE from an

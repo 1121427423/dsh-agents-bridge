@@ -509,6 +509,29 @@ describe('the qoderclicn identity on the CLI track', () => {
     })
   })
 
+  it('keeps the HEADLESS sibling row pinned to its own measurements (D46)', () => {
+    // The stream-json sibling of the row above. Its four capability bits were
+    // each measured on 1.1.56 (`--model qmodel` → PONG; `--reasoning-effort low`
+    // accepted; a same-cwd `--resume <id>` continued the conversation;
+    // `--mcp-config` accepted), and this is the only place they are pinned —
+    // `tests/plugin-config.test.ts` checks the row's AVAILABILITY, never its
+    // contract. Flip any bit and this reddens.
+    const print = builtinDescriptor('qoderclicn-print')
+    expect(print.track).toBe('cli')
+    expect(print.family).toBe('qoderclicn')
+    expect(print.command.executable).toBe('qoderclicn')
+    expect(print.envPrefix).toBe('QODERCLICN_PRINT')
+    expect(print.capabilities).toEqual({
+      resume: true,
+      model: true,
+      effort: true,
+      mcpConfig: true,
+    })
+    // A DIFFERENT namespace from its ACP sibling, so pinning one path moves
+    // nothing else — and vice versa.
+    expect(print.envPrefix).not.toBe(builtinDescriptor('qoderclicn').envPrefix)
+  })
+
   it('keeps the two Qoder identities distinct: different binary and namespace, aligned argv', () => {
     // The trap this guards: collapsing them into one row with a flag, on the
     // theory that "it is the same product". It is not the same BINARY — the

@@ -1304,3 +1304,60 @@ session/prompt: ERR {code:500, message:"Sorry, something went wrong. Please try 
 **与桥此前在 `qfmodel` / `qmodel` / `kmodel` 三个模型上得到的 500 逐个字段相同。** 所以当前 500 是
 **Qoder ACP 后端（`session/prompt` 上游）的故障**，对所有客户端实现一视同仁，与 `--yolo`、模型选择、
 桥/常驻代码均无关。对齐工作本身可以在服务端恢复后直接实测。
+
+## 13. Headless stream-json：ACP 不可用时的第二条路，以及传输开关（2026-09-19，D46）
+
+### 13.1 为什么要第二条路
+
+§12.3 已证明 ACP 的 `session/prompt` 对所有客户端回上游 500。同一天、同一账号、同一个二进制，
+`qoderclicn -p`（print）**完全正常** —— 也就是说挂的是 CLI 的 **ACP server 层**，不是模型后端。
+所以 Qoder 的接入不该只有一个传输。
+
+### 13.2 实测（`qoderclicn` 1.1.56，本机）
+
+| 形态 | 命令 | 结果 |
+|------|------|------|
+| 文本 one-shot | `qoderclicn -p "<prompt>"` | stdout **恰好一行** `PONG`（`skill configs` 警告走 stderr），exit 0；`/tmp` 下 **2.8 s** |
+| stream-json | `qoderclicn -p -o stream-json "<prompt>"` | `system/init`（session_id、model、tools、mcp_servers、permissionMode） → `assistant`（thinking → text） → `result{subtype:"success", is_error:false, result:"PONG", stop_reason:"end_turn"}`，**每帧带 `session_id`** |
+| 桥的 stdin 写法 | `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"…"}]}}\n` + `--input-format stream-json` | **接受**（与 `buildClaudeInput` 逐字相同） |
+| 旗标探测 | `--verbose` / `--effort` | 都是 `error: unknown option`；`--reasoning-effort`、`--max-turns` **存在** |
+| 选项面 | `--output-format` | 取值恰好是 `text` / `json` / `stream-json` |
+
+**所以帧是 claude/CodeBuddy 的，旗标不是** —— 这正是它必须是**新方言**而不是复用 `codebuddy` 的原因：
+两个现有 stream-json 方言都带 `--verbose`（这里会直接启动失败），模式拼写是 `bypass_permissions`
+（它们用 `bypassPermissions`），effort 是 `--reasoning-effort`，而且它的工具表里没有
+`AskUserQuestion` 可禁。
+
+### 13.3 落地的形状
+
+- **ABI v9**：`ProtocolFamily += 'qoderclicn'`（加性；`tsc` 随即点名三处按 family 枚举的地方 ——
+  driver/kernel 两张 idle 超时表与 `DRIVER_FAMILIES`，以及探测工具 schema 里那份**手抄**的 family
+  枚举；后者已改为从 `DRIVER_FAMILIES` 派生，消灭一处漂移源）。
+- **`src/drivers/qoderclicn.ts`**：薄方言，复用 `runStreamJsonFamily`，没有新引擎。
+- **`effortFlag`**：方言新增的可选字段（默认 `'--effort'`），所以 claude/codebuddy 的 argv 逐字不变。
+- **开关**：`qoderTransport`（config；env `DSH_AGENTS_BRIDGE_QODER_TRANSPORT`；默认 `stream-json`）
+  用 descriptor override 把**未选中**的那一行标 `unsupported`，理由里写明设置名与「另一个传输可用」。
+  ACP 两行（`qoderclicn`、桌面 `qoder-cn`）与 headless 行**全部保留**，翻转设置即恢复 ——
+  kernel 本来就拒绝 `unsupported` 身份并给机器可读理由、probe 报 `launch:'unsupported'`，
+  所以模型看到的是**边界**而不是被静默藏起来的身份。
+
+### 13.4 验收，以及三条要记住的限制
+
+- `node --experimental-strip-types scripts/acceptance.ts qoderclicn-print "Reply with exactly: PONG"`
+  → `probe available=true version=1.1.56`；事件 `[status] running (model=Qwen3.8-Flash,
+  permissionMode=bypassPermissions)` + `[thinking]` + `[text] PONG`；`status=completed exit=0`；
+  `backendSessionId c802773b-…`（来自帧回传的 `session_id`）。
+- **resume 按 cwd 分库**：会话落在 `~/.qoder-cn/projects/<cwd-slug>`。**同 cwd** 下
+  `--resume c802773b-…` 真的续上了上一轮（它回答了 `PONG`）；**换到 `/tmp`** 则回
+  `Searched current project and same-repo worktrees … Use --list-sessions`，变成一次干净的 failed。
+  桥会重放会话记录的 cwd，所以只有「调用方中途换 cwd」会撞上 —— 写下来是为了避免将来把它
+  误判成「桥的 resume 坏了」。能力位 `resume: true` 在这个前提下成立。
+- **耗时与 cwd 强相关**：同一命令在**仓库 cwd** 下 48 s，在 `/tmp` 下 2.8 s。`system/init` 显示
+  13 个插件与大量技能的上下文，SessionStart 钩子也要跑。结论：headless 的冷启动**不差于** ACP 那
+  25–40 s，但大项目 cwd 会把它拖慢 —— 排查慢启动时先看 cwd，别先怀疑传输。
+- **并发会污染版本探针**：同时跑多个进程（实测：验收与另一个探测型测试套件并行）时，
+  `--version` 可能撞上探针超时，probe 就报 `version=undefined`。按设计超时只丢版本、不报错，
+  **不是描述符缺陷** —— 单独重跑即恢复 `1.1.56`。看到 `version=undefined` 先确认机器有没有在忙。
+
+未验证并因此取保守侧的三处：`--strict-mcp-config` 的作用域行为（一律不传）、是否读自带项目上下文
+（不转发 system prompt）、权限客户端读 `behavior` 还是 `allowed`（两个键都发）。

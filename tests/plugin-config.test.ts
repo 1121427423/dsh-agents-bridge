@@ -19,9 +19,17 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { apply, buildPromptSection, type Config } from '../src/index.ts'
+import {
+  apply,
+  buildPromptSection,
+  decideQoderTransport,
+  QODER_TRANSPORT_ENV,
+  qoderTransportOverrides,
+  resolveQoderTransport,
+  type Config,
+} from '../src/index.ts'
 import type { ToolDefinitions } from '../src/tools/definitions.ts'
 import { AgentRunRejectedError } from '../src/kernel/types.ts'
 
@@ -214,4 +222,184 @@ describe('apply() survives a hostile config row', () => {
     expect(() => boot()).not.toThrow()
     spy.mockRestore()
   })
+})
+
+/**
+ * D46: one CLI binary, two wires, one switch.
+ *
+ * Observed through `agents_probe` rather than by reaching into the registry, so
+ * these tests prove the plumbing a model actually sees: the row that is NOT
+ * selected must report WHY (a reason naming the switch), and the desktop row
+ * must be untouched by any of it.
+ */
+describe('the Qoder CLI transport switch', () => {
+  /**
+   * Start every case from a NEUTRAL environment.
+   *
+   * `vi.unstubAllEnvs()` restores whatever the process had — it does not make
+   * the variable absent — so most cases in here (all of which assume the switch
+   * is unset) used to fail for anyone who had exported the variable to try the
+   * feature out: `DSH_AGENTS_BRIDGE_QODER_TRANSPORT=acp pnpm test` reddened four
+   * of the five, including the regression guards. An empty string is "unset" to
+   * the resolver (`value !== ''` is what makes a candidate usable), so stubbing
+   * it is enough to make the suite hermetic.
+   */
+  beforeEach(() => {
+    vi.stubEnv(QODER_TRANSPORT_ENV, '')
+  })
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
+  interface Probed {
+    readonly id: string
+    readonly available: boolean
+    readonly reason?: string
+  }
+
+  async function probeRows(config: Partial<Config> = {}): Promise<readonly Probed[]> {
+    const registered = boot(config)
+    const probed = (await call(registered, 'agents_probe', {})) as readonly Probed[]
+    return probed
+  }
+
+  it('defaults to stream-json, and disables the ACP row by NAME', async () => {
+    const rows = await probeRows()
+    const acp = rows.find((row) => row.id === 'qoderclicn')
+    const print = rows.find((row) => row.id === 'qoderclicn-print')
+    expect(print).toBeDefined()
+    // The unselected row is not deleted — it reports the switch.
+    expect(acp?.reason).toContain('qoderTransport=stream-json')
+    expect(acp?.available).toBe(false)
+    // and the selected one is not disabled by the switch at all (whether it
+    // resolves on THIS host's PATH is a separate question the reason answers).
+    expect(print?.reason ?? '').not.toContain('qoderTransport')
+  })
+
+  it('flips to ACP on request, naming the setting in the reason', async () => {
+    const rows = await probeRows({ qoderTransport: 'acp' })
+    const acp = rows.find((row) => row.id === 'qoderclicn')
+    const print = rows.find((row) => row.id === 'qoderclicn-print')
+    expect(print?.reason).toContain('qoderTransport=acp')
+    expect(print?.available).toBe(false)
+    expect(acp?.reason ?? '').not.toContain('qoderTransport')
+  })
+
+  it('never touches the desktop row, whichever transport is selected', async () => {
+    for (const transport of ['stream-json', 'acp'] as const) {
+      const rows = await probeRows({ qoderTransport: transport })
+      const desktop = rows.find((row) => row.id === 'qoder-cn')
+      expect(desktop).toBeDefined()
+      expect(desktop?.reason ?? '').not.toContain('qoderTransport')
+    }
+    // Two full boots + probes: each one resolves versions for every identity, so
+    // this legitimately exceeds the 5s default on a loaded machine.
+  }, 30_000)
+
+  it('resolves config first, then the environment, then stream-json', () => {
+    expect(resolveQoderTransport(undefined)).toBe('stream-json')
+    expect(resolveQoderTransport('acp')).toBe('acp')
+    expect(resolveQoderTransport('stream-json')).toBe('stream-json')
+    // Config beats a contradictory env value.
+    vi.stubEnv(QODER_TRANSPORT_ENV, 'acp')
+    expect(resolveQoderTransport('stream-json')).toBe('stream-json')
+    // …and with no config, the env decides.
+    expect(resolveQoderTransport(undefined)).toBe('acp')
+    // An unusable env value falls back to the default instead of guessing.
+    vi.stubEnv(QODER_TRANSPORT_ENV, 'nonsense')
+    expect(resolveQoderTransport(undefined)).toBe('stream-json')
+  })
+
+  it('normalises the CONFIG value too, and warns instead of guessing', () => {
+    // Same leniency as the env path: a YAML row writing `ACP` means ACP, not
+    // "fall back to the default because of the case".
+    expect(resolveQoderTransport('ACP' as never)).toBe('acp')
+    expect(resolveQoderTransport(' stream-json ' as never)).toBe('stream-json')
+    // A typo still lands on the default…
+    expect(resolveQoderTransport('streamjson' as never)).toBe('stream-json')
+    // …and `apply()` says so out loud, instead of letting the operator believe
+    // they selected something. A misconfigured switch that looks like success is
+    // exactly the failure mode this asserts against.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    boot({ qoderTransport: 'streamjson' as never })
+    const warnings = warn.mock.calls.map((call) => String(call[0])).join('\n')
+    warn.mockRestore()
+    expect(warnings).toContain('qoderTransport value not recognised')
+    expect(warnings).toContain('streamjson')
+  })
+
+  it('warns for an unusable ENV value too (the documented quick-switch)', () => {
+    // The env var is what README §5 tells operators to use. A typo there used to
+    // select the default in complete silence, because the warning only inspected
+    // the config field — the same class of failure the config case already
+    // covers, just through the other door.
+    vi.stubEnv(QODER_TRANSPORT_ENV, 'acpp')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    boot()
+    const warnings = warn.mock.calls.map((call) => String(call[0])).join('\n')
+    warn.mockRestore()
+    expect(warnings).toContain('qoderTransport value not recognised')
+    expect(warnings).toContain('acpp')
+  })
+
+  it('stays QUIET when a usable value is merely shadowed by precedence', () => {
+    // `qoderTransport: 'acp'` + `…=stream-json` is not a misconfiguration: config
+    // wins and its value is valid. Warning here would be noise, and noise is how
+    // a real warning gets ignored.
+    vi.stubEnv(QODER_TRANSPORT_ENV, 'stream-json')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    boot({ qoderTransport: 'acp' })
+    const warnings = warn.mock.calls.map((call) => String(call[0])).join('\n')
+    warn.mockRestore()
+    expect(warnings).not.toContain('qoderTransport value not recognised')
+  })
+
+  it('still warns when a typo in CONFIG is overridden by a usable env value', () => {
+    // The round-2 case, kept as a regression guard while the warning moves to a
+    // source-aware decision: the effective transport comes from the env, but the
+    // config value was ignored and the operator must hear about it.
+    vi.stubEnv(QODER_TRANSPORT_ENV, 'acp')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    boot({ qoderTransport: 'streem-json' as never })
+    const warnings = warn.mock.calls.map((call) => String(call[0])).join('\n')
+    warn.mockRestore()
+    expect(warnings).toContain('qoderTransport value not recognised')
+    expect(warnings).toContain('streem-json')
+  })
+
+  it('reports a NON-STRING config value instead of silently ignoring it', () => {
+    // A YAML type slip (`qoderTransport: 1`) used to fall through the
+    // `typeof === 'string'` gate BEFORE the "unusable" scan could see it — the
+    // same silent-default class as the two doors above, one gate further out.
+    const decision = decideQoderTransport(1 as never)
+    expect(decision.transport).toBe('stream-json')
+    expect(decision.ignored).toEqual({ source: 'config', value: '1' })
+    // …and it reaches the log through `apply()` too, not just the resolver.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    boot({ qoderTransport: 1 as never })
+    const warnings = warn.mock.calls.map((call) => String(call[0])).join('\n')
+    warn.mockRestore()
+    expect(warnings).toContain('qoderTransport value not recognised')
+  })
+
+  it('marks exactly the unselected descriptor, and nothing else', () => {
+    expect(Object.keys(qoderTransportOverrides('stream-json'))).toEqual(['qoderclicn'])
+    expect(Object.keys(qoderTransportOverrides('acp'))).toEqual(['qoderclicn-print'])
+  })
+
+  it('survives a USER override on the same identity (the switch owns `unsupported`)', async () => {
+    // Pinning an executable per identity is a documented use of `overrides` — this
+    // suite's own `boot()` does it for four identities. It must not be able to
+    // DELETE the switch's marking by replacing that identity's patch object
+    // wholesale: the row would come back available and the default would be
+    // silently defeated. The switch owns exactly one FIELD; the caller owns the
+    // rest.
+    const rows = await probeRows({
+      overrides: { qoderclicn: { command: { executable: process.execPath } } },
+    })
+    const acp = rows.find((row) => row.id === 'qoderclicn')
+    expect(acp?.reason).toContain('qoderTransport=stream-json')
+    expect(acp?.available).toBe(false)
+  }, 30_000)
 })

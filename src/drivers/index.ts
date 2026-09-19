@@ -51,6 +51,7 @@ import {
 } from './argv.ts'
 import { createClaudeBackend } from './claude.ts'
 import { createCodebuddyBackend } from './codebuddy.ts'
+import { createQoderclicnBackend } from './qoderclicn.ts'
 import { createCodexBackend } from './codex.ts'
 import { createGenericBackend } from './generic-argv.ts'
 import { createOpenclawBackend } from './openclaw.ts'
@@ -74,6 +75,7 @@ import { createZcodeBackend } from './zcode.ts'
 export const DRIVER_FAMILIES: readonly ProtocolFamily[] = [
   'claude',
   'codebuddy',
+  'qoderclicn',
   'codex',
   'openclaw',
   'acp',
@@ -102,6 +104,8 @@ export function createBackend(
       return createClaudeBackend(deps)
     case 'codebuddy':
       return createCodebuddyBackend(deps)
+    case 'qoderclicn':
+      return createQoderclicnBackend(deps)
     case 'codex':
       return createCodexBackend(deps)
     case 'openclaw':
@@ -139,6 +143,8 @@ export function createBackendWithRuntime(
       return createClaudeBackend(deps, runtime)
     case 'codebuddy':
       return createCodebuddyBackend(deps, runtime)
+    case 'qoderclicn':
+      return createQoderclicnBackend(deps, runtime)
     case 'codex':
       return createCodexBackend(deps, runtime)
     case 'openclaw':
@@ -181,3 +187,11 @@ export {
   type AcpResidentPool,
   type AcpResidentPoolOptions,
 } from './acp-resident.ts'
+
+// ── Qoder CN CLI headless dialect, re-exported (D46) ───────────────────────
+
+export {
+  buildQoderclicnArgs,
+  QODERCLICN_BLOCKED_ARGS,
+  QODERCLICN_DIALECT,
+} from './qoderclicn.ts'
