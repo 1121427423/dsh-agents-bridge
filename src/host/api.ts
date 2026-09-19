@@ -266,13 +266,10 @@ function writeError(res: ServerResponse, error: unknown): void {
     writeJson(res, error.status, { ok: false, error: { code: error.code, message: error.message } })
     return
   }
-  writeJson(res, 500, {
-    ok: false,
-    error: {
-      code: 'internal',
-      message: error instanceof Error ? error.message : String(error),
-    },
-  })
+  // The wire body stays opaque (D43 / audit L1): the call site already logs
+  // the real error host-side, and internal phrasing can carry paths, kernel
+  // wording, or stack-adjacent detail a caller has no business seeing.
+  writeJson(res, 500, { ok: false, error: { code: 'internal', message: 'internal error' } })
 }
 
 /** Read and parse the JSON body (bounded; malformed → bad-request). */

@@ -60,6 +60,7 @@ import {
   argsContainFlag,
   asRecord,
   asString,
+  assertArgvSafeValue,
   buildCommandLine,
   clampTimerDelay,
   errorText,
@@ -195,12 +196,12 @@ export function buildOpenclawArgs(opts: OpenclawArgOptions, logger?: BridgeLogge
 
   const customArgs = filterCustomArgs(opts.extraArgs, OPENCLAW_BLOCKED_ARGS, logger)
   if (opts.model !== undefined && opts.model !== '' && !argsContainFlag(customArgs, '--agent')) {
-    args.push('--agent', opts.model)
+    args.push('--agent', assertArgvSafeValue('openclaw model', opts.model))
   }
   args.push(...customArgs)
 
   if (opts.effort !== undefined && opts.effort !== '') {
-    args.push('--thinking', opts.effort)
+    args.push('--thinking', assertArgvSafeValue('openclaw effort', opts.effort))
   }
 
   // Instructions must be inline: openclaw loads AGENTS.md from its own

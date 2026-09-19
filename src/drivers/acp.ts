@@ -835,7 +835,10 @@ export interface PermissionSelection {
  * unanswered makes the engine block until its own internal timeout, so the task
  * hangs. Order of preference:
  *
- *  1. a known session-scoped grant id, if actually offered with a grant kind;
+ *  1. a known session-scoped grant id, if offered with a one-shot kind. ACP v1
+ *     has NO session-scoped kind, so the id alone is never evidence of scope —
+ *     a `{allow_session, kind: "allow_always"}` option is still a permanent
+ *     grant wearing a session-looking name, and falls through (audit M2);
  *  2. any single-use grant (`kind: "allow_once"`) — inherently scoped to one
  *     action, so it is safe regardless of the opaque optionId;
  *  3. an offered `reject_once` — deny THIS action rather than reply
@@ -852,7 +855,10 @@ export function selectPermissionOption(
 ): PermissionSelection {
   for (const want of ACP_SESSION_SCOPED_OPTION_IDS) {
     for (const opt of options) {
-      if (opt.optionId === want && isGrantKind(opt.kind)) {
+      // The id is opaque; only the kind tells the grant's scope. The
+      // session-named preference exists for vendor UIs that MEAN "this turn",
+      // and it holds only while the grant is actually one-shot.
+      if (opt.optionId === want && opt.kind.trim().toLowerCase() === KIND_ALLOW_ONCE) {
         return { optionId: opt.optionId, grant: true, ok: true }
       }
     }

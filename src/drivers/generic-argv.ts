@@ -46,6 +46,7 @@ import type {
 import {
   DEFAULT_IDLE_TIMEOUT_MS,
   DriverSession,
+  assertArgvSafeValue,
   buildCommandLine,
   clampTimerDelay,
   errorText,
@@ -119,12 +120,15 @@ export interface GenericArgOptions {
 export function buildGenericArgs(opts: GenericArgOptions, logger?: BridgeLogger): string[] {
   const args: string[] = opts.argsPrefix === undefined ? [] : [...opts.argsPrefix]
   if (opts.model !== undefined && opts.model !== '') {
-    args.push('--model', opts.model)
+    args.push('--model', assertArgvSafeValue('generic model', opts.model))
   }
   const resumeFlag =
     opts.resumeFlag === undefined ? DEFAULT_GENERIC_RESUME_FLAG : opts.resumeFlag
   if (resumeFlag !== '' && opts.resumeSessionId !== undefined && opts.resumeSessionId !== '') {
-    args.push(resumeFlag, opts.resumeSessionId)
+    args.push(
+      resumeFlag,
+      assertArgvSafeValue('generic resume session id', opts.resumeSessionId),
+    )
   }
   args.push(...filterCustomArgs(opts.extraArgs, GENERIC_BLOCKED_ARGS, logger))
   return args

@@ -64,6 +64,7 @@ import {
   DriverSession,
   asRecord,
   asString,
+  assertArgvSafeValue,
   buildCommandLine,
   clampTimerDelay,
   errorText,
@@ -157,20 +158,14 @@ export interface CodexArgOptions {
 }
 
 /**
- * Whether a value can occupy the SESSION_ID positional slot.
- *
- * `codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]` reads its two positionals
- * in order, so whatever lands first IS the session id (MI-20). Two shapes
- * cannot be ids:
- *  - a value starting with `-` is parsed by clap as a flag, which either rejects
- *    the whole invocation or shifts the prompt into the id slot;
- *  - an empty/whitespace-only value does the same shift silently.
- * Neither may reach argv — the caller gets a naming error instead.
+ * The SESSION_ID positional slot is validated by the shared argv-token guard
+ * (`assertArgvSafeValue` in argv.ts). `codex exec resume [OPTIONS] [SESSION_ID]
+ * [PROMPT]` reads its two positionals in order, so whatever lands first IS the
+ * session id (MI-20): a `-`-led value would be parsed by clap as a flag, an
+ * empty/whitespace value does the same shift silently, and a quoted value has
+ * no business in any argv slot. Neither may reach argv — the caller gets a
+ * naming error instead.
  */
-function isCodexResumeId(value: string): boolean {
-  const id = value.trim()
-  return id !== '' && !id.startsWith('-')
-}
 
 /**
  * `codex exec` argv.
@@ -188,17 +183,12 @@ function isCodexResumeId(value: string): boolean {
  */
 export function buildCodexArgs(opts: CodexArgOptions, logger?: BridgeLogger): string[] {
   // The resume id goes into a POSITIONAL slot, so it is validated before it can
-  // be placed (MI-20). One refusal point, with the offending value named.
+  // be placed (MI-20); D43 widened the same one-refusal-point discipline to the
+  // model and effort slots via the shared argv-token guard.
   const requestedResumeId = opts.resumeSessionId
-  if (requestedResumeId !== undefined && !isCodexResumeId(requestedResumeId)) {
-    throw new Error(
-      'codex resume session id must be a non-empty id that does not start with "-"; ' +
-        `got ${JSON.stringify(requestedResumeId)}`,
-    )
-  }
   const resumeId = requestedResumeId === undefined || requestedResumeId === ''
     ? undefined
-    : requestedResumeId
+    : assertArgvSafeValue('codex resume session id', requestedResumeId)
   const resuming = resumeId !== undefined
   const args: string[] = ['exec']
   if (resuming) args.push('resume')
@@ -208,7 +198,7 @@ export function buildCodexArgs(opts: CodexArgOptions, logger?: BridgeLogger): st
     args.push('-C', opts.cwd)
   }
   if (opts.model !== undefined && opts.model !== '') {
-    args.push('-m', opts.model)
+    args.push('-m', assertArgvSafeValue('codex model', opts.model))
   }
   if (!resuming && opts.sandbox !== undefined && opts.sandbox !== '') {
     args.push('-s', opts.sandbox)
@@ -216,8 +206,10 @@ export function buildCodexArgs(opts: CodexArgOptions, logger?: BridgeLogger): st
   if (opts.effort !== undefined && opts.effort !== '') {
     // Verified on 0.154.0: the request body then carries
     // `"reasoning":{"effort":"<level>"}`. The quotes are part of the TOML value
-    // that `-c` parses, so the level is quoted here.
-    args.push('-c', `model_reasoning_effort="${opts.effort}"`)
+    // that `-c` parses, so the level is quoted here — which is exactly why the
+    // level itself must be a bare token: a `"` in it would close the pair and
+    // open a second TOML key (audit M1).
+    args.push('-c', `model_reasoning_effort="${assertArgvSafeValue('codex effort', opts.effort)}"`)
   }
   args.push(...filterCustomArgs(opts.extraArgs, CODEX_BLOCKED_ARGS, logger))
   // No `?? ''` fallback: an empty value is refused above, so the slot can only

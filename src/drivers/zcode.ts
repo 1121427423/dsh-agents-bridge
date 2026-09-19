@@ -67,6 +67,7 @@ import {
   DriverSession,
   asRecord,
   asString,
+  assertArgvSafeValue,
   buildCommandLine,
   clampTimerDelay,
   errorText,
@@ -145,7 +146,8 @@ export interface ZcodeArgOptions {
 export function buildZcodeArgs(opts: ZcodeArgOptions, logger?: BridgeLogger): string[] {
   const args = ['--prompt', opts.prompt, '--output-format', 'stream-json']
   if (opts.resumeSessionId !== undefined && opts.resumeSessionId !== '') {
-    args.push('--resume', opts.resumeSessionId)
+    // Tokens only: a "-"-led id would be parsed as the next flag (D43 / L2).
+    args.push('--resume', assertArgvSafeValue('zcode resume session id', opts.resumeSessionId))
   }
   args.push(...filterCustomArgs(opts.extraArgs, ZCODE_BLOCKED_ARGS, logger))
   return args

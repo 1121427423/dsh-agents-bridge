@@ -12,11 +12,13 @@ import { PassThrough } from 'node:stream'
 import {
   DriverSession,
   argsContainFlag,
+  assertArgvSafeValue,
   buildCommandLine,
   clearDriverRuntime,
   filterCustomArgs,
   filterLaunchPrefix,
   getDriverRuntime,
+  isArgvSafeValue,
   readLines,
   setDriverRuntime,
   unshellQuoteArg,
@@ -341,5 +343,44 @@ describe('createBackend', () => {
     expect(() => createBackend('no-such-dialect' as never, deps)).toThrowError(
       /unknown protocol family "no-such-dialect".*Known families: claude, codebuddy, codex, openclaw, acp, generic/s,
     )
+  })
+})
+
+// ── D43: the shared argv-token guard ───────────────────────────────────────
+
+describe('assertArgvSafeValue — model-supplied argv slots take tokens only', () => {
+  it('accepts the shapes real CLIs use', () => {
+    for (const ok of [
+      'claude-sonnet-4.5',
+      'gpt-5.1-codex',
+      'openrouter/openai/o3',
+      'sess_01a0b6dd',
+      'high',
+      'o3:high',
+      'a+b',
+      '0.154.0',
+    ]) {
+      expect(isArgvSafeValue(ok)).toBe(true)
+      expect(assertArgvSafeValue('some slot', ok)).toBe(ok)
+    }
+  })
+
+  it('trims surrounding whitespace and returns the clean token', () => {
+    expect(assertArgvSafeValue('some slot', '  high  ')).toBe('high')
+    expect(isArgvSafeValue('  high  ')).toBe(true)
+  })
+
+  it('rejects anything that could smuggle a flag, a space, or shell/TOML syntax', () => {
+    for (const bad of ['--sandbox', '-p', 'a b', 'a"b', "a'b", '', '   ', '-1', 'a\nb', 'a=b']) {
+      expect(isArgvSafeValue(bad)).toBe(false)
+    }
+  })
+
+  it('names the slot, the offending value, and the rule, so the error is actionable', () => {
+    expect(() => assertArgvSafeValue('codex model', '--danger')).toThrow(
+      /codex model must be an argv-safe token/,
+    )
+    expect(() => assertArgvSafeValue('codex model', '--danger')).toThrow(/--danger/)
+    expect(() => assertArgvSafeValue('codex model', '--danger')).toThrow(/ARGV_SAFE_VALUE_PATTERN/)
   })
 })

@@ -96,7 +96,7 @@ src/drivers/index.ts    ← family → driver 表
 | `agents_output` | `sessionId`, `sinceIndex?`, `limit?` | `{sessionId, status, messages, nextIndex, terminal, result, hint}` | 增量拉取，`nextIndex` 回传 |
 | `agents_usage` | `sessionIds?`, `includeFinished?`（缺省 true） | `{sessions:[...], summary:{inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, totalTokens, reasoningTokens, sessions, running, finished, totalDurationMs}, note}` | 用量汇总。**`reasoningTokens` 是披露项、不计入 `totalTokens`**（引擎把它算在 output 内） |
 | `agents_cancel` | `sessionId`, `reason?` | `{sessionId, cancelled, status, note}` | 三段式取消 |
-| `agents_send` | `sessionId`, `prompt` | `{sessionId, status, resumed, messageCount}` | 续接（v1 best-effort：用后端 session id resume） |
+| `agents_send` | `sessionId`, `prompt` | `{sessionId, status, resumed, resumedFrom, messageCount}` | 续接（用后端 resume 指针续对话，新 bridge 会话跟踪；无指针则拒绝而非另起新会话） |
 
 工具定义必须用 `defineTool`（`@deepseek-ai/dsh-tools`），每工具声明 `output.schema`（ValueSchemaSpec DSL）+ 纯函数 `render`。
 另注册一段 `ctx.systemPrompt.section(...)`，告诉模型何时该委派、prompt 必须自包含、优先 `agents_wait` 而不是高频轮询。

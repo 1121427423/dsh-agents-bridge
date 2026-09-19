@@ -580,3 +580,16 @@ describe('run() over a fake child', () => {
     ).rejects.toThrowError(/gateway\/connect mode is not implemented in v1/)
   })
 })
+
+// ── D43: model/effort slots take argv-safe tokens only ─────────────────────
+
+describe('D43: buildOpenclawArgs refuses flag-shaped model/effort values', () => {
+  it('refuses a "-"-leading model or effort instead of placing it', () => {
+    expect(() => buildOpenclawArgs({ prompt: 'x', sessionId: 's', model: '-a' })).toThrow(
+      /model must be an argv-safe token/,
+    )
+    expect(() => buildOpenclawArgs({ prompt: 'x', sessionId: 's', effort: '--danger' })).toThrow(
+      /effort must be an argv-safe token/,
+    )
+  })
+})

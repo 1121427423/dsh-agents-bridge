@@ -769,3 +769,26 @@ describe('IM-8: a long tool call is not idle silence', () => {
     }
   })
 })
+
+// ── D43: model/effort/resume slots take argv-safe tokens only (audit L2) ────
+
+describe('D43: buildClaudeArgs refuses flag-shaped model/effort/resume values', () => {
+  it('refuses a "-"-leading value at all three slots', () => {
+    expect(() => buildClaudeArgs({ model: '--resume' })).toThrow(/model must be an argv-safe token/)
+    expect(() => buildClaudeArgs({ effort: '--danger' })).toThrow(/effort must be an argv-safe token/)
+    expect(() => buildClaudeArgs({ resumeSessionId: '--danger' })).toThrow(
+      /resume session id must be an argv-safe token/,
+    )
+  })
+
+  it('negative control: ordinary values still land in their slots', () => {
+    const args = buildClaudeArgs({
+      model: 'claude-sonnet-4.5',
+      effort: 'high',
+      resumeSessionId: 'sess_a1/b2',
+    })
+    expect(args).toContain('claude-sonnet-4.5')
+    expect(args).toContain('high')
+    expect(args).toContain('sess_a1/b2')
+  })
+})

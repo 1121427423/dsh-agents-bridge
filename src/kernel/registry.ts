@@ -46,6 +46,7 @@ import type {
 } from './types.ts'
 import { childLogger } from './logger.ts'
 import { buildCommandLine } from './command-line.ts'
+import { signalProcessGroup } from './spawn.ts'
 import { BUILTIN_DESCRIPTORS, policyFor, type TrackPolicyOptions } from '../tracks/index.ts'
 import { credentialStatusFor, type CredentialReaderOptions } from '../tracks/health.ts'
 import { modelFieldsFor, modelsFor, type ModelReaderOptions } from '../tracks/models.ts'
@@ -340,6 +341,10 @@ export const defaultVersionProbe: VersionProbe = ({ argv, env, timeoutMs }) =>
       child = nodeSpawn(file, argv.slice(1), {
         env: { ...env },
         stdio: ['ignore', 'pipe', 'pipe'],
+        // Group leader, so a probe that hangs with its own children (an
+        // interpreter shim that forks a helper) is killed as a tree on
+        // timeout, not just decapitated (D43 / audit L5).
+        detached: true,
       })
     } catch (err) {
       finish({ diagnostic: probeErrorText(err) })
@@ -367,11 +372,11 @@ export const defaultVersionProbe: VersionProbe = ({ argv, env, timeoutMs }) =>
       finish(diagnostic === undefined ? undefined : { diagnostic })
     })
     timer = setTimeout(() => {
-      try {
-        child.kill('SIGKILL')
-      } catch {
-        /* already gone */
-      }
+      // The probe ran detached (above), so signal the whole GROUP: a wedged
+      // `--version` that already forked helpers must not leave them behind
+      // (D43 / audit L5). signalProcessGroup falls back to the bare pid on
+      // EPERM and treats ESRCH as "already gone".
+      if (child.pid !== undefined) signalProcessGroup(child.pid, 'SIGKILL')
       finish({ diagnostic: `timed out after ${timeoutMs}ms` })
     }, timeoutMs)
   })

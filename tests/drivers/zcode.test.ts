@@ -139,6 +139,13 @@ describe('buildZcodeArgs', () => {
     expect(args.slice(-2)).toEqual(['--resume', 'sess_abc'])
   })
 
+  it('D43: refuses a resume id shaped like a flag instead of slotting it', () => {
+    expect(() => buildZcodeArgs({ prompt: 'P', resumeSessionId: '--danger' })).toThrow(
+      /resume session id must be an argv-safe token/,
+    )
+    expect(() => buildZcodeArgs({ prompt: 'P', resumeSessionId: '--danger' })).toThrow(/--danger/)
+  })
+
   it('blocks every token that could steal the prompt, protocol, selection or resume', () => {
     const args = buildZcodeArgs({
       prompt: 'P',

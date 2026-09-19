@@ -345,17 +345,24 @@ async function runPermission() {
     })
 
   const results = []
-  // 1. A session-scoped grant is offered and must win over allow_once.
+  // 1. A session-scoped grant offered with a one-shot kind: the known id must
+  // still win over a plain allow_once.
   results.push(await ask([
     { optionId: 'allow_once', kind: 'allow_once', name: 'Allow once' },
-    { optionId: 'allow_session', kind: 'allow_always', name: 'Allow for session' },
+    { optionId: 'allow_session', kind: 'allow_once', name: 'Allow for session' },
   ]))
-  // 2. Only a permanent grant + a single-use reject: the reject must win.
+  // 2. M2: a session-LOOKING id wearing a PERMANENT kind is not session-scoped
+  // — the plain one-shot grant must win over the named id.
+  results.push(await ask([
+    { optionId: 'allow_session', kind: 'allow_always', name: 'Allow for session' },
+    { optionId: 'allow_once', kind: 'allow_once', name: 'Allow once' },
+  ]))
+  // 3. Only a permanent grant + a single-use reject: the reject must win.
   results.push(await ask([
     { optionId: 'allow_always', kind: 'allow_always', name: 'Always allow' },
     { optionId: 'reject_once', kind: 'reject_once', name: 'Reject' },
   ]))
-  // 3. Permanent-only: must be a protocol error, never a fabricated optionId.
+  // 4. Permanent-only: must be a protocol error, never a fabricated optionId.
   try {
     results.push(await ask([{ optionId: 'allow_always', kind: 'allow_always', name: 'Always allow' }]))
   } catch (err) {

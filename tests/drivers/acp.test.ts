@@ -444,12 +444,34 @@ function emptyAcc() {
 // ── permission policy (pure) ────────────────────────────────────────────────
 
 describe('selectPermissionOption', () => {
-  it('prefers a known session-scoped grant over allow_once', () => {
+  it('prefers a known session-scoped id when its kind is allow_once', () => {
     const selection = selectPermissionOption([
       { optionId: 'allow_once', kind: 'allow_once' },
-      { optionId: 'allow_session', kind: 'allow_always' },
+      { optionId: 'allow_session', kind: 'allow_once' },
     ])
     expect(selection).toEqual({ optionId: 'allow_session', grant: true, ok: true })
+  })
+
+  it('NEVER treats an allow_always KIND as session-scoped, whatever id it wears (audit M2)', () => {
+    // An engine may give its persistent grant a session-looking id. The kind is
+    // the ground truth: allow_always outlives the task, so the selector falls
+    // through to a real one-shot grant — it does not pick the id.
+    const selection = selectPermissionOption([
+      { optionId: 'allow_session', kind: 'allow_always' },
+      { optionId: 'plain-once', kind: 'allow_once' },
+    ])
+    expect(selection).toEqual({ optionId: 'plain-once', grant: true, ok: true })
+
+    // No one-shot grant on offer → deny this action, not the permanent grant.
+    const denied = selectPermissionOption([
+      { optionId: 'approve_for_session', kind: 'allow_always' },
+      { optionId: 'reject_once', kind: 'reject_once' },
+    ])
+    expect(denied).toEqual({ optionId: 'reject_once', grant: false, ok: true })
+
+    expect(selectPermissionOption([{ optionId: 'allow_session', kind: 'allow_always' }]).ok).toBe(
+      false,
+    )
   })
 
   it('takes an allow_once grant when nothing session-scoped is offered', () => {
@@ -866,9 +888,13 @@ describe('acp driver, real pipes', () => {
     async () => {
       const { messages, result } = await runToCompletion('permission')
       const text = texts(messages)
-      // 1. session-scoped grant wins; 2. permanent grant refused, reject_once
-      // taken instead; 3. permanent-only => a protocol error, not a guess.
+      // 1. session-scoped id wins when its kind is one-shot;
+      // 2. M2: the same id with a PERMANENT kind is refused, the plain
+      //    allow_once is selected instead;
+      // 3. permanent-only grant refused, reject_once taken instead;
+      // 4. permanent-only offer => a protocol error, not a guess.
       expect(text).toContain('allow_session')
+      expect(text).toMatch(/"optionId":"allow_once"/)
       expect(text).toContain('reject_once')
       expect(text).toContain('no auto-selectable permission option offered')
       expect(text).not.toContain('allow_always')

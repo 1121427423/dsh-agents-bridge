@@ -1,10 +1,15 @@
+import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
 import { afterAll, describe, expect, it } from 'vitest'
 
-import { BUILTIN_DESCRIPTORS, createRegistry } from '../../src/kernel/registry.ts'
+import {
+  BUILTIN_DESCRIPTORS,
+  createRegistry,
+  defaultVersionProbe,
+} from '../../src/kernel/registry.ts'
 import { policyFor } from '../../src/tracks/index.ts'
 import type { DirEntry } from '../../src/tracks/desktop/scan.ts'
 
@@ -603,5 +608,33 @@ describe('re-scanning the bundle roots is an explicit verb (RR-MI-1)', () => {
     // One walk for two callers: a re-scan is expensive and must not double up.
     expect(rootListings).toBe(afterFirst + 1)
     expect(first.map((result) => result.id).sort()).toEqual(second.map((result) => result.id).sort())
+  })
+})
+
+describe('defaultVersionProbe — a wedged --version is killed as a tree (D43 / audit L5)', () => {
+  it('SIGKILLs the whole process group, grandchildren included', async () => {
+    // Two sleeps, one forked BEFORE the parent replaces itself: both sit in the
+    // spawned group. A child-only SIGKILL leaves them alive for 30s; a group
+    // SIGKILL removes them with the leader.
+    const sentinel = `dsh-probe-kill-${process.pid}`
+    const outcome = await defaultVersionProbe({
+      argv: [
+        '/bin/bash',
+        '-c',
+        `exec -a ${sentinel}-inner sleep 30 & exec -a ${sentinel}-outer sleep 30`,
+      ],
+      env: process.env as Record<string, string>,
+      timeoutMs: 150,
+    })
+    expect(outcome).toMatchObject({ diagnostic: expect.stringContaining('timed out') })
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    // pgrep exits 1 on no match; anything listed here means the kill missed.
+    let survivors = ''
+    try {
+      survivors = execFileSync('pgrep', ['-f', `${sentinel}-`], { encoding: 'utf8' })
+    } catch {
+      /* exit code 1: no surviving process */
+    }
+    expect(survivors.trim()).toBe('')
   })
 })

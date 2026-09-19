@@ -1024,3 +1024,28 @@ describe('run() over a fake child', () => {
     ])
   })
 })
+
+// ── D43: model/effort slots take argv-safe tokens only (audit M1) ───────────
+
+describe('D43: model and effort cannot smuggle flags or TOML syntax', () => {
+  it('refuses a model that starts with "-" instead of placing it after -m', () => {
+    expect(() => buildCodexArgs({ prompt: 'p', model: '-s,yolo' })).toThrow(
+      /model must be an argv-safe token/,
+    )
+  })
+
+  it('refuses an effort carrying TOML quoting syntax', () => {
+    expect(() => buildCodexArgs({ prompt: 'p', effort: 'high"\nfoo="' })).toThrow(
+      /effort must be an argv-safe token/,
+    )
+    expect(() => buildCodexArgs({ prompt: 'p', effort: '--danger' })).toThrow(
+      /effort must be an argv-safe token/,
+    )
+  })
+
+  it('negative control: provider-qualified model ids and levels still land', () => {
+    const args = buildCodexArgs({ prompt: 'p', model: 'openrouter/openai/gpt-5', effort: 'high' })
+    expect(args).toContain('openrouter/openai/gpt-5')
+    expect(args).toContain('model_reasoning_effort="high"')
+  })
+})

@@ -1818,13 +1818,15 @@ export function createToolDefinitions(manager: AgentManager, seat: JobSeat = {})
     },
   })
 
-  /** `agents_send` — continue a finished conversation (v1: best-effort resume). */
+  /** `agents_send` — continue a finished conversation in a new, tracked run. */
   const send = defineTool({
     name: 'agents_send',
     description:
-      'Continue a previous session with a new prompt, reusing the delegated agent\'s backend conversation when the '
-      + 'dialect supports resume. v1 is best-effort: if the dialect cannot resume, the kernel starts a fresh '
-      + 'session for the prompt. Returns immediately like agents_run, then poll agents_output with the returned '
+      'Continue a previous session with a new prompt. The delegated agent picks the conversation up where it left '
+      + 'off (the backend resume pointer is used when the dialect supports one), and the follow-up runs as a NEW '
+      + 'tracked session with its own sessionId — the kernel never reuses the original bridge id. A session that '
+      + 'was never launched, or one the dialect cannot resume, is refused rather than silently restarted as a '
+      + 'fresh conversation. Returns immediately like agents_run, then poll agents_output with the returned '
       + 'sessionId.',
     parameters: {
       sessionId: {
@@ -1845,13 +1847,16 @@ export function createToolDefinitions(manager: AgentManager, seat: JobSeat = {})
         properties: {
           sessionId: { type: 'string' },
           status: { type: 'string', enum: [...RUN_STATUSES] },
+          /** Always true in v1: send only exists to continue a backend conversation. */
           resumed: { type: 'boolean' },
+          /** The session id this follow-up continues — never equal to sessionId. */
+          resumedFrom: { type: 'string' },
           messageCount: { type: 'integer' },
         },
       },
       render: (_args, value) => text(
         [
-          `${value.resumed ? 'continued' : 'started a follow-up in'} ${value.sessionId} (status=${value.status}, messages=${value.messageCount})`,
+          `continued ${value.resumedFrom} as ${value.sessionId} (status=${value.status}, messages=${value.messageCount})`,
           '',
           `Next: agents_wait { "sessionIds": "${value.sessionId}", "timeoutMs": 20000 } to wait for the follow-up in one call,`,
           `or agents_output { "sessionId": "${value.sessionId}", "sinceIndex": ${value.messageCount} } to read only the new turns` +
@@ -1875,10 +1880,16 @@ export function createToolDefinitions(manager: AgentManager, seat: JobSeat = {})
       } catch (err) {
         throw await describeRunFailure(manager, err, 'send')
       }
+      // v1 semantics, stated honestly (D43 / audit L4): the kernel always
+      // mints a fresh bridge session for a follow-up, so
+      // `resumed: snapshot.sessionId === args.sessionId` could never be true.
+      // What the field must say is that the backend conversation IS being
+      // continued, and `resumedFrom` names which one.
       return {
         sessionId: snapshot.sessionId,
         status: snapshot.status,
-        resumed: snapshot.sessionId === args.sessionId,
+        resumed: true,
+        resumedFrom: args.sessionId,
         messageCount: snapshot.messageCount,
       }
     },

@@ -331,6 +331,51 @@ export function argsContainFlag(args: readonly string[], flag: string): boolean 
   return args.some((a) => a === flag || a.startsWith(prefix))
 }
 
+// ── Model-supplied slot hygiene (D43, audit M1/L2) ──────────────────────────
+
+/**
+ * The character set a model-supplied VALUE may carry before it is placed into
+ * an argv slot: letters, digits, and the token punctuation every known CLI
+ * accepts (`- . _ : / +`), with the first character restricted so the value
+ * can never itself read as a flag.
+ *
+ * This covers the shapes CLIs actually use — `claude-sonnet-4.5`,
+ * `gpt-5.1-codex`, `openrouter/openai/o3`, `sess_<uuid>`, `high`, `o3:high` —
+ * and refuses precisely everything dangerous: `--flag`, `-p`, embedded spaces,
+ * quotes (shell and TOML, e.g. codex's `-c key="${effort}"`), `=` (would close
+ * one pair and open another), and newlines. Backtick/`$` were never legal in
+ * argv, but keeping them out also makes the values safe to log and to embed in
+ * docs queries.
+ */
+export const ARGV_SAFE_VALUE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/+-]*$/
+
+/** Test-only predicate; builders should use `assertArgvSafeValue`. */
+export function isArgvSafeValue(value: string): boolean {
+  return ARGV_SAFE_VALUE_PATTERN.test(value.trim())
+}
+
+/**
+ * Refuse a model-supplied value that is not an argv-safe token, naming the
+ * slot it was headed for. Returns the trimmed token so the builder can place
+ * the clean value.
+ *
+ * ONE refusal point per slot, with the offending value named — the same error
+ * shape MI-20 established for the codex resume slot, now shared by every
+ * driver (audit: the TOML effort string and the claude/zcode/generic resume
+ * flags all had the same unchecked path).
+ */
+export function assertArgvSafeValue(label: string, value: string): string {
+  const token = value.trim()
+  if (!ARGV_SAFE_VALUE_PATTERN.test(token)) {
+    throw new Error(
+      `${label} must be an argv-safe token (letters and digits plus ._:/+-, never starting with "-"); ` +
+        `got ${JSON.stringify(value.length > 80 ? value.slice(0, 80) + '…' : value)}. ` +
+        'If this value is legitimate for a new engine, widen ARGV_SAFE_VALUE_PATTERN in src/drivers/argv.ts.',
+    )
+  }
+  return token
+}
+
 // ── Session plumbing shared by every dialect ────────────────────────────────
 
 export interface DriverSessionInit {

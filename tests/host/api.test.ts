@@ -450,7 +450,7 @@ describe('host API — guards', () => {
     expect(result.body).toEqual({ ok: false, error: { code: 'bad-request', message: 'missing or invalid "sessionId"' } })
   })
 
-  it('500s a thrown handler with a JSON body, never an HTML error page', async () => {
+  it('500s a thrown handler with a JSON body, never an HTML error page (audit L1)', async () => {
     const manager = fakeManager({
       list: () => {
         throw new Error('kernel exploded')
@@ -459,7 +459,10 @@ describe('host API — guards', () => {
     const result = await call(makeHandler(manager), { body: '{}' })
     expect(result.status).toBe(500)
     expect(result.headers['content-type']).toBe('application/json; charset=utf-8')
-    expect(result.body).toEqual({ ok: false, error: { code: 'internal', message: 'kernel exploded' } })
+    expect(result.body).toEqual({ ok: false, error: { code: 'internal', message: 'internal error' } })
+    // The wire body stays opaque: internal detail (paths, kernel phrasing,
+    // stack-adjacent text) never crosses to the caller (D43 / audit L1).
+    expect(JSON.stringify(result.body)).not.toContain('kernel exploded')
   })
 
   it('never caches a response (a cached 403/500 would be actively harmful)', async () => {

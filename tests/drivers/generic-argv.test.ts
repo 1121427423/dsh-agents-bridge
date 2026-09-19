@@ -125,6 +125,15 @@ describe('buildGenericArgs', () => {
     expect(buildGenericArgs({ resumeSessionId: 's', resumeFlag: '' })).toEqual([])
   })
 
+  it('D43: refuses flag-shaped model/resume values instead of placing them', () => {
+    expect(() => buildGenericArgs({ model: '--danger' })).toThrow(
+      /model must be an argv-safe token/,
+    )
+    expect(() => buildGenericArgs({ resumeSessionId: '--danger', resumeFlag: '-r' })).toThrow(
+      /resume session id must be an argv-safe token/,
+    )
+  })
+
   it('reads the resume flag from the driver env namespace', () => {
     expect(genericResumeFlagFromEnv({})).toBe('--resume')
     expect(genericResumeFlagFromEnv({ DSH_AGENTS_BRIDGE_GENERIC_RESUME_FLAG: '--continue-with' })).toBe(

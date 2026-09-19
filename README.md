@@ -20,7 +20,7 @@
 | `agents_output` | `sessionId`, `sinceIndex?`, `limit?` | `{sessionId, status, messages, nextIndex, terminal, result, hint}` | 增量拉事件；**把 `nextIndex` 回传** |
 | `agents_usage` | `sessionIds?`, `includeFinished?`（缺省 `true`） | `{sessions: [...], summary: {...}, note}` | **账单**：逐会话 + 汇总 token/时长。`reasoningTokens` **单列且不计入总量**（见 §5） |
 | `agents_cancel` | `sessionId`, `reason?` | `{sessionId, cancelled, status, note}` | 杀整个进程组；幂等 |
-| `agents_send` | `sessionId`, `prompt` | `{sessionId, status, resumed, messageCount}` | 续接（v1 best-effort resume） |
+| `agents_send` | `sessionId`, `prompt` | `{sessionId, status, resumed, resumedFrom, messageCount}` | 续接（resume 指针续后端对话，新会话跟踪；无指针拒绝开新会话） |
 
 **典型调用序列**
 

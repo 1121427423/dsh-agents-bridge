@@ -48,6 +48,7 @@ import {
   asLogLevel,
   asRecord,
   asString,
+  assertArgvSafeValue,
   buildCommandLine,
   clampTimerDelay,
   errorText,
@@ -216,12 +217,12 @@ export function buildStreamJsonArgs(
     args.push('--strict-mcp-config')
   }
   if (opts.model !== undefined && opts.model !== '') {
-    args.push('--model', opts.model)
+    args.push('--model', assertArgvSafeValue(`${dialect.label} model`, opts.model))
   }
   if (opts.effort !== undefined && opts.effort !== '') {
     // Slotted right after --model so the launch line reads as one model+effort
     // decision; the CLI accepts the flag in any order.
-    args.push('--effort', opts.effort)
+    args.push('--effort', assertArgvSafeValue(`${dialect.label} effort`, opts.effort))
   }
   if (opts.maxTurns !== undefined && opts.maxTurns > 0) {
     args.push('--max-turns', String(opts.maxTurns))
@@ -230,7 +231,12 @@ export function buildStreamJsonArgs(
     args.push('--append-system-prompt', opts.systemPrompt)
   }
   if (opts.resumeSessionId !== undefined && opts.resumeSessionId !== '') {
-    args.push('--resume', opts.resumeSessionId)
+    // The value is placed verbatim after --resume, so it must be a token,
+    // never a flag that would re-open option parsing (D43 / audit L2).
+    args.push(
+      '--resume',
+      assertArgvSafeValue(`${dialect.label} resume session id`, opts.resumeSessionId),
+    )
   }
   args.push(...filterCustomArgs(opts.extraArgs, dialect.blockedArgs, logger))
   return args
