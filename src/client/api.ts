@@ -229,10 +229,12 @@ export function normalizeProbe(raw: unknown): ClientProbeResult | undefined {
  */
 export interface ClientSettingField {
   readonly key: string
-  readonly kind: 'string' | 'natural' | 'strings'
+  readonly kind: 'string' | 'natural' | 'strings' | 'choice'
   readonly effect: 'live' | 'reload'
   readonly reason: string
   readonly value: string | number | readonly string[] | undefined
+  /** The accepted values of a `choice` field; absent for every other kind. */
+  readonly options?: readonly string[]
   readonly overridden: boolean
 }
 
@@ -256,8 +258,16 @@ function normalizeSettingField(raw: unknown): ClientSettingField | undefined {
   const key = value['key']
   const kind = value['kind']
   if (typeof key !== 'string') return undefined
-  if (kind !== 'string' && kind !== 'natural' && kind !== 'strings') return undefined
+  if (kind !== 'string' && kind !== 'natural' && kind !== 'strings' && kind !== 'choice') return undefined
   const rawValue = value['value']
+  // A `choice` field with no usable options cannot be rendered as a select; the
+  // row survives (its value and reason still display) but the card treats it as
+  // option-less rather than inventing choices.
+  const rawOptions = value['options']
+  const options =
+    kind === 'choice' && Array.isArray(rawOptions)
+      ? rawOptions.filter((entry): entry is string => typeof entry === 'string')
+      : undefined
   return {
     key,
     kind,
@@ -268,6 +278,7 @@ function normalizeSettingField(raw: unknown): ClientSettingField | undefined {
       : typeof rawValue === 'string' || typeof rawValue === 'number'
         ? rawValue
         : undefined,
+    ...(options === undefined ? {} : { options }),
     overridden: value['overridden'] === true,
   }
 }

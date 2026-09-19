@@ -284,42 +284,13 @@ export function apply(ctx: Context, config: Config = {}): void {
    * Which wire the standalone Qoder CN CLI is driven over (D46).
    *
    * Both rows stay in the catalog — the switch marks the unselected one
-   * `unsupported` so `probe` explains why it is not offered, and the operator can
-   * flip it back with one setting.
-   *
-   * The merge is FIELD-level, not key-level, and that distinction is the whole
-   * point: a caller's `overrides.qoderclicn` is a legitimate two-line patch
-   * (pinning the executable, say), and `{...switch, ...caller}` would let it
-   * replace the switch's patch object wholesale — deleting `unsupported` and
-   * silently re-enabling the row. So the switch owns exactly ONE field and the
-   * caller keeps every other one.
+   * `unsupported` so `probe` explains why it is not offered, and the operator
+   * can flip it back with one setting. The decision itself sits BELOW, after
+   * `installSettings`: the settings user layer (what the settings card writes)
+   * outranks the plugin config, so it has to be consulted before the switch
+   * merges its descriptor overrides.
    */
-  const decision = decideQoderTransport(config.qoderTransport)
-  const qoderTransport = decision.transport
-  const qoderOverrides = qoderTransportOverrides(qoderTransport)
-  if (decision.ignored !== undefined) {
-    // A misconfigured switch must be LOUD, through EITHER door — the alternative
-    // is an operator who believes they selected ACP while the bridge quietly
-    // kept the default. A value that merely lost the precedence contest is not
-    // reported: it is valid, and warning about it would train the reader to
-    // ignore this line.
-    logger.warn('qoderTransport value not recognised and was ignored', {
-      source: decision.ignored.source,
-      value: decision.ignored.value,
-      using: qoderTransport,
-      accepted: ['stream-json', 'acp'],
-    })
-  }
   const overrides: Record<AgentId, Partial<AgentDescriptor>> = { ...config.overrides }
-  for (const [id, patch] of Object.entries(qoderOverrides)) {
-    overrides[id] = { ...overrides[id], ...patch }
-  }
-  logger.info('qoder cli transport selected', {
-    transport: qoderTransport,
-    agent: QODER_TRANSPORT_DESCRIPTOR[qoderTransport],
-    disabled: Object.keys(qoderOverrides),
-    source: decision.from,
-  })
 
   /**
    * The manager options object, kept MUTABLE on purpose.
@@ -341,9 +312,11 @@ export function apply(ctx: Context, config: Config = {}): void {
     // ACP family gets the resident pool; every other family is untouched.
     createBackend: (family, deps) =>
       family === 'acp' ? createAcpBackend(deps, undefined, acpResident) : createBackend(family, deps),
-    // Unconditional since D46: the transport switch always contributes one entry,
-    // so this object is never empty. The old `length === 0` guard read as if
-    // overrides could be absent, which they no longer can.
+    // Unconditional since D46: the transport switch (decided just below, once
+    // the settings user layer has been consulted) always contributes one entry
+    // before the manager is built, so the object the manager receives is never
+    // empty. The old `length === 0` guard read as if overrides could be absent,
+    // which they no longer can.
     overrides,
     ...(config.descriptors === undefined ? {} : { extraDescriptors: config.descriptors }),
     ...(config.storeDir === undefined ? {} : { storeDir: config.storeDir }),
@@ -361,6 +334,62 @@ export function apply(ctx: Context, config: Config = {}): void {
   // starts with and the resolved values arrive on the next change (matching the
   // per-field effect declared above).
   const settings = installSettings(ctx, managerOptions, settingsEntryFrom(config))
+
+  /**
+   * The Qoder CN CLI transport switch (D46), decided ONCE per plugin load, from
+   * the settings user layer first (what the settings card writes), then the
+   * plugin config field, then the env, then the default.
+   *
+   * The user layer outranks the plugin config because that is how EVERY field in
+   * this namespace layers (`schema ← composition entry ← user layer`); reading
+   * it HERE — not inside the settings scope's watcher — is also what keeps the
+   * card's 下次加载生效 claim honest: a later save re-decides nothing until the
+   * plugin loads again.
+   *
+   * The merge is FIELD-level, not key-level, and that distinction is the whole
+   * point: a caller's `overrides.qoderclicn` is a legitimate two-line patch
+   * (pinning the executable, say), and `{...switch, ...caller}` would let it
+   * replace the switch's patch object wholesale — deleting `unsupported` and
+   * silently re-enabling the row. So the switch owns exactly ONE field and the
+   * caller keeps every other one.
+   */
+  const storedRaw = settings.read().fields.find((field) => field.key === 'qoderTransport')?.value
+  // The value resolved through the port is already union-checked: `coerceField`
+  // refuses anything outside the pair on the write path, and the schema is the
+  // same closed union, so a string here is a transport literal (or the config
+  // value the composition entry carries).
+  const storedTransport = typeof storedRaw === 'string' ? (storedRaw as QoderTransport) : undefined
+  const decision = decideQoderTransport(storedTransport ?? config.qoderTransport)
+  const qoderTransport = decision.transport
+  const qoderOverrides = qoderTransportOverrides(qoderTransport)
+  for (const [id, patch] of Object.entries(qoderOverrides)) {
+    overrides[id] = { ...overrides[id], ...patch }
+  }
+  if (decision.ignored !== undefined) {
+    // A misconfigured switch must be LOUD, through ANY door — the alternative
+    // is an operator who believes they selected ACP while the bridge quietly
+    // kept the default. A value that merely lost the precedence contest is not
+    // reported: it is valid, and warning about it would train the reader to
+    // ignore this line.
+    logger.warn('qoderTransport value not recognised and was ignored', {
+      source: decision.ignored.source,
+      value: decision.ignored.value,
+      using: qoderTransport,
+      accepted: ['stream-json', 'acp'],
+    })
+  }
+  logger.info('qoder cli transport selected', {
+    transport: qoderTransport,
+    agent: QODER_TRANSPORT_DESCRIPTOR[qoderTransport],
+    disabled: Object.keys(qoderOverrides),
+    // The port resolves the composition entry too, so a stored value EQUAL to
+    // the config value still counts as "config"; "settings" is claimed only
+    // when the user layer actually overrode something.
+    source:
+      storedTransport !== undefined && storedTransport !== config.qoderTransport
+        ? 'settings'
+        : decision.from,
+  })
 
   const manager = createAgentManager(managerOptions)
   /**

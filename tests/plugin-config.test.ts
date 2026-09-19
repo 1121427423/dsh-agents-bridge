@@ -61,7 +61,7 @@ interface Registered {
  * host has none, so the callback is simply never run — which is the whole point
  * (the nine tools must not depend on it).
  */
-function fakeContext(): { ctx: unknown; registered: Registered } {
+function fakeContext(settingsService?: unknown): { ctx: unknown; registered: Registered } {
   const registered: Registered = { tools: new Map(), sections: [], disposers: [] }
   const ctx = {
     effect: (body: () => (() => void) | void) => {
@@ -81,14 +81,45 @@ function fakeContext(): { ctx: unknown; registered: Registered } {
       },
     },
     get: () => undefined,
-    inject: () => undefined,
+    // With a settings service on the seam, `inject(['settings'], …)` runs the
+    // entry's callback synchronously — as cordis does when the service is
+    // already up, which is the case the transport decision reads through.
+    inject: (deps: readonly string[], callback: (scoped: unknown) => void) => {
+      if (settingsService !== undefined && deps.includes('settings')) {
+        callback({ get: (name: string) => (name === 'settings' ? settingsService : undefined) })
+      }
+      return undefined
+    },
   }
   return { ctx, registered }
 }
 
+/**
+ * A minimal `ctx.settings` whose stored user layer is exactly `user`.
+ *
+ * Only the surface `installSettings` exercises on this path: `register` (with
+ * the base it is handed) and a scope whose `get()` resolves `base ← user`. No
+ * `describe` — the value path never needs it, and its absence puts `read()` on
+ * the documented value-comparison fallback without affecting the values.
+ */
+function fakeSettingsService(user: Record<string, unknown>): unknown {
+  let base: Record<string, unknown> = {}
+  return {
+    register(_ns: string, _schema: unknown, options?: { base?: Record<string, unknown> }) {
+      base = { ...(options?.base ?? {}) }
+      return {
+        get: () => ({ ...base, ...user }),
+        update: (patch: Record<string, unknown>) => {
+          Object.assign(user, patch)
+        },
+      }
+    },
+  }
+}
+
 /** Boots the plugin with a config row pointing every agent at the fake CLI. */
-function boot(config: Partial<Config> = {}): Registered {
-  const { ctx, registered } = fakeContext()
+function boot(config: Partial<Config> = {}, settingsService?: unknown): Registered {
+  const { ctx, registered } = fakeContext(settingsService)
   const work = mkdtempSync(path.join(tmpdir(), 'plugin-cfg-'))
   const override = { command: { executable: process.execPath, argsPrefix: [SLOW_CLI] } }
   apply(ctx as never, {
@@ -402,4 +433,40 @@ describe('the Qoder CLI transport switch', () => {
     expect(acp?.reason).toContain('qoderTransport=stream-json')
     expect(acp?.available).toBe(false)
   }, 30_000)
+
+  it('lets the settings user layer OUTRANK the plugin config (the card door is real)', async () => {
+    // The settings card writes into the settings.yaml user layer, not into the
+    // plugin config. If `apply()` decided from config alone, a panel save would
+    // report ok and then change NOTHING — the exact fake-switch this module
+    // wars against. The user layer is the top door, consistent with how every
+    // other field in the namespace layers.
+    const rows = await probeRowsWithSettings(
+      { qoderTransport: 'acp' },
+      { qoderTransport: 'stream-json' },
+    )
+    const print = rows.find((row) => row.id === 'qoderclicn-print')
+    const acp = rows.find((row) => row.id === 'qoderclicn')
+    expect(print?.reason).toContain('qoderTransport=acp')
+    expect(print?.available).toBe(false)
+    expect(acp?.reason ?? '').not.toContain('qoderTransport')
+  }, 30_000)
+
+  it('falls back to the config door when the user layer holds nothing', async () => {
+    // An empty user layer must not swallow the config value: the port resolves
+    // `base ← user`, and the base IS the composition entry (config), so the
+    // decision sees the same value it always did.
+    const rows = await probeRowsWithSettings({}, { qoderTransport: 'acp' })
+    const print = rows.find((row) => row.id === 'qoderclicn-print')
+    expect(print?.reason).toContain('qoderTransport=acp')
+  }, 30_000)
+
+/** `probeRows` for a host that HAS a settings service with the given user layer. */
+async function probeRowsWithSettings(
+  user: Record<string, unknown>,
+  config: Partial<Config> = {},
+): Promise<readonly Probed[]> {
+  const registered = boot(config, fakeSettingsService(user))
+  return (await call(registered, 'agents_probe', {})) as readonly Probed[]
+}
 })
+

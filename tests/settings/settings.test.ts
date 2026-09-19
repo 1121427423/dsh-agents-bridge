@@ -244,6 +244,64 @@ describe('the settings namespace', () => {
     expect((options as { allowedCwd?: readonly string[] }).allowedCwd).toEqual(['/a', '/b', '/c'])
   })
 
+  it('accepts only the closed value set of the choice field, and names the set in the refusal', async () => {
+    const { service, user } = fakeService()
+    const options = managerOptions()
+    const port = installSettings(wiredContext(service), options, {})
+
+    // The accepted pair lands verbatim in the user layer…
+    expect(await port.write({ qoderTransport: 'acp' })).toMatchObject({ ok: true })
+    expect(user['qoderTransport']).toBe('acp')
+    // …case is normalised exactly like the config/env doors do it…
+    expect(await port.write({ qoderTransport: ' STREAM-json ' })).toMatchObject({ ok: true })
+    expect(user['qoderTransport']).toBe('stream-json')
+    // …while anything outside the set is refused by naming the whole set — the
+    // next plugin load must never meet a stored value the switch does not know.
+    const refused = await port.write({ qoderTransport: 'websocket' })
+    expect(refused.ok).toBe(false)
+    if (!refused.ok) {
+      expect(refused.error).toContain('stream-json')
+      expect(refused.error).toContain('acp')
+    }
+    expect(user['qoderTransport']).toBe('stream-json')
+  })
+
+  it('keeps the transport knob OUT of the manager options: its effect is the next load, not this object', async () => {
+    const { service, user } = fakeService()
+    const options = managerOptions()
+    const port = installSettings(wiredContext(service), options, {})
+
+    expect(await port.write({ qoderTransport: 'acp' })).toMatchObject({ ok: true })
+    // The save persisted…
+    expect(user['qoderTransport']).toBe('acp')
+    // …but nothing was planted on the options object the manager holds: the
+    // switch is decided from the plugin CONFIG at apply() time, and a key here
+    // would read as if the kernel consumed it live (it does not).
+    expect(Object.prototype.hasOwnProperty.call(options, 'qoderTransport')).toBe(false)
+    // The card still sees the resolved value and its effect claim.
+    const state = port.read().fields.find(field => field.key === 'qoderTransport')
+    expect(state?.value).toBe('acp')
+    expect(state?.effect).toBe('reload')
+    expect(state?.overridden).toBe(true)
+  })
+
+  it('carries the composition transport into the settings base, and a reset returns to it', async () => {
+    const { service } = fakeService({ user: {} })
+    const entry = settingsEntryFrom({ qoderTransport: 'acp' })
+    const port = installSettings(wiredContext(service), managerOptions(), entry)
+
+    // Deployment config is what the field shows before any user layer exists.
+    expect(port.read().fields.find(field => field.key === 'qoderTransport')?.value).toBe('acp')
+
+    const written = await port.write({ qoderTransport: 'stream-json' })
+    expect(written.ok).toBe(true)
+    // A clear goes through the removal path and falls back to the composition
+    // value rather than to silence.
+    const cleared = await port.write({ qoderTransport: '' })
+    expect(cleared.ok).toBe(true)
+    expect(port.read().fields.find(field => field.key === 'qoderTransport')?.value).toBe('acp')
+  })
+
   it('a reset clears the key from the user layer and flips `overridden` back', async () => {
     const { service, user } = fakeService({ user: { defaultCwd: '/from/user' } })
     const entry = settingsEntryFrom({ defaultCwd: '/from/composition' })

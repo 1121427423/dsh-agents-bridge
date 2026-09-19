@@ -12,7 +12,7 @@
 
 import { describe, expect, it, vi } from 'vitest'
 
-import { API_BASE, ApiError, createBridgeApi, normalizeProbe, normalizeSession, parseEnvelope } from '../../src/client/api.ts'
+import { API_BASE, ApiError, createBridgeApi, normalizeProbe, normalizeSession, normalizeSettings, parseEnvelope } from '../../src/client/api.ts'
 import { sessionPreview } from '../../src/client/util.ts'
 import { API_PREFIX } from '../../src/host/api.ts'
 
@@ -192,6 +192,57 @@ describe('normalizeProbe', () => {
 
   it('filters a non-string model id out of the catalog', () => {
     expect(normalizeProbe({ id: 'x', models: ['a', 3, null, 'b'] })?.models).toEqual(['a', 'b'])
+  })
+})
+
+describe('normalizeSettings', () => {
+  it('carries a choice field\'s option list, filtered to strings, and ONLY for choice fields', () => {
+    // The select is built from `options`; a non-string entry on the wire would
+    // render an unselectable option, so it is dropped like every other list on
+    // this wire. A non-choice field never grows options, whatever the host sends.
+    const view = normalizeSettings({
+      namespace: 'dsh-agents-bridge',
+      writable: true,
+      fields: [
+        {
+          key: 'qoderTransport',
+          kind: 'choice',
+          effect: 'reload',
+          reason: 'decided when the plugin applies',
+          value: 'acp',
+          options: ['stream-json', 'acp', 7, null],
+          overridden: true,
+        },
+        {
+          key: 'defaultCwd',
+          kind: 'string',
+          effect: 'live',
+          reason: 'read on every run',
+          value: '/x',
+          options: ['not-for-text'],
+          overridden: false,
+        },
+      ],
+    })
+    const choice = view.fields.find(field => field.key === 'qoderTransport')
+    expect(choice?.kind).toBe('choice')
+    expect(choice?.options).toEqual(['stream-json', 'acp'])
+    expect(view.fields.find(field => field.key === 'defaultCwd')?.options).toBeUndefined()
+  })
+
+  it('keeps an option-less choice row addressable instead of dropping it', () => {
+    // An older node half that predates the option list still describes the
+    // field; losing the row would hide a knob the deployment does expose. The
+    // card degrades to a select holding only the unset entry.
+    const view = normalizeSettings({
+      namespace: 'dsh-agents-bridge',
+      writable: true,
+      fields: [
+        { key: 'qoderTransport', kind: 'choice', effect: 'reload', reason: 'r', value: undefined, overridden: false },
+      ],
+    })
+    expect(view.fields).toHaveLength(1)
+    expect(view.fields[0]?.options).toBeUndefined()
   })
 })
 

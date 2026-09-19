@@ -49,6 +49,7 @@ const LABELS: Readonly<Record<string, keyof Dict>> = {
   allowedCwd: 'settingsFieldAllowedCwd',
   deniedCwd: 'settingsFieldDeniedCwd',
   allowedAgents: 'settingsFieldAllowedAgents',
+  qoderTransport: 'settingsFieldQoderTransport',
 }
 
 /** Draft text for one field, as the user typed it. */
@@ -214,15 +215,36 @@ export function SettingsFields({ view, drafts, busy, translator, onEdit, onReset
                 onEdit(field.key, event.target.value)
               },
             })
-          : createElement('input', {
-              type: field.kind === 'natural' ? 'number' : 'text',
-              value: drafts[field.key] ?? '',
-              disabled: !view.writable || busy,
-              style: control,
-              onChange: (event: { target: { value: string } }) => {
-                onEdit(field.key, event.target.value)
-              },
-            }),
+          : field.kind === 'choice'
+            ? // A CLOSED value set renders as a select, never as free text: the
+              // node half refuses values outside the option list, so a text box
+              // here would only be a way to type a save that fails. The empty
+              // option means "unset" — save coerces it to a key removal, which
+              // hands the decision back to the deployment config / kernel.
+              createElement(
+                'select',
+                {
+                  value: drafts[field.key] ?? '',
+                  disabled: !view.writable || busy,
+                  style: control,
+                  onChange: (event: { target: { value: string } }) => {
+                    onEdit(field.key, event.target.value)
+                  },
+                },
+                createElement('option', { value: '' }, t('settingsChoiceUnset')),
+                ...(field.options ?? []).map((option) =>
+                  createElement('option', { key: option, value: option }, option),
+                ),
+              )
+            : createElement('input', {
+                type: field.kind === 'natural' ? 'number' : 'text',
+                value: drafts[field.key] ?? '',
+                disabled: !view.writable || busy,
+                style: control,
+                onChange: (event: { target: { value: string } }) => {
+                  onEdit(field.key, event.target.value)
+                },
+              }),
         createElement(
           'span',
           { style: hint },

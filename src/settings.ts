@@ -60,13 +60,21 @@ export { SETTINGS_NAMESPACE }
 /** When a saved value reaches the running plugin. */
 export type SettingEffect = 'live' | 'reload'
 
-/** One editable field — the single source of truth for schema, API and card. */
+/**
+ * One editable field — the single source of truth for schema, API and card.
+ *
+ * `kind: 'choice'` is a CLOSED value set: the card renders a `<select>` and the
+ * write path refuses anything outside {@link SettingField.options}, so a typo
+ * cannot land in the user layer for the next plugin load to trip over.
+ */
 export interface SettingField {
   readonly key: SettingKey
-  readonly kind: 'string' | 'natural' | 'strings'
+  readonly kind: 'string' | 'natural' | 'strings' | 'choice'
   readonly effect: SettingEffect
   /** The `file:line` that decides the effect. Rendered as the field's hint. */
   readonly reason: string
+  /** The accepted values of a `choice` field, in card order. */
+  readonly options?: readonly string[]
 }
 
 /** The editable surface: the composition entry's own policy knobs, nothing new. */
@@ -76,6 +84,13 @@ export interface SettingsShape {
   readonly allowedCwd?: readonly string[]
   readonly deniedCwd?: readonly string[]
   readonly allowedAgents?: readonly string[]
+  /**
+   * Which wire drives the standalone Qoder CN CLI — mirrors
+   * `Config.qoderTransport` in `src/index.ts` (the literal union is restated
+   * here rather than imported because the entry imports THIS module, and the
+   * settings namespace must stay free of an entry-layer import).
+   */
+  readonly qoderTransport?: 'stream-json' | 'acp'
 }
 
 export type SettingKey = keyof SettingsShape
@@ -112,10 +127,24 @@ export const SETTINGS_FIELDS: readonly SettingField[] = [
     effect: 'reload',
     reason: 'snapshotted into the run policy when the manager is built (src/kernel/manager.ts:160-168)',
   },
+  {
+    key: 'qoderTransport',
+    kind: 'choice',
+    options: ['stream-json', 'acp'],
+    effect: 'reload',
+    reason: 'decided when the plugin applies (src/index.ts:362 decideQoderTransport, settings user layer first) — saving it flips the Qoder CLI wire from the next plugin load',
+  },
 ]
 
 /**
  * The namespace schema — deliberately default-free (rule 1 in the module note).
+ *
+ * `qoderTransport` is a CLOSED union rather than a string: an absent key stays
+ * absent (measured: schemastery resolves it to no key at all, so the baseline
+ * comparison in `read()` keeps working). A hand-edited user layer holding a
+ * value outside the pair makes the provider's own resolution throw — the same
+ * treatment every field gets from `resolved()`'s fallback — while the port's
+ * write path refuses such values before they are ever stored.
  */
 export const SETTINGS_SCHEMA = z.object({
   defaultCwd: z.string(),
@@ -123,6 +152,7 @@ export const SETTINGS_SCHEMA = z.object({
   allowedCwd: z.array(z.string()),
   deniedCwd: z.array(z.string()),
   allowedAgents: z.array(z.string()),
+  qoderTransport: z.union(['stream-json', 'acp']),
 })
 
 /** One field as a form sees it. */
@@ -264,6 +294,20 @@ function coerceField(field: SettingField, raw: unknown): unknown {
         .filter((entry) => entry !== '')
       return list.length === 0 ? undefined : list
     }
+    case 'choice': {
+      // Normalised the SAME way the config/env doors are (`decideQoderTransport`
+      // in src/index.ts trims and lowercases both), so a hand-written patch
+      // writing `ACP` selects acp instead of failing on case alone.
+      const value = String(raw).trim().toLowerCase()
+      if (value === '') return undefined
+      const options = field.options ?? []
+      if (!options.includes(value)) {
+        throw new Error(
+          `${field.key} must be one of: ${options.join(', ')} (got ${JSON.stringify(raw)})`,
+        )
+      }
+      return value
+    }
   }
 }
 
@@ -275,6 +319,7 @@ export function settingsEntryFrom(options: Partial<SettingsShape>): SettingsShap
     ...(options.allowedCwd === undefined ? {} : { allowedCwd: [...options.allowedCwd] }),
     ...(options.deniedCwd === undefined ? {} : { deniedCwd: [...options.deniedCwd] }),
     ...(options.allowedAgents === undefined ? {} : { allowedAgents: [...options.allowedAgents] }),
+    ...(options.qoderTransport === undefined ? {} : { qoderTransport: options.qoderTransport }),
   }
 }
 
@@ -289,6 +334,13 @@ export function settingsEntryFrom(options: Partial<SettingsShape>): SettingsShap
 function applyTo(options: MutableManagerOptions, values: SettingsShape): void {
   const mutable = options as Record<string, unknown>
   for (const field of SETTINGS_FIELDS) {
+    // `qoderTransport` is the one field this namespace owns that is NOT a
+    // manager option: `apply()` reads it from the plugin CONFIG and decides the
+    // descriptor override with it (src/index.ts:362), so there is nothing on
+    // this object to keep in step — writing it here would plant a key no kernel
+    // code reads, which is exactly the "switch that lies about being live" this
+    // module exists to prevent. Its declared effect is `reload`.
+    if (field.key === 'qoderTransport') continue
     const value = values[field.key]
     if (value === undefined) delete mutable[field.key]
     else mutable[field.key] = field.kind === 'strings' ? [...(value as readonly string[])] : value

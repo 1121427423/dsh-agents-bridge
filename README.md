@@ -138,6 +138,7 @@ agents-bridge:
 | `maxConcurrent` | 正整数 | 下次加载（构造 manager 时快照进运行策略，`manager.ts:160-168`） | 同时运行的会话上限，超了直接拒绝、不排队 |
 | `allowedCwd` / `deniedCwd` | 字符串列表 | 下次加载 | `cwd` 白名单 / 黑名单（`realpath` 后比较） |
 | `allowedAgents` | 字符串列表 | 下次加载 | 允许被驱动的身份白名单 |
+| `qoderTransport` | `stream-json` \| `acp`（下拉） | 下次加载（`apply()` 时决定描述符覆盖，`src/index.ts:297`） | 独立 Qoder CN CLI 走哪根线；未选的那一行在 `agents_probe` 里显示 `unsupported` 及理由 |
 
 几条刻意的规矩：
 
@@ -183,7 +184,7 @@ agents-bridge:
 - **AutoClaw 走 `openclaw.mjs` + `interpreter`**：`/Applications/AutoClaw.app/Contents/Resources/gateway/openclaw/openclaw.mjs agent --local --json …`。若 app 自带引擎起不来（例如缺 `~/.openclaw/openclaw.json`），退到 PATH 版身份 `openclaw`；再不行就是它的 gateway HTTP API（P4 的 `connect` 模式，v1 只留字段）。
 - **`connect` 模式未实现**：`mode` 参数收 `spawn` | `connect`，但只有 `spawn` 有实现。拨已运行实例（openclaw gateway / WorkBuddy sidecar）是 P4。
 - **ACP driver 已实现（D27）**：`ProtocolFamily += 'acp'`（ABI v4）+ `src/drivers/acp.ts` + CLI 轨道身份 `codebuddy-code-acp`（真机 2.151.0 端到端跑通）。一条 ACP entry 解锁 multica 里 12 家说 ACP 的 CLI。
-- **Qoder CN CLI 默认改走 headless stream-json（D46）**：Qoder 的 ACP `session/prompt` 目前对所有客户端回上游 500（用 multica 自己的调用序列逐字复现，属服务端故障），而同一个二进制的 `-p --output-format stream-json` 正常。于是 CLI 轨多了一条 `qoderclicn-print` 并**默认选中它**；既有的 ACP 行 `qoderclicn` 与桌面行 `qoder-cn` 都**保留**，只是未选中的那条 `agents_probe` 会报 `available: false` 并**在理由里写明是哪个开关关掉它的**（不是静默消失）。切换：插件配置 `qoderTransport: 'acp'`，或环境变量 `DSH_AGENTS_BRIDGE_QODER_TRANSPORT=acp`。另注：该 CLI 的会话库**按项目(cwd)分库**，所以 `--resume` 只在同一 cwd 下成立。
+- **Qoder CN CLI 默认改走 headless stream-json（D46）**：Qoder 的 ACP `session/prompt` 目前对所有客户端回上游 500（用 multica 自己的调用序列逐字复现，属服务端故障），而同一个二进制的 `-p --output-format stream-json` 正常。于是 CLI 轨多了一条 `qoderclicn-print` 并**默认选中它**；既有的 ACP 行 `qoderclicn` 与桌面行 `qoder-cn` 都**保留**，只是未选中的那条 `agents_probe` 会报 `available: false` 并**在理由里写明是哪个开关关掉它的**（不是静默消失）。切换：插件配置 `qoderTransport: 'acp'`、环境变量 `DSH_AGENTS_BRIDGE_QODER_TRANSPORT=acp`，或在「设置 → 插件」的下拉里选（写进 settings.yaml 的 `dsh-agents-bridge:` 用户层，见 §4.1）。三扇门有优先级：**设置用户层 > 插件配置 > 环境变量**（用户层压过部署配置，与本命名空间其余字段的分层一致）；开关在插件每次**加载时**决定一次，所以面板上改完要等下一次插件加载才翻转。另注：该 CLI 的会话库**按项目(cwd)分库**，所以 `--resume` 只在同一 cwd 下成立。
 - **`agents_usage` 的 token 记账规则**：`totalTokens` **只加四个互斥桶**（input / output / cache read / cache write）。`reasoningTokens` 是**披露项不是桶** —— codex 把它报成 `output_tokens` 的**子集**，加进去就是重复计数，所以它单列并标注「已含在 output 内」。同一个会话没有终态结果时用量按 0 计并标 `usageReported: false`，零不能被读成「这次没花钱」。
 - **安全**：spawn 任意 CLI = 任意代码执行。这仍然是**设计前提**，没有变：v1 依赖 DSH 自身的 approval / sandbox 语义。P2 补上的是 `cwd` / agent 白名单与并发上限（§4.2），它们的作用域是「防误操作」——防止模型手滑把 `cwd` 指到 `/`、或一次点起十几个 agent 树把机器打死。它们**不是**沙箱：被委派的 agent 一旦拿到写文件的工具，仍然可以走出 `cwd`；真正拦这件事的只有 OS 层的 approval / sandbox。注意被委派的 agent **看不到本对话**，prompt 必须自包含（系统提示段已告知模型）。
 

@@ -789,4 +789,67 @@ describe('SettingsFields — the expanded body keeps every field', () => {
     expect(text).toContain('brandNewKnob')
     expect(text).toContain('added by the Node half')
   })
+
+  it('renders a choice field as a select over EXACTLY its options, never free text', () => {
+    // A closed value set as a text box would only be a way to type a save the
+    // node half refuses; the select is the honest control (D46 settings knob).
+    const choiceView: ClientSettingsView = {
+      namespace: SETTINGS_NAMESPACE,
+      writable: true,
+      fields: [
+        {
+          key: 'qoderTransport',
+          kind: 'choice',
+          effect: 'reload',
+          reason: 'decided when the plugin applies',
+          value: 'stream-json',
+          options: ['stream-json', 'acp'],
+          overridden: true,
+        },
+      ],
+    }
+    const edited: [string, string][] = []
+    const tree = fields({
+      view: choiceView,
+      drafts: { qoderTransport: 'stream-json' },
+      onEdit: (key, value) => {
+        edited.push([key, value])
+      },
+    })
+    const selects = findAll(tree, 'select')
+    expect(selects).toHaveLength(1)
+    const select = selects[0] as (typeof selects)[number]
+    // The draft mirrors the stored value, and the choices are EXACTLY the
+    // option list plus one "unset" entry (value '' = clear on save).
+    expect(select.props.value).toBe('stream-json')
+    const options = findAll(tree, 'option').map(option => option.props.value)
+    expect(options).toEqual(['', 'stream-json', 'acp'])
+    // The label is localized copy, not the raw key.
+    expect(textOf(tree)).toContain('Qoder CLI 传输方式')
+    // Changing the select edits the draft under the field's key.
+    ;(select.props.onChange as (event: unknown) => void)({ target: { value: 'acp' } })
+    expect(edited).toEqual([['qoderTransport', 'acp']])
+  })
+
+  it('disables the choice select on a read-only deployment, like every other control', () => {
+    const tree = fields({
+      view: {
+        namespace: SETTINGS_NAMESPACE,
+        writable: false,
+        fields: [
+          {
+            key: 'qoderTransport',
+            kind: 'choice',
+            effect: 'reload',
+            reason: 'decided when the plugin applies',
+            value: undefined,
+            options: ['stream-json', 'acp'],
+            overridden: false,
+          },
+        ],
+      },
+    })
+    const select = findAll(tree, 'select')[0] as { props: { disabled?: boolean } }
+    expect(select.props.disabled).toBe(true)
+  })
 })

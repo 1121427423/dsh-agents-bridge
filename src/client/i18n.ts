@@ -133,6 +133,9 @@ export interface Dict {
   readonly settingsFieldAllowedCwd: string
   readonly settingsFieldDeniedCwd: string
   readonly settingsFieldAllowedAgents: string
+  readonly settingsFieldQoderTransport: string
+  /** The empty option of a `choice` field: follow the deployment config. */
+  readonly settingsChoiceUnset: string
 }
 
 /** Simplified Chinese. */
@@ -229,6 +232,8 @@ const zh: Dict = {
   settingsFieldAllowedCwd: '允许的工作目录白名单',
   settingsFieldDeniedCwd: '禁止的工作目录',
   settingsFieldAllowedAgents: '允许的 agent 白名单',
+  settingsFieldQoderTransport: 'Qoder CLI 传输方式',
+  settingsChoiceUnset: '（跟随部署配置）',
 }
 
 /** English. */
@@ -325,6 +330,8 @@ const en: Dict = {
   settingsFieldAllowedCwd: 'Allowed working directories',
   settingsFieldDeniedCwd: 'Denied working directories',
   settingsFieldAllowedAgents: 'Allowed agent ids',
+  settingsFieldQoderTransport: 'Qoder CLI transport',
+  settingsChoiceUnset: '(follow deployment config)',
 }
 
 /** Both dictionaries, keyed by the locale tag the host uses. */
