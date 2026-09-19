@@ -134,7 +134,12 @@ export function createAcpResidentPool(options: AcpResidentPoolOptions): AcpResid
     entry.lastUsedAt = now()
     entry.inUse = false
     if (entry.dead) {
-      entries.delete(entry.key)
+      // Only remove the slot when it still holds THIS entry: an eviction
+      // (`dispose()` tears down in-use entries too) may already have dropped
+      // it, after which a later run can have parked a REPLACEMENT under the
+      // same key. An unconditional delete would then erase the healthy parked
+      // process — invisible to `dispose()` and to idle eviction ever after.
+      if (entries.get(entry.key) === entry) entries.delete(entry.key)
       return
     }
     const parked = entries.get(entry.key)

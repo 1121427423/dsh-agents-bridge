@@ -8,6 +8,9 @@
  * so it must be asserted against real pipes and a real pid, not a mock.
  */
 import { spawn as nodeSpawn } from 'node:child_process'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { afterEach, describe, expect, it } from 'vitest'
@@ -355,20 +358,33 @@ describe('acp resident pool', () => {
 
     const pids: number[] = []
     // Two DIFFERENT cwds produce two pool keys, so two processes stay parked.
-    const cwds = ['/tmp', '/private/tmp']
-    for (let i = 0; i < cwds.length; i++) {
-      const handle = await backend.run(makeRun({ prompt: `run ${i}`, cwd: cwds[i] }), makeDeps(), new AbortController().signal)
-      const result = await handle.done
-      expect(result.status).toBe('completed')
-      if (handle.pid !== undefined) pids.push(handle.pid)
-    }
-    expect(pool.size).toBe(2)
+    // Two REAL temp directories rather than a hardcoded pair: the previous
+    // `['/tmp', '/private/tmp']` only exists on macOS (`/private/tmp` is the
+    // darwin realpath side of `/tmp`), so on Linux the second spawn died with
+    // ENOENT and the whole suite went red off-platform.
+    const cwds = [
+      fs.mkdtempSync(path.join(os.tmpdir(), 'acp-resident-a-')),
+      fs.mkdtempSync(path.join(os.tmpdir(), 'acp-resident-b-')),
+    ]
+    try {
+      for (let i = 0; i < cwds.length; i++) {
+        const handle = await backend.run(makeRun({ prompt: `run ${i}`, cwd: cwds[i] }), makeDeps(), new AbortController().signal)
+        const result = await handle.done
+        expect(result.status).toBe('completed')
+        if (handle.pid !== undefined) pids.push(handle.pid)
+      }
+      expect(pool.size).toBe(2)
 
-    await pool.dispose()
-    expect(pool.size).toBe(0)
-    for (const pid of pids) {
-      leftoverPids.push(pid)
-      expect(await waitForPidGone(pid)).toBe(true)
+      await pool.dispose()
+      expect(pool.size).toBe(0)
+      for (const pid of pids) {
+        leftoverPids.push(pid)
+        expect(await waitForPidGone(pid)).toBe(true)
+      }
+    } finally {
+      for (const cwd of cwds) {
+        fs.rmSync(cwd, { recursive: true, force: true })
+      }
     }
   })
 

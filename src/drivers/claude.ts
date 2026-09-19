@@ -1233,7 +1233,8 @@ export async function runStreamJsonFamily(
     if (status === 'completed' && state.sawAsyncLaunch) {
       status = 'failed'
       errMsg = `${label} launched an async background task; bridge-managed runs require foreground execution`
-    }    if (status !== 'completed' && stderrTail.value.trim() !== '') {
+    }
+    if (status !== 'completed' && stderrTail.value.trim() !== '') {
       errMsg = `${errMsg}: ${stderrTail.value.trim()}`
     }
 

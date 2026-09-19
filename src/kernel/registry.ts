@@ -44,7 +44,6 @@ import type {
   CommandSpec,
   ProbeResult,
 } from './types.ts'
-import { childLogger } from './logger.ts'
 import { buildCommandLine } from './command-line.ts'
 import { signalProcessGroup } from './spawn.ts'
 import { BUILTIN_DESCRIPTORS, policyFor, type TrackPolicyOptions } from '../tracks/index.ts'
@@ -758,15 +757,6 @@ export function createRegistry(options: RegistryOptions = {}): AgentRegistry {
   }
 }
 
-function notFoundReason(
-  what: 'executable' | 'interpreter',
-  raw: string,
-  prefix: string | undefined,
-): string {
-  const hint = prefix ? ` (set ${prefix}_PATH to override)` : ''
-  return `${what} not found or not executable: ${raw}${hint}`
-}
-
 /** Child environment: host env plus the descriptor's fixed extras. */
 function collectEnv(
   descriptor: AgentDescriptor | undefined,
@@ -778,12 +768,4 @@ function collectEnv(
   }
   for (const [key, value] of Object.entries(descriptor?.command.env ?? {})) merged[key] = value
   return merged
-}
-
-/** Convenience for embedders that only need a logger-attached registry. */
-export function createRegistryWithLogger(
-  logger: BridgeLogger | undefined,
-  options: Omit<RegistryOptions, 'logger'> = {},
-): AgentRegistry {
-  return createRegistry({ ...options, ...(logger ? { logger: childLogger(logger, 'registry') } : {}) })
 }

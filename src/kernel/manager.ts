@@ -93,8 +93,13 @@ const ORPHAN_CLOCK_SLACK_MS = 5_000
  * for "no output while thinking" killed every healthy tool call longer than
  * five minutes. Both tables MUST move together: if only the driver's did, this
  * outer watchdog would still reap the run at the old threshold.
+ *
+ * EXPORTED for exactly one consumer: the consistency test that asserts this
+ * table and the drivers' per-family defaults never drift apart
+ * (`tests/kernel/manager-idle-consistency.test.ts`). The kernel itself still
+ * reads it through {@link defaultIdleMs} below.
  */
-const DEFAULT_IDLE_TIMEOUT_MS: Readonly<Record<ProtocolFamily, number>> = {
+export const MANAGER_DEFAULT_IDLE_TIMEOUT_MS: Readonly<Record<ProtocolFamily, number>> = {
   claude: 1_800_000,
   codebuddy: 1_800_000,
   // Must equal `DEFAULT_IDLE_TIMEOUT_MS.qoderclicn` in src/drivers/argv.ts (D46):
@@ -113,7 +118,7 @@ const DEFAULT_IDLE_TIMEOUT_MS: Readonly<Record<ProtocolFamily, number>> = {
 }
 
 function defaultIdleMs(family: ProtocolFamily): number {
-  return DEFAULT_IDLE_TIMEOUT_MS[family] ?? 300_000
+  return MANAGER_DEFAULT_IDLE_TIMEOUT_MS[family] ?? 300_000
 }
 
 type TerminalStatus = Exclude<AgentRunStatus, 'running'>
