@@ -1762,6 +1762,16 @@ function nextSessionId(at: number): string {
  * directories — the ACP session's `cwd` is fixed at `session/new`, so a pooled
  * process must never serve a run whose cwd differs from the one it was created
  * with.
+ *
+ * The raw string is deliberately NOT `realpath`-normalized here: on every real
+ * wiring path the cwd has already been resolved by `checkCwd`
+ * (`kernel/policy.ts`), so alias spellings (`/tmp` vs `/private/tmp` on
+ * macOS) cannot reach this function as two keys. Normalizing again here would
+ * be a second filesystem round trip per run for no gain. The failure mode for
+ * a direct caller that skips the kernel is over-parking (one idle process per
+ * spelling, reaped by the idle timeout), never two runs sharing a process
+ * rooted in different real directories — key equality on raw strings still
+ * implies real-directory equality.
  */
 export function residentKey(agentId: string, cwd: string): string {
   return `${agentId}::${cwd}`
